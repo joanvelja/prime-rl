@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import gc
 import multiprocessing as mp
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,7 @@ from prime_rl.orchestrator.trajectories import (
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
 from prime_rl.utils.pathing import get_log_dir
+from prime_rl.utils.usage_reporter import UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
 monkey_patch_oai_iterable_types()
@@ -110,6 +112,10 @@ async def orchestrate(config: OrchestratorConfig):
     for env_id in env_ids_to_install:
         install_env(env_id)
 
+    run_id = os.getenv("RUN_ID", "")
+    if run_id:
+        config.client.headers["X-Run-Id"] = run_id
+
     # Setup rollout inference pool (handles both static and elastic modes)
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
@@ -158,6 +164,9 @@ async def orchestrate(config: OrchestratorConfig):
         tokenizer=tokenizer,
         run_config=config,
     )
+
+    from prime_rl.utils.usage_reporter import UsageConfig
+    usage_reporter = UsageReporter(config.usage or UsageConfig.from_env())
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)
     heart = None
@@ -815,6 +824,14 @@ async def orchestrate(config: OrchestratorConfig):
             step=progress.step,
         )
 
+        if usage_reporter.is_enabled and run_id:
+            usage_reporter.report_inference_usage(
+                run_id=run_id,
+                step=progress.step,
+                input_tokens=num_prefill_tokens,
+                output_tokens=num_decode_tokens,
+            )
+
         reward_mean = by_example.reward.mean().mean()
         val_reward_str = ""
         if val_results_df is not None:
@@ -888,6 +905,8 @@ async def orchestrate(config: OrchestratorConfig):
     # Shutdown env processes (also registered as atexit handler for crash safety)
     atexit.unregister(_cleanup_env_processes)
     _cleanup_env_processes()
+
+    usage_reporter.close()
 
     logger.success("Orchestrator finished.")
 
