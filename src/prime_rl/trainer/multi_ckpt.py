@@ -89,6 +89,10 @@ class MultiCheckpointManager:
         self._dataloader = dataloader
         self._usage_reporter = UsageReporter(usage_config)
 
+    def close_usage_reporter(self) -> None:
+        if self._usage_reporter is not None:
+            self._usage_reporter.close()
+
     def _run_deletion_hook(self, idx: int, run_id: str) -> None:
         self.managers[idx] = None
 

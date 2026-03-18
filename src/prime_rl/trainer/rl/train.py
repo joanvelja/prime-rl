@@ -210,6 +210,7 @@ def train(config: TrainerConfig):
 
     if config.max_concurrent_runs > 1:
         from prime_rl.utils.usage_reporter import UsageConfig
+
         ckpt_manager.set_usage_reporting(dataloader, config.usage or UsageConfig.from_env())
 
     logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'})")
@@ -626,6 +627,9 @@ def train(config: TrainerConfig):
         logger.info("Writing final weight checkpoint")
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
+
+    if config.max_concurrent_runs > 1 and hasattr(ckpt_manager, "close_usage_reporter"):
+        ckpt_manager.close_usage_reporter()
 
     logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
     logger.success("RL trainer finished!")
