@@ -198,9 +198,7 @@ def get_load_balance_stats(
             continue
         tokens_per_expert: torch.Tensor = block_mlp.tokens_per_expert
         if try_to_avoid_padding_experts:
-            tokens_per_expert = tokens_per_expert.sort(dim=0, descending=True).values[
-                block_mlp.router.top_k :
-            ]
+            tokens_per_expert = tokens_per_expert.sort(dim=0, descending=True).values[block_mlp.router.top_k :]
         balanced_load = tokens_per_expert.mean()
         max_vio = (tokens_per_expert.max() - balanced_load) / balanced_load
         per_layer_max_vio.append(max_vio.item())
@@ -454,9 +452,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         if next_transformer_block is not None:
             next_mlp = getattr(next_transformer_block, "mlp", None)
             if next_mlp is not None and isinstance(next_mlp, (MoE, LatentMoE)):
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_mlp.experts]
-                )
+                transformer_block.set_modules_to_forward_prefetch([next_transformer_block, next_mlp.experts])
             else:
                 transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif language_model.norm is not None and model.lm_head is not None:
@@ -477,9 +473,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         if prev_transformer_block is not None:
             prev_mlp = getattr(prev_transformer_block, "mlp", None)
             if prev_mlp is not None and isinstance(prev_mlp, (MoE, LatentMoE)):
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_mlp.experts]
-                )
+                transformer_block.set_modules_to_backward_prefetch([prev_transformer_block, prev_mlp.experts])
             else:
                 transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif embed_module is not None:

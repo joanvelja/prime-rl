@@ -59,7 +59,8 @@ def _convert_hf_moe_layer_to_prime(state_dict: dict[str, Tensor], prefix: str):
     # Experts: check if stored as individual weights (experts.{i}.up_proj.weight)
     # or fused 3D tensors (experts.up_proj)
     individual_keys = [
-        k for k in state_dict
+        k
+        for k in state_dict
         if k.startswith(f"{mixer}experts.") and k[len(f"{mixer}experts.") :].split(".")[0].isdigit()
     ]
 
