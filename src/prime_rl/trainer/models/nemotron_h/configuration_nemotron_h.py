@@ -219,7 +219,8 @@ class NemotronHConfig(PretrainedConfig):
 
     @num_hidden_layers.setter
     def num_hidden_layers(self, value):
-        pass
+        if value is not None and value < len(self.layers_block_type):
+            self.layers_block_type = self.layers_block_type[:value]
 
 
 __all__ = ["NemotronHConfig"]

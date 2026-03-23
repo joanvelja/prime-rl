@@ -600,7 +600,6 @@ class NemotronHRouter(nn.Module):
         if self.norm_topk_prob:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
-        top_scores = top_scores * self.routed_scaling_factor
 
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.reshape(-1).float(),
@@ -680,6 +679,7 @@ class LatentMoE(nn.Module):
             self.fc1_latent_proj = nn.Identity()
             self.fc2_latent_proj = nn.Identity()
 
+        self.routed_scaling_factor = routed_scaling_factor
         self.load_balance_coeff = load_balance_coeff
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
@@ -717,10 +717,13 @@ class LatentMoE(nn.Module):
         # Apply latent projection before expert computation
         routed_input = self.fc1_latent_proj(routed_input)
 
-        # Apply scores before expert computation
-        routed_input = (routed_input.float() * top_scores_experts_sorted.reshape(-1, 1)).to(routed_input.dtype)
-
         routed_output = self.experts(routed_input, num_tokens_per_expert)
+
+        # Apply scores after expert computation (matches vLLM's fused kernel behavior)
+        routed_output = (routed_output.float() * top_scores_experts_sorted.reshape(-1, 1)).to(routed_output.dtype)
+
+        # Apply routed_scaling_factor after expert output
+        routed_output = routed_output * self.routed_scaling_factor
 
         # Project back from latent space
         routed_output = self.fc2_latent_proj(routed_output)

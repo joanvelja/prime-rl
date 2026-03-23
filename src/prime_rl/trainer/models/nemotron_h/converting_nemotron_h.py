@@ -1,18 +1,20 @@
 """Weight conversion between HuggingFace and PrimeRL formats for NemotronH.
 
 HF NemotronH uses a unified `mixer` attribute for all layer types:
-  - Mamba layers: layers.{i}.mixer.{in_proj, conv1d, ...}
-  - Attention layers: layers.{i}.mixer.{q_proj, k_proj, v_proj, o_proj}
-  - MoE layers: layers.{i}.mixer.{gate, experts, shared_experts, fc1_latent_proj, fc2_latent_proj}
+  - Mamba layers: backbone.layers.{i}.mixer.{in_proj, conv1d, ...}
+  - Attention layers: backbone.layers.{i}.mixer.{q_proj, k_proj, v_proj, o_proj}
+  - MoE layers: backbone.layers.{i}.mixer.{gate, experts, shared_experts, fc1_latent_proj, fc2_latent_proj}
 
 PrimeRL separates these into distinct namespaces:
-  - Mamba layers: layers.{i}.mamba.*
-  - Attention layers: layers.{i}.self_attn.*
-  - MoE layers: layers.{i}.mlp.{router, experts, shared_expert, fc1_latent_proj, fc2_latent_proj}
+  - Mamba layers: model.layers.{i}.mamba.*
+  - Attention layers: model.layers.{i}.self_attn.*
+  - MoE layers: model.layers.{i}.mlp.{router, experts, shared_expert, fc1_latent_proj, fc2_latent_proj}
 
 Global renames:
-  - HF: model.embeddings.weight <-> PrimeRL: model.embed_tokens.weight
-  - HF: model.norm_f.weight <-> PrimeRL: model.norm.weight
+  - HF: backbone.embeddings.weight <-> PrimeRL: model.embed_tokens.weight
+  - HF: backbone.norm_f.weight <-> PrimeRL: model.norm.weight
+  - HF uses "backbone." prefix, PrimeRL uses "model." prefix
+  - HF mtp.* keys (multi-token prediction) are dropped during conversion
 """
 
 import torch
@@ -54,11 +56,28 @@ def _convert_hf_moe_layer_to_prime(state_dict: dict[str, Tensor], prefix: str):
     if f"{mixer}gate.e_score_correction_bias" in state_dict:
         state_dict[f"{mlp}router.e_score_correction_bias"] = state_dict.pop(f"{mixer}gate.e_score_correction_bias")
 
-    # Experts: up_proj -> w1, down_proj -> w2 (already 3D tensors in HF)
-    if f"{mixer}experts.up_proj" in state_dict:
-        state_dict[f"{mlp}experts.w1"] = state_dict.pop(f"{mixer}experts.up_proj")
-    if f"{mixer}experts.down_proj" in state_dict:
-        state_dict[f"{mlp}experts.w2"] = state_dict.pop(f"{mixer}experts.down_proj")
+    # Experts: check if stored as individual weights (experts.{i}.up_proj.weight)
+    # or fused 3D tensors (experts.up_proj)
+    individual_keys = [
+        k for k in state_dict
+        if k.startswith(f"{mixer}experts.") and k[len(f"{mixer}experts.") :].split(".")[0].isdigit()
+    ]
+
+    if individual_keys:
+        expert_indices = sorted({int(k[len(f"{mixer}experts.") :].split(".")[0]) for k in individual_keys})
+
+        up_projs = [state_dict.pop(f"{mixer}experts.{i}.up_proj.weight") for i in expert_indices]
+        state_dict[f"{mlp}experts.w1"] = torch.stack(up_projs)
+
+        down_projs = [state_dict.pop(f"{mixer}experts.{i}.down_proj.weight") for i in expert_indices]
+        state_dict[f"{mlp}experts.w2"] = torch.stack(down_projs)
+    else:
+        # Fused 3D tensors
+        if f"{mixer}experts.up_proj" in state_dict:
+            state_dict[f"{mlp}experts.w1"] = state_dict.pop(f"{mixer}experts.up_proj")
+        if f"{mixer}experts.down_proj" in state_dict:
+            state_dict[f"{mlp}experts.w2"] = state_dict.pop(f"{mixer}experts.down_proj")
+
     # Dummy w3 required by @expert_parallel decorator compatibility
     device = state_dict[f"{mlp}experts.w1"].device if f"{mlp}experts.w1" in state_dict else "cpu"
     state_dict[f"{mlp}experts.w3"] = torch.empty(0, device=device)
@@ -99,11 +118,15 @@ def _convert_prime_moe_layer_to_hf(state_dict: dict[str, Tensor], prefix: str):
     if f"{mlp}router.e_score_correction_bias" in state_dict:
         state_dict[f"{mixer}gate.e_score_correction_bias"] = state_dict.pop(f"{mlp}router.e_score_correction_bias")
 
-    # Experts
+    # Experts: unstack fused 3D tensors into individual expert weights
     if f"{mlp}experts.w1" in state_dict:
-        state_dict[f"{mixer}experts.up_proj"] = state_dict.pop(f"{mlp}experts.w1")
+        w1 = state_dict.pop(f"{mlp}experts.w1")
+        for i in range(w1.shape[0]):
+            state_dict[f"{mixer}experts.{i}.up_proj.weight"] = w1[i]
     if f"{mlp}experts.w2" in state_dict:
-        state_dict[f"{mixer}experts.down_proj"] = state_dict.pop(f"{mlp}experts.w2")
+        w2 = state_dict.pop(f"{mlp}experts.w2")
+        for i in range(w2.shape[0]):
+            state_dict[f"{mixer}experts.{i}.down_proj.weight"] = w2[i]
     # Remove dummy w3 (not present in HF format)
     state_dict.pop(f"{mlp}experts.w3", None)
 
@@ -117,6 +140,13 @@ def _convert_prime_moe_layer_to_hf(state_dict: dict[str, Tensor], prefix: str):
 
 def convert_hf_to_prime(state_dict: dict[str, Tensor], layers_block_type: list[str]):
     """Convert full model from HF to PrimeRL format in-place."""
+    # Handle backbone.* -> model.* prefix (HF NemotronH uses "backbone" instead of "model")
+    _rename_keys(state_dict, "backbone.", "model.")
+
+    # Drop multi-token prediction keys (not used in training)
+    for key in [k for k in state_dict if k.startswith("mtp.")]:
+        del state_dict[key]
+
     # Global renames
     if "model.embeddings.weight" in state_dict:
         state_dict["model.embed_tokens.weight"] = state_dict.pop("model.embeddings.weight")
@@ -137,3 +167,6 @@ def convert_prime_to_hf(state_dict: dict[str, Tensor], layers_block_type: list[s
 
     for i, layer_type in enumerate(layers_block_type):
         convert_prime_layer_to_hf(state_dict, i, layer_type)
+
+    # Rename model.* -> backbone.* (HF checkpoint uses "backbone" prefix)
+    _rename_keys(state_dict, "model.", "backbone.")
