@@ -162,33 +162,30 @@ class SFTDataset(StatefulIterableDataset):
         if self.tokenizer is None:
             return example
 
-        def resolve_messages(example: dict) -> tuple[list[dict], list[dict]]:
+        def resolve_messages(example: dict) -> list[dict]:
             # `messages` takes precedence over explicit split fields and is interpreted
             # as a whole-chat training sample with an empty prompt.
             if "messages" in example:
-                return [], normalize_messages(example["messages"], default_role="assistant")
-
-            if "prompt" not in example or "completion" not in example:
-                raise ValueError(
-                    "All examples in the dataset must have either a 'messages' column "
-                    "or both 'prompt' and 'completion' columns for SFT"
+                messages = normalize_messages(example["messages"], default_role="assistant")
+            else:
+                if "prompt" not in example or "completion" not in example:
+                    raise ValueError(
+                        "All examples in the dataset must have either a 'messages' column "
+                        "or both 'prompt' and 'completion' columns for SFT"
+                    )
+                messages = normalize_messages(example["prompt"], default_role="user") + normalize_messages(
+                    example["completion"], default_role="assistant"
                 )
 
-            return (
-                normalize_messages(example["prompt"], default_role="user"),
-                normalize_messages(example["completion"], default_role="assistant"),
-            )
+            # Deserialize tool call arguments from message list, if present - assumes OAI format
+            # Reference: https://platform.openai.com/docs/guides/function-calling#handling-function-calls
+            messages = deserialize_tool_calls(messages)
 
-        # Deserialize tool call arguments from message list, if present - assumes OAI format
-        # Reference: https://platform.openai.com/docs/guides/function-calling#handling-function-calls
-        prompt, completion = resolve_messages(example)
-        prompt = deserialize_tool_calls(prompt)
-        completion = deserialize_tool_calls(completion)
+            # Strip content from all messages so that incremental tokenization works
+            # NOTE: This has the side effect that we do never train on leading or trailing whitespace
+            return strip_message_content(messages)
 
-        # Strip content from all messages so that incremental tokenization works
-        # NOTE: This has the side effect that we do never train on leading or trailing whitespace
-        prompt = strip_message_content(prompt)
-        completion = strip_message_content(completion)
+        messages = resolve_messages(example)
 
         # Parse available tools, if present - assumes OAI format
         # Reference: https://platform.openai.com/docs/guides/function-calling#function-tool-example
@@ -210,7 +207,7 @@ class SFTDataset(StatefulIterableDataset):
 
         input_ids, loss_mask = build_incremental_token_mask(
             self.tokenizer,
-            prompt + completion,
+            messages,
             role_to_mask=should_mask,
             tools=tools,
             chat_template_kwargs=example.get("chat_template_kwargs", {}),
