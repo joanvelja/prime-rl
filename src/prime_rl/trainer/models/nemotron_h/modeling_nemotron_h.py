@@ -31,12 +31,58 @@ from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import (
 
 logger = logging.get_logger(__name__)
 
+_patch_applied = False
+
+
+def _patch_mamba2_use_triton_ssd():
+    """Patch NemotronHMamba2Mixer to use mamba_ssm Triton SSD kernels.
+
+    The HF torch_forward computes softplus in model dtype (bf16), while vLLM's
+    Triton kernels and mamba_ssm use fp32. This causes ~0.4 KL divergence.
+
+    This patch makes the mixer use mamba_chunk_scan_combined (Triton, fp32
+    softplus) for the SSD computation, with PyTorch nn.Conv1d for convolution.
+    Requires mamba_ssm installed; causal_conv1d should NOT be installed (it
+    needs arch-specific CUDA compilation). The HF cuda_kernels_forward
+    already falls back to PyTorch nn.Conv1d when causal_conv1d is absent.
+    """
+    global _patch_applied
+    if _patch_applied:
+        return
+
+    if not torch.cuda.is_available():
+        logger.warning_once("CUDA not available; NemotronH Mamba layers will use torch_forward (bf16 softplus)")
+        return
+
+    from mamba_ssm.ops.triton.ssd_combined import (
+        mamba_chunk_scan_combined as _mamba_chunk_scan_combined,
+    )
+
+    if _mamba_chunk_scan_combined is None:
+        logger.warning_once("mamba_ssm not available; NemotronH Mamba layers will use torch_forward (bf16 softplus)")
+        return
+
+    def _patched_forward(self, hidden_states, cache_params=None, attention_mask=None):
+        if "cuda" in self.in_proj.weight.device.type:
+            # Disable fused training path (needs causal_conv1d CUDA extension)
+            orig = self.use_mem_eff_path
+            self.use_mem_eff_path = False
+            result = self.cuda_kernels_forward(hidden_states, cache_params, attention_mask)
+            self.use_mem_eff_path = orig
+            return result
+        return self.torch_forward(hidden_states, cache_params, attention_mask)
+
+    NemotronHMamba2Mixer.forward = _patched_forward
+    _patch_applied = True
+    logger.info("Patched NemotronHMamba2Mixer to use mamba_ssm Triton SSD kernels")
+
 
 class NemotronHMambaLayer(GradientCheckpointingLayer):
     """Mamba-2 SSM layer: norm -> NemotronHMamba2Mixer -> residual."""
 
     def __init__(self, config: NemotronHConfig, layer_idx: int):
         super().__init__()
+        _patch_mamba2_use_triton_ssd()
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
         self.mamba = NemotronHMamba2Mixer(config, layer_idx=layer_idx)
         self.mlp = None  # No MoE in this layer type

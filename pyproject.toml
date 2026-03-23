@@ -56,6 +56,9 @@ flash-attn-3 = [
 flash-attn-cute = [
     "flash-attn-cute",
 ]
+mamba-ssm = [
+    "mamba-ssm>=2.3.0",
+]
 envs = [
     "reverse-text",
     "alphabet-sort",
