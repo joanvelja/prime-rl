@@ -56,8 +56,6 @@ class NemotronHConfig(PretrainedConfig):
         rescale_prenorm_residual: Whether to rescale pre-norm residuals.
         load_balance_coeff: Auxiliary-loss-free load balancing coefficient.
         use_grouped_mm: Whether to use grouped MM for experts.
-        rope_theta: Base period for RoPE embeddings.
-        rope_scaling: RoPE scaling configuration.
     """
 
     model_type = "nemotron_h"

@@ -21,7 +21,6 @@ from prime_rl.trainer.models.layers.attn import ATTN_IMPL2CLASS, AttentionConfig
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
 from prime_rl.trainer.models.layers.moe import LatentMoE, NemotronHRouter, NonGatedGroupedExperts
 from prime_rl.trainer.models.layers.rms_norm import RMSNorm, RMSNormConfig
-from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
 from prime_rl.trainer.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import (
     convert_hf_layer_to_prime,
@@ -269,20 +268,8 @@ class NemotronHModel(NemotronHPreTrainedModel):
         self.layers = nn.ModuleList([_build_layer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
 
-        # RoPE is only needed for attention layers
-        has_attention = any(t == "attention" for t in config.layers_block_type)
-        if has_attention:
-            rope_type = "default"
-            if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
-                rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type", "default"))
-            rotary_config = RotaryEmbeddingConfig(
-                max_position_embeddings=config.max_position_embeddings,
-                rope_type=rope_type,
-                model_config=config,
-            )
-            self.rotary_emb = RotaryEmbedding(rotary_config)
-        else:
-            self.rotary_emb = None
+        # NemotronH does not use RoPE - position information comes from Mamba layers
+        self.rotary_emb = None
 
         self.gradient_checkpointing = False
         self.post_init()
@@ -377,13 +364,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         )
 
     def init_buffers_post_meta(self):
-        buffer_names = [name for name, _ in self.named_buffers()]
-        if "model.rotary_emb.inv_freq" in buffer_names:
-            rotary_emb = self.model.rotary_emb
-            inv_freq, rotary_emb.attention_scaling = rotary_emb.rope_init_fn(
-                rotary_emb.config, rotary_emb.inv_freq.device
-            )
-            rotary_emb.inv_freq.copy_(inv_freq)
+        pass
 
 
 __all__ = [
