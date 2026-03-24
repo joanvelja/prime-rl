@@ -54,9 +54,13 @@ def _patch_mamba2_use_triton_ssd():
         logger.warning_once("CUDA not available; NemotronH Mamba layers will use torch_forward (bf16 softplus)")
         return
 
-    from mamba_ssm.ops.triton.ssd_combined import (
-        mamba_chunk_scan_combined as _mamba_chunk_scan_combined,
-    )
+    try:
+        from mamba_ssm.ops.triton.ssd_combined import (
+            mamba_chunk_scan_combined as _mamba_chunk_scan_combined,
+        )
+    except ImportError:
+        logger.warning_once("mamba_ssm not installed; NemotronH Mamba layers will use torch_forward (bf16 softplus)")
+        return
 
     if _mamba_chunk_scan_combined is None:
         logger.warning_once("mamba_ssm not available; NemotronH Mamba layers will use torch_forward (bf16 softplus)")
