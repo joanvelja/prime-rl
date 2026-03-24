@@ -135,7 +135,10 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     keep_mask = loss_mask & ~is_masked
 
     log_importance_ratio = trainer_logprobs - inference_logprobs
-    importance_ratio = torch.exp(log_importance_ratio)
+    masked_log_importance_ratio = torch.where(
+        keep_mask, log_importance_ratio, torch.finfo(log_importance_ratio.dtype).min
+    )
+    importance_ratio = torch.exp(masked_log_importance_ratio)
     mismatch_kl = importance_ratio - log_importance_ratio - 1
 
     advantages = loss_config.adv_tau * advantages
@@ -145,8 +148,8 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     else:
         teacher_kl = None
 
-    pg_loss = keep_mask * advantages * importance_ratio
-    kl_loss = loss_mask * log_importance_ratio**2
+    pg_loss = advantages * importance_ratio
+    kl_loss = loss_mask * masked_log_importance_ratio**2
     loss = (-pg_loss + loss_config.kl_tau * kl_loss).sum()
 
     metrics = {
