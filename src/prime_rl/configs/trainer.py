@@ -300,14 +300,6 @@ class ModelConfig(BaseModelConfig):
         return self
 
     @model_validator(mode="after")
-    def vlms_require_bfloat16(self):
-        if is_vlm_model(self.name) and (self.optimization_dtype != "bfloat16" or self.reduce_dtype != "bfloat16"):
-            raise ValueError(
-                "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
-            )
-        return self
-
-    @model_validator(mode="after")
     def cp_only_with_flash_attn(self):
         if self.cp > 1 and self.attn not in ["flash_attention_2", "flash_attention_3"]:
             raise ValueError("CP is only supported with flash attention 2 or flash attention 3")
@@ -719,6 +711,16 @@ class TrainerConfig(BaseConfig):
             description="The maximum number of concurrent runs to allow. If 1, then only one run will be allowed at a time.",
         ),
     ] = 1
+
+    @model_validator(mode="after")
+    def vlms_require_bfloat16(self):
+        if is_vlm_model(self.model.name) and (
+            self.model.optimization_dtype != "bfloat16" or self.model.reduce_dtype != "bfloat16"
+        ):
+            raise ValueError(
+                "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
+            )
+        return self
 
     @model_validator(mode="after")
     def auto_setup_bench(self):
