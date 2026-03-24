@@ -20,19 +20,39 @@ from prime_rl.trainer.models.glm_moe_dsa.converting_glm_moe_dsa import (
     convert_tt_layer_to_vllm_kernel,
     convert_tt_to_hf_moe,
 )
+from prime_rl.trainer.models.glm_moe_dsa.sparse_mla_attention import GlmMoeDsaAttention, SparseMlaAttentionArgs
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
-from prime_rl.trainer.models.layers.mla_attn import GlmMoeDsaAttention
 from prime_rl.trainer.models.layers.mlp import MLP, MLPConfig
 from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
-from prime_rl.trainer.models.layers.rms_norm import RMSNorm, RMSNormConfig
+from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
+
+
+def _sparse_mla_attention_args(config: GlmMoeDsaConfig) -> SparseMlaAttentionArgs:
+    if config.q_lora_rank is None:
+        raise ValueError("Sparse MLA attention requires q_lora_rank to be set")
+    return SparseMlaAttentionArgs(
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        kv_lora_rank=config.kv_lora_rank,
+        q_lora_rank=config.q_lora_rank,
+        qk_rope_head_dim=config.qk_rope_head_dim,
+        qk_nope_head_dim=config.qk_nope_head_dim,
+        qk_head_dim=config.qk_head_dim,
+        v_head_dim=config.v_head_dim,
+        attention_bias=config.attention_bias,
+        rms_norm_eps=config.rms_norm_eps,
+        index_n_heads=config.index_n_heads,
+        index_head_dim=config.index_head_dim,
+        index_topk=config.index_topk,
+    )
 
 
 class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: GlmMoeDsaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = GlmMoeDsaAttention(config)
+        self.self_attn = GlmMoeDsaAttention(_sparse_mla_attention_args(config))
 
         moe_args = MoEArgs(
             num_experts=config.n_routed_experts,

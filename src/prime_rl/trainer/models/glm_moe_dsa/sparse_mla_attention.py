@@ -1,10 +1,10 @@
+from dataclasses import dataclass
+
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from prime_rl.trainer.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
 from prime_rl.trainer.models.kernels.fp8_indexer import fp8_indexer
-from prime_rl.trainer.models.layers.rms_norm import RMSNorm, RMSNormConfig
+from prime_rl.trainer.models.layers.norms import LayerNorm, RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import apply_rotary_pos_emb_interleave
 
 try:
@@ -13,6 +13,23 @@ try:
 except ImportError:
     sparse_mla_fwd_interface = None  # type: ignore
     sparse_mla_bwd = None  # type: ignore
+
+
+@dataclass(frozen=True)
+class SparseMlaAttentionArgs:
+    hidden_size: int
+    num_attention_heads: int
+    kv_lora_rank: int
+    q_lora_rank: int
+    qk_rope_head_dim: int
+    qk_nope_head_dim: int
+    qk_head_dim: int
+    v_head_dim: int
+    attention_bias: bool
+    rms_norm_eps: float
+    index_n_heads: int
+    index_head_dim: int
+    index_topk: int
 
 
 class _SparseMLA(torch.autograd.Function):
@@ -32,31 +49,16 @@ class _SparseMLA(torch.autograd.Function):
         return dq, dkv, None, None
 
 
-class LayerNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
-        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
-
-    def forward(self, x: torch.Tensor):
-        return F.layer_norm(x.float(), (self.dim,), self.weight.float(), self.bias.float(), self.eps).type_as(x)
-
-
 class Indexer(nn.Module):
-    def __init__(self, config: GlmMoeDsaConfig):
+    def __init__(self, args: SparseMlaAttentionArgs):
         super().__init__()
-        if config.q_lora_rank is None:
-            raise ValueError("Sparse indexer requires q_lora_rank to be set")
-
-        self.n_head = config.index_n_heads
-        self.head_dim = config.index_head_dim
-        self.rope_dim = config.qk_rope_head_dim
-        self.wq_b = nn.Linear(config.q_lora_rank, self.n_head * self.head_dim, bias=False)
-        self.wk = nn.Linear(config.hidden_size, self.head_dim, bias=config.attention_bias)
+        self.n_head = args.index_n_heads
+        self.head_dim = args.index_head_dim
+        self.rope_dim = args.qk_rope_head_dim
+        self.wq_b = nn.Linear(args.q_lora_rank, self.n_head * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.hidden_size, self.head_dim, bias=args.attention_bias)
         self.k_norm = LayerNorm(dim=self.head_dim, eps=1e-6)
-        self.weights_proj = nn.Linear(config.hidden_size, self.n_head, bias=False)
+        self.weights_proj = nn.Linear(args.hidden_size, self.n_head, bias=False)
         self.weight_scale = (self.head_dim**-0.5) * (self.n_head**-0.5)
 
     @torch.no_grad()
@@ -96,34 +98,34 @@ class Indexer(nn.Module):
 
 
 class GlmMoeDsaAttention(nn.Module):
-    def __init__(self, config: GlmMoeDsaConfig):
+    def __init__(self, args: SparseMlaAttentionArgs):
         super().__init__()
-        self.config = config
-        self.num_heads = config.num_attention_heads
-        self.kv_lora_rank = config.kv_lora_rank
-        self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.qk_nope_head_dim = config.qk_nope_head_dim
-        self.qk_head_dim = config.qk_head_dim
-        self.v_head_dim = config.v_head_dim
+        self.args = args
+        self.num_heads = args.num_attention_heads
+        self.kv_lora_rank = args.kv_lora_rank
+        self.qk_rope_head_dim = args.qk_rope_head_dim
+        self.qk_nope_head_dim = args.qk_nope_head_dim
+        self.qk_head_dim = args.qk_head_dim
+        self.v_head_dim = args.v_head_dim
 
-        self.q_a_proj = nn.Linear(config.hidden_size, config.q_lora_rank, bias=config.attention_bias)
-        self.q_a_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.q_lora_rank, eps=config.rms_norm_eps))
-        self.q_b_proj = nn.Linear(config.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
+        self.q_a_proj = nn.Linear(args.hidden_size, args.q_lora_rank, bias=args.attention_bias)
+        self.q_a_layernorm = RMSNorm(RMSNormConfig(hidden_size=args.q_lora_rank, eps=args.rms_norm_eps))
+        self.q_b_proj = nn.Linear(args.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
 
         self.kv_a_proj_with_mqa = nn.Linear(
-            config.hidden_size,
+            args.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=config.attention_bias,
+            bias=args.attention_bias,
         )
-        self.kv_a_layernorm = RMSNorm(RMSNormConfig(hidden_size=self.kv_lora_rank, eps=config.rms_norm_eps))
+        self.kv_a_layernorm = RMSNorm(RMSNormConfig(hidden_size=self.kv_lora_rank, eps=args.rms_norm_eps))
         self.kv_b_proj = nn.Linear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
         )
 
-        self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, config.hidden_size, bias=config.attention_bias)
-        self.indexer = Indexer(config)
+        self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, args.hidden_size, bias=args.attention_bias)
+        self.indexer = Indexer(args)
         self.scaling = self.qk_head_dim ** (-0.5)
 
     def _mla_latents(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -177,7 +179,7 @@ class GlmMoeDsaAttention(nn.Module):
         q_latent, k_compressed_normed, k_rope = self._mla_latents(hidden_states)
 
         indices = self.indexer.compute_sparse_indices(
-            hidden_states, q_latent, ks, ke, self.config.index_topk, position_embeddings
+            hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
         )
 
         sparse_q, sparse_kv, w_v = self._mla_up_proj(
