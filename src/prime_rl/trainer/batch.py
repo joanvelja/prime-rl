@@ -36,10 +36,9 @@ def prepare_sample(
         actual_image_tokens = input_ids.count(image_token_id) if image_token_id is not None else expected_image_tokens
 
         if total_tokens > seq_len or actual_image_tokens != expected_image_tokens:
-            get_logger().warning(
+            get_logger().debug(
                 f"Skipping multimodal sample: tokens={total_tokens}, seq_len={seq_len}, "
-                f"image_tokens={actual_image_tokens}/{expected_image_tokens}. "
-                f"Increase seq_len to avoid this."
+                f"image_tokens={actual_image_tokens}/{expected_image_tokens}"
             )
             return None
 
