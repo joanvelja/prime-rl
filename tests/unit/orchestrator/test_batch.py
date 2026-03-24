@@ -138,6 +138,7 @@ def test_prepare_sample_none_routed_experts():
 
 def test_prepare_sample_skips_multimodal_exceeding_seq_len():
     """Multimodal samples that exceed seq_len are skipped (returns None) instead of truncated."""
+    # image_grid_thw=[[1, 2, 2]] -> expected image tokens = 1 * 1 * 1 = 1 (after merge)
     sample = TrainingSample(
         prompt_ids=[1, 2, 3],
         prompt_mask=[False, False, False],
@@ -148,15 +149,38 @@ def test_prepare_sample_skips_multimodal_exceeding_seq_len():
         advantage=1.0,
         pixel_values=b"\x00" * 16,
         pixel_values_shape=[1, 16],
-        image_grid_thw=[[1, 1, 1]],
+        image_grid_thw=[[1, 2, 2]],
     )
     # 5 tokens total, seq_len=3 would require truncation
     result = prepare_sample(sample, seq_len=3)
     assert result is None
 
 
+def test_prepare_sample_skips_multimodal_with_truncated_image_tokens():
+    """Multimodal samples where image tokens were lost (e.g. vLLM left-truncation) are skipped."""
+    # image_grid_thw=[[1, 16, 16]] -> expected image tokens = 1 * 8 * 8 = 64 (after merge_size=2)
+    # But input_ids has only 10 image_pad tokens (99) instead of 64
+    IMAGE_PAD = 99
+    sample = TrainingSample(
+        prompt_ids=[IMAGE_PAD] * 10 + list(range(50)),
+        prompt_mask=[False] * 60,
+        completion_ids=[100],
+        completion_mask=[True],
+        completion_logprobs=[-0.1],
+        completion_temperatures=[1.0],
+        advantage=1.0,
+        pixel_values=b"\x00" * 64,
+        pixel_values_shape=[64, 1],
+        image_grid_thw=[[1, 16, 16]],
+    )
+    # 61 tokens total, but only 10 image_pad tokens vs 64 expected -> skip
+    result = prepare_sample(sample, seq_len=4096, image_token_id=IMAGE_PAD)
+    assert result is None
+
+
 def test_prepare_sample_keeps_multimodal_within_seq_len():
-    """Multimodal samples within seq_len are kept with pixel_values intact."""
+    """Multimodal samples within seq_len and with valid image token count are kept."""
+    # image_grid_thw=[[1, 2, 2]] -> expected image tokens = 1 * 1 * 1 = 1 (after merge)
     sample = TrainingSample(
         prompt_ids=[1, 2],
         prompt_mask=[False, False],
@@ -167,7 +191,7 @@ def test_prepare_sample_keeps_multimodal_within_seq_len():
         advantage=1.0,
         pixel_values=b"\x00" * 16,
         pixel_values_shape=[1, 16],
-        image_grid_thw=[[1, 1, 1]],
+        image_grid_thw=[[1, 2, 2]],
     )
     result = prepare_sample(sample, seq_len=8)
     assert result is not None
@@ -192,8 +216,8 @@ def test_prepare_sample_still_truncates_text_only():
     assert result.pixel_values is None
 
 
-def test_prepare_batch_all_skipped_returns_empty():
-    """When all samples are multimodal and exceed seq_len, prepare_batch returns empty lists."""
+def test_prepare_batch_all_skipped_raises():
+    """When all samples are multimodal and exceed seq_len, prepare_batch raises ValueError."""
     samples = [
         TrainingSample(
             prompt_ids=[1, 2, 3],
@@ -205,11 +229,12 @@ def test_prepare_batch_all_skipped_returns_empty():
             advantage=1.0,
             pixel_values=b"\x00" * 16,
             pixel_values_shape=[1, 16],
-            image_grid_thw=[[1, 1, 1]],
+            image_grid_thw=[[1, 2, 2]],
         )
         for _ in range(4)
     ]
     # seq_len=3 < 5 tokens, all skipped
-    result = prepare_batch(samples, seq_len=3, num_train_workers=2, idxs=[0] * 4, num_loras=1)
-    assert len(result) == 2
-    assert all(len(gpu_batches) == 0 for gpu_batches in result)
+    import pytest
+
+    with pytest.raises(ValueError, match="All .* samples were skipped"):
+        prepare_batch(samples, seq_len=3, num_train_workers=2, idxs=[0] * 4, num_loras=1)

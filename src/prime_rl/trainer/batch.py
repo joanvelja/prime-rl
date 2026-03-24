@@ -4,7 +4,9 @@ from prime_rl.transport.types import MicroBatch, TrainingSample
 from prime_rl.utils.logger import get_logger
 
 
-def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch | None:
+def prepare_sample(
+    training_example: TrainingSample, seq_len: int, image_token_id: int | None = None
+) -> MicroBatch | None:
     """
     Prepare a problem for sequence packing training.
     Tokenize and prepare tensors.
@@ -28,17 +30,20 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     teacher_logprobs = training_example.teacher_logprobs
     routed_experts = training_example.routed_experts
 
-    if len(input_ids) > seq_len:
-        # Multimodal samples cannot be truncated: the number of image_pad tokens
-        # in input_ids must match the pixel_values, and truncation would break
-        # that alignment. Skip the sample instead of producing garbage.
-        if training_example.pixel_values is not None:
+    if training_example.pixel_values is not None:
+        expected_image_tokens = sum(t * ((h + 1) // 2) * ((w + 1) // 2) for t, h, w in training_example.image_grid_thw)
+        total_tokens = len(input_ids)
+        actual_image_tokens = input_ids.count(image_token_id) if image_token_id is not None else expected_image_tokens
+
+        if total_tokens > seq_len or actual_image_tokens != expected_image_tokens:
             get_logger().warning(
-                f"Skipping multimodal sample that exceeds seq_len ({len(input_ids)} > {seq_len}). "
-                f"Increase seq_len or reduce rollout length to avoid this."
+                f"Skipping multimodal sample: tokens={total_tokens}, seq_len={seq_len}, "
+                f"image_tokens={actual_image_tokens}/{expected_image_tokens}. "
+                f"Increase seq_len to avoid this."
             )
             return None
 
+    if len(input_ids) > seq_len:
         input_ids = input_ids[:seq_len]
         loss_mask = loss_mask[:seq_len]
         inference_logprobs = inference_logprobs[:seq_len]
@@ -201,6 +206,7 @@ def prepare_batch(
     idxs: list[int],
     num_loras: int,
     pad_to_multiple_of: int = 1,
+    image_token_id: int | None = None,
 ) -> list[list[MicroBatch]]:
     """
     Prepare a batch of problems for each GPU. Each batch is a list of micro batches.
@@ -214,7 +220,7 @@ def prepare_batch(
     all_samples = [
         (idx, sample)
         for idx, rollout in zip(idxs, rollouts)
-        if (sample := prepare_sample(rollout, seq_len)) is not None
+        if (sample := prepare_sample(rollout, seq_len, image_token_id=image_token_id)) is not None
     ]
 
     num_skipped = len(rollouts) - len(all_samples)
@@ -222,7 +228,10 @@ def prepare_batch(
         get_logger().warning(f"Skipped {num_skipped}/{len(rollouts)} samples (multimodal exceeding seq_len)")
 
     if not all_samples:
-        return [[] for _ in range(num_train_workers)]
+        raise ValueError(
+            f"All {len(rollouts)} samples were skipped (multimodal image/token mismatch). "
+            f"Increase seq_len to fit your VLM samples."
+        )
 
     micro_batches = packed_samples_into_micro_bs(all_samples, seq_len, num_loras)
     micro_batches = [pad_micro_batch(micro_batch, pad_to_multiple_of) for micro_batch in micro_batches]

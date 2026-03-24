@@ -37,6 +37,8 @@ class BasePacker(ABC):
         self.seq_len = seq_len
         self.pad_to_multiple_of = pad_to_multiple_of
         self.tokenizer = tokenizer
+        image_pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        self.image_token_id = image_pad_id if isinstance(image_pad_id, int) else None
         self.receiver = setup_training_batch_receiver(config)
         shutil.rmtree(get_rollout_dir(self.multi_run_manager.output_dir), ignore_errors=True)
         self.sender: MicroBatchSender = setup_micro_batch_sender(
@@ -82,6 +84,7 @@ class SinglePacker(BasePacker):
             num_train_workers=self.dp_world_size,
             idxs=[0] * len(batch.examples),
             num_loras=self.multi_run_manager.max_runs,
+            image_token_id=self.image_token_id,
         )
 
         self.sender.send(micro_batch_grid)
@@ -298,6 +301,7 @@ class MultiPacker(BasePacker):
                 num_train_workers=self.dp_world_size,
                 idxs=[run_idx] * len(run_samples),
                 num_loras=self.multi_run_manager.max_runs,
+                image_token_id=self.image_token_id,
             )
             # Merge into combined grid
             for worker_idx, worker_batches in enumerate(run_micro_batch_grid):
