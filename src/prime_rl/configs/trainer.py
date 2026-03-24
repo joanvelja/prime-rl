@@ -13,7 +13,6 @@ from prime_rl.configs.shared import (
     WandbConfig,
 )
 from prime_rl.utils.config import BaseConfig
-from prime_rl.utils.vlm import is_vlm_model
 
 # -- Shared trainer configs (used by both SFT and RL trainers) --
 
@@ -300,14 +299,6 @@ class ModelConfig(BaseModelConfig):
         return self
 
     @model_validator(mode="after")
-    def vlms_require_bfloat16(self):
-        if is_vlm_model(self.name) and (self.optimization_dtype != "bfloat16" or self.reduce_dtype != "bfloat16"):
-            raise ValueError(
-                "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
-            )
-        return self
-
-    @model_validator(mode="after")
     def cp_only_with_flash_attn(self):
         if self.cp > 1 and self.attn not in ["flash_attention_2", "flash_attention_3"]:
             raise ValueError("CP is only supported with flash attention 2 or flash attention 3")
@@ -535,6 +526,13 @@ class CheckpointConfig(BaseConfig):
         ),
     ] = False
 
+    skip_optimizer: Annotated[
+        bool,
+        Field(
+            description="Whether to skip loading the optimizer state from checkpoint.",
+        ),
+    ] = False
+
 
 class DefaultLossConfig(BaseModel):
     """Config for the default loss."""
@@ -719,6 +717,16 @@ class TrainerConfig(BaseConfig):
             description="The maximum number of concurrent runs to allow. If 1, then only one run will be allowed at a time.",
         ),
     ] = 1
+
+    @model_validator(mode="after")
+    def vlms_require_bfloat16(self):
+        if self.model.vlm is not None and (
+            self.model.optimization_dtype != "bfloat16" or self.model.reduce_dtype != "bfloat16"
+        ):
+            raise ValueError(
+                "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
+            )
+        return self
 
     @model_validator(mode="after")
     def auto_setup_bench(self):

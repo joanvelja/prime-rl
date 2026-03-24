@@ -80,6 +80,29 @@ class SlurmConfig(BaseConfig):
 ServerType = Literal["vllm", "openai"]
 
 
+class VLMConfig(BaseConfig):
+    """Configures vision-language model support.
+
+    Presence of this config enables VLM mode. You must specify where the
+    vision encoder and language model live on the model object.
+
+    Usage:
+        [model.vlm]
+        vision_encoder_attr = "model.visual"
+        language_model_attr = "model.language_model"
+    """
+
+    vision_encoder_attr: Annotated[
+        str,
+        Field(description="Dotted attribute path to the vision encoder module (e.g. 'model.visual')."),
+    ]
+
+    language_model_attr: Annotated[
+        str,
+        Field(description="Dotted attribute path to the language model module (e.g. 'model.language_model')."),
+    ]
+
+
 class BaseModelConfig(BaseConfig):
     """Configures the model."""
 
@@ -91,6 +114,13 @@ class BaseModelConfig(BaseConfig):
             description="Whether to trust remote code for tokenizer initialization.",
         ),
     ] = False
+
+    vlm: Annotated[
+        "VLMConfig | None",
+        Field(
+            description="VLM configuration. Set this to enable vision-language model support.",
+        ),
+    ] = None
 
 
 class ElasticConfig(BaseConfig):

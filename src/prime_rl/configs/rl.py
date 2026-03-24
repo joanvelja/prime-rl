@@ -19,6 +19,7 @@ from prime_rl.configs.orchestrator import (
 )
 from prime_rl.configs.shared import (
     SlurmConfig,
+    VLMConfig,
     WandbConfig,
     WandbWithExtrasConfig,
 )
@@ -126,6 +127,11 @@ class SharedModelConfig(BaseConfig):
         str,
         Field(description="The name of the model to use."),
     ] = "Qwen/Qwen3-0.6B"
+
+    vlm: Annotated[
+        "VLMConfig | None",
+        Field(description="VLM configuration. Set to enable vision-language model support."),
+    ] = None
 
 
 class SharedWeightBroadcastConfig(BaseConfig):
@@ -530,6 +536,12 @@ class RLConfig(BaseConfig):
                 self.orchestrator.model.name = self.inference.model.name
             else:
                 self.orchestrator.model.name = self.model.name
+
+            if self.model.vlm is not None:
+                self.trainer.model.vlm = self.model.vlm
+                self.orchestrator.model.vlm = self.model.vlm
+                if self.inference is not None:
+                    self.inference.model.vlm = self.model.vlm
 
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
