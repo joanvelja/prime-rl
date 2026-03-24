@@ -627,9 +627,6 @@ def train(config: TrainerConfig):
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
 
-    if config.max_concurrent_runs > 1 and hasattr(ckpt_manager, "close_usage_reporter"):
-        ckpt_manager.close_usage_reporter()
-
     logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
     logger.success("RL trainer finished!")
 
