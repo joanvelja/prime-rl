@@ -21,10 +21,6 @@ import torch
 from torch import Tensor
 
 
-def get_max_layer_num(state_dict: dict[str, Tensor]) -> int:
-    return max(int(k.split(".")[2]) for k in state_dict if k.startswith("model.layers.")) + 1
-
-
 def _rename_keys(state_dict: dict[str, Tensor], old_prefix: str, new_prefix: str):
     """Rename all keys matching old_prefix to new_prefix in-place."""
     keys_to_rename = [k for k in state_dict if k.startswith(old_prefix)]

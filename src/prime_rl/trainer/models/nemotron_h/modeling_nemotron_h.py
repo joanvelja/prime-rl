@@ -260,8 +260,20 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        layer_type = _infer_layer_type_hf(state_dict, layer_idx)
-        convert_hf_layer_to_prime(state_dict, layer_idx, layer_type)
+        from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import _rename_keys
+
+        # Handle backbone.* -> model.* prefix before layer conversion
+        _rename_keys(state_dict, "backbone.", "model.")
+
+        if layer_idx == -1:
+            # Non-layer weights: rename global keys
+            if "model.embeddings.weight" in state_dict:
+                state_dict["model.embed_tokens.weight"] = state_dict.pop("model.embeddings.weight")
+            if "model.norm_f.weight" in state_dict:
+                state_dict["model.norm.weight"] = state_dict.pop("model.norm_f.weight")
+        else:
+            layer_type = _infer_layer_type_hf(state_dict, layer_idx)
+            convert_hf_layer_to_prime(state_dict, layer_idx, layer_type)
         return state_dict
 
 

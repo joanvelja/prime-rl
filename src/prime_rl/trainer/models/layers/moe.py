@@ -556,7 +556,6 @@ class NemotronHRouter(nn.Module):
         n_group: int,
         topk_group: int,
         norm_topk_prob: bool,
-        routed_scaling_factor: float,
     ):
         super().__init__()
         self.gate = nn.Parameter(torch.empty(num_experts, dim))
@@ -566,7 +565,6 @@ class NemotronHRouter(nn.Module):
         self.n_group = n_group
         self.topk_group = topk_group
         self.norm_topk_prob = norm_topk_prob
-        self.routed_scaling_factor = routed_scaling_factor
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
@@ -661,7 +659,6 @@ class LatentMoE(nn.Module):
             n_group=n_group,
             topk_group=topk_group,
             norm_topk_prob=norm_topk_prob,
-            routed_scaling_factor=routed_scaling_factor,
         )
         self.experts = NonGatedGroupedExperts(
             input_dim=effective_latent_dim,

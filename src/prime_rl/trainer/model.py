@@ -409,7 +409,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
 
     if shard_norm_and_lm_head:
         # This optimization breaks weight tying
-        embed_module = getattr(language_model, "embed_tokens", None) or language_model.embeddings
+        embed_module = getattr(language_model, "embed_tokens", None) or getattr(language_model, "embeddings", None)
         fully_shard(
             embed_module,
             mesh=hsdp_mesh,
