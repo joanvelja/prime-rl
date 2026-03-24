@@ -19,8 +19,7 @@ def run_server(config: EnvServerConfig):
     for env_id in env_ids_to_install:
         install_env(env_id)
 
-    env_name = config.env.name or config.env.id
-    log_dir = (get_log_dir(config.output_dir) / "train" / env_name).as_posix()
+    log_dir = (get_log_dir(config.output_dir) / "envs" / config.env.resolved_name).as_posix()
 
     server = ZMQEnvServer(
         env_id=strip_env_version(config.env.id),

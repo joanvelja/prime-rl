@@ -173,10 +173,10 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Load environment and extract dataset
     logger.info(
-        f"Loading {len(config.env)} training environment(s) ({', '.join(env.name or env.id for env in config.env)})"
+        f"Loading {len(config.env)} training environment(s) ({', '.join(env.resolved_name for env in config.env)})"
     )
     env_ids = [strip_env_version(env.id) for env in config.env]
-    train_env_names = [env.name or env_id for env_id, env in zip(env_ids, config.env)]
+    train_env_names = [env.resolved_name for env in config.env]
     train_env_group = vf.EnvGroup(
         envs=[vf.load_environment(env_id, **env.args) for env_id, env in zip(env_ids, config.env)],
         env_names=train_env_names,
@@ -218,7 +218,7 @@ async def orchestrate(config: OrchestratorConfig):
     for env_id, env, env_name in zip(env_ids, config.env, train_env_names):
         if env.address is None:
             num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
-            log_dir = (get_log_dir(config.output_dir) / "train" / env_name).as_posix()
+            log_dir = (get_log_dir(config.output_dir) / "envs" / env_name).as_posix()
             address, process = spawn_env_server(
                 env_id=env_id,
                 env_args=env.args,
@@ -255,14 +255,14 @@ async def orchestrate(config: OrchestratorConfig):
     if config.eval:
         env_ids = [strip_env_version(env.id) for env in config.eval.env]
         eval_envs = [vf.load_environment(env_id, **env.args) for env_id, env in zip(env_ids, config.eval.env)]
-        eval_env_names = [env.name or env_id for env_id, env in zip(env_ids, config.eval.env)]
+        eval_env_names = [env.resolved_name for env in config.eval.env]
         eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
         eval_env_addresses = []
 
         for env_id, env, eval_env_name in zip(env_ids, config.eval.env, eval_env_names):
             if env.address is None:
                 num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
-                log_dir = (get_log_dir(config.output_dir) / "eval" / eval_env_name).as_posix()
+                log_dir = (get_log_dir(config.output_dir) / "envs" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
                     env_args=env.args,

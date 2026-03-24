@@ -58,15 +58,17 @@ else
   # Start new tmux session with first window
   tmux new-session -d -s "$SESSION_NAME" -n "RL"
 
-  # Window 1: RL - 3 vertical panes
+  # Window 1: RL - 4 vertical panes
   tmux split-window -v -t "$SESSION_NAME:RL.0"
   tmux split-window -v -t "$SESSION_NAME:RL.1"
+  tmux split-window -v -t "$SESSION_NAME:RL.2"
   tmux select-layout -t "$SESSION_NAME:RL" even-vertical
 
   # Pane titles
   tmux select-pane -t "$SESSION_NAME:RL.0" -T "Trainer"
   tmux select-pane -t "$SESSION_NAME:RL.1" -T "Orchestrator"
   tmux select-pane -t "$SESSION_NAME:RL.2" -T "Inference"
+  tmux select-pane -t "$SESSION_NAME:RL.3" -T "Envs"
 
   # Logs: Orchestrator
   tmux send-keys -t "$SESSION_NAME:RL.1" \
@@ -76,6 +78,11 @@ else
   # Logs: Inference
   tmux send-keys -t "$SESSION_NAME:RL.2" \
     "echo \"Following inference.stdout (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/logs/inference.stdout\" 2>/dev/null" \
+    C-m
+
+  # Logs: Envs (all env server and worker logs)
+  tmux send-keys -t "$SESSION_NAME:RL.3" \
+    "echo \"Following env logs (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/run_default/logs/envs\"/*/*.log 2>/dev/null" \
     C-m
 
   # Window 2: Monitor
