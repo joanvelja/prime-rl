@@ -53,6 +53,7 @@ from prime_rl.orchestrator.vf_utils import (
     get_completion_len,
     get_seq_len,
     intercept_vf_logging,
+    resolve_num_workers,
     setup_env_client,
     spawn_env_server,
     task_uses_group_scoring,
@@ -85,7 +86,7 @@ async def orchestrate(config: OrchestratorConfig):
         log_file=config.output_dir / "logs" / "orchestrator.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
-    intercept_vf_logging(logger="verifiers.workers", level=config.log.vf_level)  # show logs from env clients
+    intercept_vf_logging(logger="verifiers.serve", level=config.log.vf_level)  # show logs from env clients
     logger.info("Starting orchestrator")
 
     event_loop_lag_monitor = EventLoopLagMonitor()
@@ -216,15 +217,18 @@ async def orchestrate(config: OrchestratorConfig):
 
     for env_id, env, env_name in zip(env_ids, config.env, train_env_names):
         if env.address is None:
+            num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
+            log_dir = (get_log_dir(config.output_dir) / "train" / env_name).as_posix()
             address, process = spawn_env_server(
                 env_id=env_id,
                 env_args=env.args,
                 extra_env_kwargs=env.extra_env_kwargs,
-                log_level="CRITICAL",
-                log_file=(get_log_dir(config.output_dir) / "train" / f"{env_name}.log").as_posix(),
-                log_file_level=config.log.vf_level,
+                num_workers=num_workers,
+                log_level=config.log.vf_level,
+                log_dir=log_dir,
                 json_logging=config.log.json_logging,
             )
+            logger.info(f"Spawned env server for {env_name} with {num_workers} worker(s)")
             env_processes.append(process)
         else:
             if env_name in train_env_deferred_group_scoring_tasks:
@@ -257,15 +261,18 @@ async def orchestrate(config: OrchestratorConfig):
 
         for env_id, env, eval_env_name in zip(env_ids, config.eval.env, eval_env_names):
             if env.address is None:
+                num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
+                log_dir = (get_log_dir(config.output_dir) / "eval" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
                     env_args=env.args,
                     extra_env_kwargs=env.extra_env_kwargs,
-                    log_level="CRITICAL",
-                    log_file=(get_log_dir(config.output_dir) / "eval" / f"{eval_env_name}.log").as_posix(),
-                    log_file_level=config.log.vf_level,
+                    num_workers=num_workers,
+                    log_level=config.log.vf_level,
+                    log_dir=log_dir,
                     json_logging=config.log.json_logging,
                 )
+                logger.info(f"Spawned eval env server for {eval_env_name} with {num_workers} worker(s)")
                 env_processes.append(process)
             else:
                 address = env.address
