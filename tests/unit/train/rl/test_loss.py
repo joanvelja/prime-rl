@@ -41,6 +41,7 @@ def test_grpo_loss():
     assert not torch.isnan(loss), f"Loss is NaN from stale logprobs: {loss}"
     assert not torch.isinf(loss), f"Loss is Inf from stale logprobs: {loss}"
 
+
 def test_gspo_loss():
     trainer_logprobs = [torch.randn(40, dtype=torch.float32).cuda(), torch.randn(60, dtype=torch.float32).cuda()]
     inference_logprobs = [torch.randn(40, dtype=torch.float32).cuda(), torch.randn(60, dtype=torch.float32).cuda()]
