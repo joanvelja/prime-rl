@@ -245,7 +245,7 @@ class ModelConfig(BaseModelConfig):
                 "Only used when ep_comm_backend='deepep'."
             ),
         ),
-    ] = 24
+    ] = 48
 
     tp: Annotated[
         int,
@@ -385,6 +385,26 @@ class ModelConfig(BaseModelConfig):
     def flash_attention_4_only_with_custom_impl(self):
         if self.attn == "fa4" and self.impl != "custom":
             raise ValueError("Flash attention 4 is only supported with the custom implementation")
+        return self
+
+    @model_validator(mode="after")
+    def deepep_incompatible_with_selective_routed_experts(self):
+        """
+        DeepEP combine runs via an output hook outside the selective-AC checkpointed
+        `_run_routed_experts` region. Checkpoint recomputation would therefore skip
+        combine or fail due to consumed state. Explicitly reject this unsupported combo.
+        """
+        if (
+            self.ep_comm_backend == "deepep"
+            and self.ac is not None
+            and self.ac.mode == "selective"
+            and "routed_experts" in self.ac.targets
+        ):
+            raise ValueError(
+                "Selective activation checkpointing target 'routed_experts' is not supported with "
+                "model.ep_comm_backend='deepep'. Remove 'routed_experts' from model.ac.targets or "
+                "switch ep_comm_backend to 'standard'."
+            )
         return self
 
     @model_validator(mode="after")
