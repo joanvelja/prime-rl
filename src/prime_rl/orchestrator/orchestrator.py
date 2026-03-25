@@ -218,7 +218,7 @@ async def orchestrate(config: OrchestratorConfig):
     for env_id, env, env_name in zip(env_ids, config.env, train_env_names):
         if env.address is None:
             num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
-            log_dir = (get_log_dir(config.output_dir) / "envs" / env_name).as_posix()
+            log_dir = (get_log_dir(config.output_dir.parent) / "envs" / env_name).as_posix()
             address, process = spawn_env_server(
                 env_id=env_id,
                 env_args=env.args,
@@ -262,7 +262,7 @@ async def orchestrate(config: OrchestratorConfig):
         for env_id, env, eval_env_name in zip(env_ids, config.eval.env, eval_env_names):
             if env.address is None:
                 num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
-                log_dir = (get_log_dir(config.output_dir) / "envs" / eval_env_name).as_posix()
+                log_dir = (get_log_dir(config.output_dir.parent) / "envs" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
                     env_args=env.args,
