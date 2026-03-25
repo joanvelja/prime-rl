@@ -105,8 +105,6 @@ def train(config: SFTConfig):
         substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
         from prime_rl.utils.cp import setup_hybrid_cp
 
-        setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
-
     # Set up checkpoint manager
     logger.info(f"Initializing checkpoint managers ({config.ckpt})")
     ckpt_manager, weight_ckpt_manager = setup_ckpt_managers(config.output_dir, config.ckpt, config.model.lora)
@@ -124,6 +122,9 @@ def train(config: SFTConfig):
     model = setup_model(
         config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=config.loss_impl == "liger_fused"
     )
+
+    if parallel_dims.cp_enabled:
+        setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
     if config.model.lora is not None:
         multi_run_manager = get_multi_run_manager()
