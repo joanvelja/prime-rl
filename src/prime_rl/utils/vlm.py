@@ -21,6 +21,7 @@ class VLMModelInfo:
 
     vision_encoder_attr: str
     language_model_attr: str
+    text_config_attr: str = "text_config"
 
 
 # Central registry: model_type -> architecture info.
@@ -78,6 +79,19 @@ def get_language_model(model: nn.Module, override: str | None = None) -> nn.Modu
 
     # Text-only models: language model is directly at model.model
     return model.model
+
+
+def unwrap_text_config(model_config: PretrainedConfig) -> PretrainedConfig:
+    """Unwrap a composite VLM config to its text sub-config for text-only training.
+
+    Returns the text sub-config if the model is a known VLM, otherwise returns the config unchanged.
+    """
+    info = _get_model_info_from_config(model_config)
+    if info is not None:
+        text_config = getattr(model_config, info.text_config_attr, None)
+        if text_config is not None:
+            return text_config
+    return model_config
 
 
 def get_layer_prefix(model_config: PretrainedConfig, override: str | None = None) -> str:
