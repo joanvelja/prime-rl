@@ -261,7 +261,17 @@ async def orchestrate(config: OrchestratorConfig):
 
         for env_id, env, eval_env_name in zip(env_ids, config.eval.env, eval_env_names):
             if env.address is None:
-                num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
+                num_examples = env.num_examples or config.eval.num_examples
+                rollouts_per_example = env.rollouts_per_example or config.eval.rollouts_per_example
+                if num_examples == -1:
+                    max_concurrent = 1024
+                    logger.warning(
+                        f"Eval env '{eval_env_name}' uses all examples (num_examples=-1). "
+                        f"Defaulting max_concurrent={max_concurrent} for worker scaling."
+                    )
+                else:
+                    max_concurrent = num_examples * rollouts_per_example
+                num_workers = resolve_num_workers(env.num_workers, max_concurrent)
                 log_dir = (get_log_dir(config.output_dir.parent) / "envs" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
