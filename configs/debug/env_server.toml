@@ -1,0 +1,3 @@
+[env]
+id = "math_env"
+num_workers = 2
