@@ -474,6 +474,13 @@ class CheckpointConfig(BaseConfig):
 
     weights: WeightCheckpointConfig | None = WeightCheckpointConfig()
 
+    skip_gather_master_weights: Annotated[
+        bool,
+        Field(
+            description="When true, skip gathering and saving HF-compatible weight checkpoints. Useful for large models where the gather is expensive and only DCP checkpoints are needed.",
+        ),
+    ] = False
+
     weights_only: Annotated[
         bool,
         Field(
@@ -523,6 +530,13 @@ class CheckpointConfig(BaseConfig):
         bool,
         Field(
             description="Whether to skip loading the dataloader from checkpoint.",
+        ),
+    ] = False
+
+    skip_optimizer: Annotated[
+        bool,
+        Field(
+            description="Whether to skip loading the optimizer state from checkpoint.",
         ),
     ] = False
 
