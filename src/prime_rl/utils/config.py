@@ -4,6 +4,7 @@ from pydantic_config import cli  # noqa: F401
 
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 def _convert_none(value):
     """Recursively convert None to ``"None"`` strings for TOML serialization."""
     if value is None:
@@ -15,13 +16,23 @@ def _convert_none(value):
     return value
 
 
+=======
+>>>>>>> parent of 4f612601f (Fix/none in list (#2094))
 def none_to_none_str(data: dict) -> dict:
     """Convert None values to ``"None"`` strings so they survive TOML serialization.
 
     TOML has no null type, so we use the ``"None"`` string convention which
     ``BaseConfig._none_str_to_none`` converts back to ``None`` on load.
     """
-    return _convert_none(data)
+    out = {}
+    for key, value in data.items():
+        if value is None:
+            out[key] = "None"
+        elif isinstance(value, dict):
+            out[key] = none_to_none_str(value)
+        else:
+            out[key] = value
+    return out
 
 
 =======
