@@ -9,16 +9,10 @@ from typing import Any
 import torch
 import verifiers as vf
 from PIL import Image
-from transformers.tokenization_utils import PreTrainedTokenizer
 
+from prime_rl.rendering.base import Renderer, build_trajectory_step
 from prime_rl.transport import TrainingSample
-from prime_rl.utils.chat_template import (
-    common_prefix_len,
-    deserialize_tool_calls,
-    normalize_messages,
-    render_messages,
-    strip_message_content,
-)
+from prime_rl.utils.chat_template import deserialize_tool_calls, normalize_messages, strip_message_content
 from prime_rl.utils.logger import get_logger
 
 # We use list() instead of deepcopy() for flat lists (token IDs, logprobs) - safe because
@@ -46,135 +40,6 @@ def _align_routed_experts(
     return routed_experts + [zero_entry for _ in range(deficit)]
 
 
-def _common_prefix_len(a: list[int], b: list[int]) -> int:
-    return common_prefix_len(a, b)
-
-
-def _normalize_messages(messages: Any, default_role: str) -> list[dict[str, Any]]:
-    return normalize_messages(messages, default_role)
-
-
-def _deserialize_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return deserialize_tool_calls(messages)
-
-
-def _strip_message_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return strip_message_content(messages)
-
-
-def _render_messages(
-    tokenizer: PreTrainedTokenizer,
-    messages: list[dict[str, Any]],
-    add_generation_prompt: bool = False,
-    tools: list[dict[str, Any]] | None = None,
-    processor=None,
-) -> list[int]:
-    return render_messages(
-        tokenizer,
-        messages,
-        add_generation_prompt=add_generation_prompt,
-        tools=tools,
-        processor=processor,
-    )
-
-
-def _prepare_messages_for_processor(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert messages to the format expected by the VLM processor.
-
-    - Converts image_url items to image items with loaded PIL Images
-    - Strips extra fields (e.g. image_url on text items) that confuse the processor
-    - Ensures all message content is in list format (processor requires this)
-    """
-    prepared = []
-    for msg in messages:
-        content = msg.get("content")
-        if isinstance(content, str):
-            prepared.append({**msg, "content": [{"type": "text", "text": content}]})
-            continue
-
-        if not isinstance(content, list):
-            prepared.append(msg)
-            continue
-
-        new_content = []
-        for item in content:
-            if item.get("type") == "image_url":
-                url = item.get("image_url", {}).get("url", "")
-                if url.startswith(_FILE_URL_PREFIX):
-                    img = _load_file_image(url)
-                elif url.startswith("data:image"):
-                    b64_data = url.split(",", 1)[1]
-                    img = Image.open(BytesIO(base64.b64decode(b64_data)))
-                else:
-                    new_content.append(item)
-                    continue
-                new_content.append({"type": "image", "image": img})
-            elif item.get("type") == "text":
-                new_content.append({"type": "text", "text": item.get("text", "")})
-            else:
-                new_content.append(item)
-        prepared.append({**msg, "content": new_content})
-
-    return prepared
-
-
-def _tokenize_step_from_messages(
-    step: vf.TrajectoryStep,
-    tokenizer: PreTrainedTokenizer,
-    tools: list[dict[str, Any]] | None = None,
-    processor=None,
-) -> dict[str, Any]:
-    prompt = _normalize_messages(step.get("prompt"), default_role="user")
-    completion = _normalize_messages(step.get("completion"), default_role="assistant")
-
-    prompt = _strip_message_content(_deserialize_tool_calls(prompt))
-    completion = _strip_message_content(_deserialize_tool_calls(completion))
-
-    assert all(m.get("role") == "assistant" for m in completion), (
-        "Expected all completion messages to be assistant role for SFT distillation, "
-        f"got roles: {[m.get('role') for m in completion]}"
-    )
-
-    if processor is not None:
-        prompt = _prepare_messages_for_processor(prompt)
-        completion = _prepare_messages_for_processor(completion)
-
-    all_messages = prompt + completion
-    prompt_has_assistant_completion = len(completion) > 0 and completion[0].get("role") == "assistant"
-    prompt_ids = _render_messages(
-        tokenizer,
-        prompt,
-        add_generation_prompt=prompt_has_assistant_completion,
-        tools=tools,
-        processor=processor,
-    )
-    full_ids = _render_messages(
-        tokenizer,
-        all_messages,
-        tools=tools,
-        processor=processor,
-    )
-
-    split_idx = _common_prefix_len(prompt_ids, full_ids)
-    original_prompt_len = len(prompt_ids)
-
-    prompt_ids = full_ids[:split_idx]
-    completion_ids = full_ids[split_idx:]
-    completion_mask = [True] * len(completion_ids)
-    completion_logprobs = [0.0] * len(completion_ids)
-
-    return {
-        "prompt_ids": prompt_ids,
-        "prompt_mask": [False] * len(prompt_ids),
-        "completion_ids": completion_ids,
-        "completion_mask": completion_mask,
-        "completion_logprobs": completion_logprobs,
-        "routed_experts": None,
-        "prompt_prefix_len": split_idx,
-        "original_prompt_len": original_prompt_len,
-    }
-
-
 def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None:
     """Convert verifiers Tool objects or dicts to OAI function-calling format."""
     if not tool_defs:
@@ -199,30 +64,31 @@ def _convert_tools_to_oai_format(tool_defs: list) -> list[dict[str, Any]] | None
     ]
 
 
+def _tokenize_step(
+    step: vf.TrajectoryStep,
+    renderer: Renderer,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Tokenize a trajectory step using a Renderer."""
+    prompt = normalize_messages(step.get("prompt"), default_role="user")
+    completion = normalize_messages(step.get("completion"), default_role="assistant")
+    prompt = strip_message_content(deserialize_tool_calls(prompt))
+    completion = strip_message_content(deserialize_tool_calls(completion))
+
+    return build_trajectory_step(renderer, prompt, completion, tools=tools)
+
+
 def pretokenize_rollout_trajectory(
     output: vf.RolloutOutput,
-    tokenizer: PreTrainedTokenizer,
-    processor=None,
+    renderer: Renderer,
 ) -> bool:
     """Populate missing step tokens from prompt/completion messages."""
-    logger = get_logger()
     tools = _convert_tools_to_oai_format(output.get("tool_defs", []))
 
-    for step_idx, step in enumerate(output["trajectory"]):
+    for step in output["trajectory"]:
         if step["tokens"] is not None:
             continue
-
-        reconstructed = _tokenize_step_from_messages(step, tokenizer, tools=tools, processor=processor)
-        if reconstructed["prompt_prefix_len"] < reconstructed["original_prompt_len"]:
-            logger.debug(
-                f"Prompt tokenization was non-prefix for example {output['example_id']} step {step_idx}. "
-                f"Using longest common prefix length {reconstructed['prompt_prefix_len']} "
-                f"(original prompt had {reconstructed['original_prompt_len']} tokens)."
-            )
-
-        reconstructed.pop("prompt_prefix_len")
-        reconstructed.pop("original_prompt_len")
-        step["tokens"] = reconstructed
+        step["tokens"] = _tokenize_step(step, renderer, tools=tools)
 
     return True
 

@@ -3,9 +3,12 @@ from unittest.mock import MagicMock
 import verifiers as vf
 
 from prime_rl.orchestrator.trajectories import interleave_rollout, pretokenize_rollout_trajectory
+from prime_rl.rendering.base import RenderedTokens
 
 
-class SimpleChatTokenizer:
+class SimpleRenderer:
+    """Minimal Renderer for testing — assigns incrementing token IDs."""
+
     def __init__(self):
         self._tok2id: dict[str, int] = {}
         self._next_id = 1
@@ -16,21 +19,27 @@ class SimpleChatTokenizer:
             self._next_id += 1
         return self._tok2id[token]
 
-    def apply_chat_template(self, messages, add_generation_prompt=False, return_dict=False):
-        del return_dict
+    def render(self, messages, *, tools=None, add_generation_prompt=False):
         ids = []
-        for message in messages:
-            role = message.get("role", "unknown")
+        indices = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
             ids.append(self._id(f"<|{role}|>"))
-            content = message.get("content", "")
-            if isinstance(content, str):
-                if content:
-                    ids.append(self._id(content))
-            else:
-                ids.append(self._id(str(content)))
+            indices.append(i)
+            content = msg.get("content", "")
+            if isinstance(content, str) and content:
+                ids.append(self._id(content))
+                indices.append(i)
         if add_generation_prompt:
             ids.append(self._id("<|assistant|>"))
-        return ids
+            indices.append(-1)
+        return RenderedTokens(token_ids=ids, message_indices=indices)
+
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        return self.render(messages, tools=tools, add_generation_prompt=add_generation_prompt).token_ids
+
+    def get_stop_token_ids(self):
+        return []
 
 
 def test_interleave_rollout_missing_tokens_returns_none():
@@ -57,7 +66,7 @@ def test_interleave_rollout_missing_tokens_returns_none():
 
 
 def test_pretokenize_rollout_trajectory_for_sft():
-    tokenizer = SimpleChatTokenizer()
+    renderer = SimpleRenderer()
     output = vf.RolloutOutput(
         example_id=42,
         trajectory=[
@@ -92,22 +101,21 @@ def test_pretokenize_rollout_trajectory_for_sft():
         error=None,
     )
 
-    pretokenize_rollout_trajectory(output, tokenizer)
+    pretokenize_rollout_trajectory(output, renderer)
 
     rollouts = interleave_rollout(output)
     assert rollouts is not None
     assert len(rollouts) == 1
 
     rollout = rollouts[0]
-    step1_prompt_ids = tokenizer.apply_chat_template(
+    step1_prompt_ids = renderer.render_ids(
         [{"role": "user", "content": "U1"}],
         add_generation_prompt=True,
     )
-    step1_full_ids = tokenizer.apply_chat_template(
+    step1_full_ids = renderer.render_ids(
         [{"role": "user", "content": "U1"}, {"role": "assistant", "content": "A1"}],
-        add_generation_prompt=False,
     )
-    step2_prompt_ids = tokenizer.apply_chat_template(
+    step2_prompt_ids = renderer.render_ids(
         [
             {"role": "user", "content": "U1"},
             {"role": "assistant", "content": "A1"},
@@ -115,14 +123,13 @@ def test_pretokenize_rollout_trajectory_for_sft():
         ],
         add_generation_prompt=True,
     )
-    step2_full_ids = tokenizer.apply_chat_template(
+    step2_full_ids = renderer.render_ids(
         [
             {"role": "user", "content": "U1"},
             {"role": "assistant", "content": "A1"},
             {"role": "user", "content": "U2"},
             {"role": "assistant", "content": "A2"},
         ],
-        add_generation_prompt=False,
     )
 
     prefix_len_1 = len(step1_prompt_ids)

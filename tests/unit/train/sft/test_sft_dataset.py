@@ -4,8 +4,19 @@ import pytest
 from datasets import Dataset, interleave_datasets
 from transformers import AutoTokenizer
 
+from prime_rl.rendering import Qwen3Renderer
 from prime_rl.trainer.sft.data import SFTDataset
 from prime_rl.trainer.utils import print_sample
+
+
+@pytest.fixture(scope="module")
+def qwen3_tokenizer():
+    return AutoTokenizer.from_pretrained("PrimeIntellect/Qwen3-0.6B", trust_remote_code=True)
+
+
+@pytest.fixture(scope="module")
+def qwen3_renderer(qwen3_tokenizer):
+    return Qwen3Renderer(qwen3_tokenizer)
 
 
 @pytest.fixture(scope="module")
@@ -180,7 +191,7 @@ def test_sft_dataset_state_resume(build_dummy_dataset):
         next(dataiter)
 
 
-def test_multiturn_loss_mask():
+def test_multiturn_loss_mask(qwen3_tokenizer, qwen3_renderer):
     dataset = Dataset.from_list(
         [
             {
@@ -193,13 +204,12 @@ def test_multiturn_loss_mask():
             },
         ]
     )
-    tokenizer = AutoTokenizer.from_pretrained("PrimeIntellect/Qwen3-0.6B")  # Properly handles multi-turn think
-    dataset = SFTDataset(dataset, tokenizer=tokenizer, max_examples=1)
+    dataset = SFTDataset(dataset, tokenizer=qwen3_tokenizer, renderer=qwen3_renderer, max_examples=1)
     sample = next(iter(dataset))
-    print_sample(sample["input_ids"], sample["loss_mask"], tokenizer)
+    print_sample(sample["input_ids"], sample["loss_mask"], qwen3_tokenizer)
 
 
-def test_multiturn_loss_mask_with_tools():
+def test_multiturn_loss_mask_with_tools(qwen3_tokenizer, qwen3_renderer):
     tool_example = {
         "prompt": [
             {"role": "system", "content": "You are a helpful assistant with access to tools."},
@@ -256,13 +266,12 @@ def test_multiturn_loss_mask_with_tools():
     }
 
     dataset = Dataset.from_list([tool_example])
-    tokenizer = AutoTokenizer.from_pretrained("PrimeIntellect/Qwen3-0.6B")  # Properly handles multi-turn think
-    dataset = SFTDataset(dataset, tokenizer=tokenizer, max_examples=1)
+    dataset = SFTDataset(dataset, tokenizer=qwen3_tokenizer, renderer=qwen3_renderer, max_examples=1)
     sample = next(iter(dataset))
-    print_sample(sample["input_ids"], sample["loss_mask"], tokenizer)
+    print_sample(sample["input_ids"], sample["loss_mask"], qwen3_tokenizer)
 
 
-def test_messages_rows_are_equivalent_to_empty_prompt_completion():
+def test_messages_rows_are_equivalent_to_empty_prompt_completion(qwen3_tokenizer, qwen3_renderer):
     messages = [
         {"role": "system", "content": "You are a helpful assistant with access to tools."},
         {"role": "user", "content": "What's the weather in San Francisco?"},
@@ -281,19 +290,23 @@ def test_messages_rows_are_equivalent_to_empty_prompt_completion():
         {"role": "assistant", "content": "It is 65F and sunny in San Francisco."},
     ]
 
-    tokenizer = AutoTokenizer.from_pretrained("PrimeIntellect/Qwen3-0.6B")
-    messages_dataset = SFTDataset(Dataset.from_list([{"messages": messages}]), tokenizer=tokenizer, max_examples=1)
+    messages_dataset = SFTDataset(
+        Dataset.from_list([{"messages": messages}]),
+        tokenizer=qwen3_tokenizer,
+        renderer=qwen3_renderer,
+        max_examples=1,
+    )
     split_dataset = SFTDataset(
         Dataset.from_list([{"prompt": [], "completion": messages}]),
-        tokenizer=tokenizer,
+        tokenizer=qwen3_tokenizer,
+        renderer=qwen3_renderer,
         max_examples=1,
     )
 
     assert next(iter(messages_dataset)) == next(iter(split_dataset))
 
 
-def test_messages_take_precedence_over_prompt_and_completion():
-    tokenizer = AutoTokenizer.from_pretrained("PrimeIntellect/Qwen3-0.6B")
+def test_messages_take_precedence_over_prompt_and_completion(qwen3_tokenizer, qwen3_renderer):
     row = {
         "messages": [
             {"role": "system", "content": "System from messages"},
@@ -304,10 +317,16 @@ def test_messages_take_precedence_over_prompt_and_completion():
         "completion": [{"role": "assistant", "content": "Ignored completion"}],
     }
 
-    messages_dataset = SFTDataset(Dataset.from_list([row]), tokenizer=tokenizer, max_examples=1)
+    messages_dataset = SFTDataset(
+        Dataset.from_list([row]),
+        tokenizer=qwen3_tokenizer,
+        renderer=qwen3_renderer,
+        max_examples=1,
+    )
     expected_dataset = SFTDataset(
         Dataset.from_list([{"prompt": [], "completion": row["messages"]}]),
-        tokenizer=tokenizer,
+        tokenizer=qwen3_tokenizer,
+        renderer=qwen3_renderer,
         max_examples=1,
     )
 

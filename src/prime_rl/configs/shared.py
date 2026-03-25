@@ -115,6 +115,16 @@ class BaseModelConfig(BaseConfig):
         ),
     ] = False
 
+    renderer: Annotated[
+        str,
+        Field(
+            description=(
+                "Renderer to use for chat template tokenization. "
+                "Options: 'auto' (detect from tokenizer), 'qwen3', 'qwen3.5', 'glm5', 'glm4.5', 'minimax-m2'."
+            ),
+        ),
+    ] = "auto"
+
     vlm: Annotated[
         "VLMConfig | None",
         Field(

@@ -10,13 +10,13 @@ from PIL import Image
 from prime_rl.orchestrator.trajectories import (
     VLMImageCache,
     _align_routed_experts,
-    _deserialize_tool_calls,
     _extract_images_from_examples,
     _extract_images_from_messages,
     _ImageStore,
     build_vlm_image_cache,
     interleave_rollout,
 )
+from prime_rl.utils.chat_template import deserialize_tool_calls as _deserialize_tool_calls
 
 
 def _pixels(data: list[list[float]]) -> tuple[bytes, list[int]]:

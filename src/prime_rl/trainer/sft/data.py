@@ -13,9 +13,9 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from prime_rl.configs.sft import DataConfig, LossMaskConfig, SFTDataConfig
+from prime_rl.rendering.base import Renderer, build_supervised_sample
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.chat_template import (
-    build_incremental_token_mask,
     deserialize_tool_calls,
     normalize_messages,
     strip_message_content,
@@ -126,12 +126,14 @@ class SFTDataset(StatefulIterableDataset):
         loss_mask_config: LossMaskConfig = LossMaskConfig(),
         max_examples: int | None = None,
         max_epochs: int | None = None,
+        renderer: Renderer | None = None,
     ):
         super().__init__()
         self.logger = get_logger()
         self.dataset = dataset
         self.num_examples = len(self.dataset)
         self.tokenizer = tokenizer
+        self.renderer = renderer
         self.shuffle = shuffle
         self.seed = seed
         self.seq_len = seq_len
@@ -205,13 +207,11 @@ class SFTDataset(StatefulIterableDataset):
                 case _:
                     raise ValueError(f"Invalid message role: {message['role']}")
 
-        input_ids, loss_mask = build_incremental_token_mask(
-            self.tokenizer,
+        input_ids, loss_mask = build_supervised_sample(
+            self.renderer,
             messages,
             role_to_mask=should_mask,
-            tools=tools,
-            chat_template_kwargs=example.get("chat_template_kwargs", {}),
-            collapse_consecutive_tool_messages=True,
+            tools=tools or None,
         )
 
         # If EOS token is not found, manually append it
@@ -532,6 +532,7 @@ def setup_dataset(
     *,
     max_epochs: int | None = None,
     raw_dataset: Dataset | None = None,
+    renderer: Renderer | None = None,
 ) -> StatefulIterableDataset:
     if config.type == "fake":
         return FakeDataset(
@@ -549,6 +550,7 @@ def setup_dataset(
             loss_mask_config=config.loss_mask,
             non_dp_size=non_dp_size,
             max_epochs=max_epochs,
+            renderer=renderer,
         )
     else:
         raise ValueError(f"Invalid dataset type: {config.type}")

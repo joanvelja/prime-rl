@@ -408,11 +408,6 @@ class RLConfig(BaseConfig):
                 "External rollout mode does not use the local inference server."
             )
 
-        if self.orchestrator.use_token_client:
-            raise ValueError(
-                "orchestrator.use_token_client must be false when orchestrator.teacher_rollout_model is configured."
-            )
-
         return self
 
     ### Auto-setup and validate shared configs

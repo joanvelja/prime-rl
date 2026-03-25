@@ -148,9 +148,14 @@ def train(config: SFTConfig):
     logger.info(f"Setting up {config.scheduler.type} scheduler with {scheduler_steps} steps ({config.scheduler})")
     scheduler = setup_scheduler(optimizer, config.scheduler, scheduler_steps, config.optim.lr)
 
-    # Set up the dataset and dataloader
+    # Set up the renderer
+    from prime_rl.rendering import create_renderer
+
+    renderer = create_renderer(tokenizer, renderer=config.model.renderer)
+    logger.info(f"Initialized renderer: {type(renderer).__name__}")
+
     logger.info(f"Initializing data ({config.data})")
-    dataset = setup_dataset(tokenizer, config.data, config.model.cp * config.model.tp)
+    dataset = setup_dataset(tokenizer, config.data, config.model.cp * config.model.tp, renderer=renderer)
     dataloader = setup_dataloader(dataset, config.data)
     dataiter = iter(dataloader)
 
@@ -256,7 +261,12 @@ def train(config: SFTConfig):
 
     def run_validation(step: int) -> None:
         val_dataset = setup_dataset(
-            tokenizer, config.val.data, config.model.cp * config.model.tp, max_epochs=1, raw_dataset=val_raw_dataset
+            tokenizer,
+            config.val.data,
+            config.model.cp * config.model.tp,
+            max_epochs=1,
+            raw_dataset=val_raw_dataset,
+            renderer=renderer,
         )
         val_dataloader = setup_dataloader(val_dataset, config.val.data)
 

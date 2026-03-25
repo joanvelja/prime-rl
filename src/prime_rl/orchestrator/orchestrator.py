@@ -18,6 +18,7 @@ from prime_rl.orchestrator.trajectories import (
     offload_images_to_disk,
     pretokenize_rollout_trajectory,
 )
+from prime_rl.rendering.base import RendererPool
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
 from prime_rl.utils.pathing import get_log_dir
 
@@ -77,6 +78,21 @@ from prime_rl.utils.utils import (
 )
 
 
+def _create_renderer_pool(model_name: str, renderer_name: str, pool_size: int, logger) -> RendererPool:
+    """Create a RendererPool for this model."""
+    from transformers import AutoTokenizer
+
+    from prime_rl.rendering.base import create_renderer
+
+    def factory():
+        t = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        return create_renderer(t, renderer=renderer_name)
+
+    sample = factory()
+    logger.info(f"Initialized {type(sample).__name__} for {model_name}, creating RendererPool (size={pool_size})")
+    return RendererPool(factory, pool_size)
+
+
 @clean_exit
 async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
@@ -113,12 +129,7 @@ async def orchestrate(config: OrchestratorConfig):
     # Setup rollout inference pool (handles both static and elastic modes)
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
-    client_type = "openai_chat_completions_token" if config.use_token_client else "openai_chat_completions"
-    if config.use_token_client:
-        logger.warning(
-            "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
-            "history and the chat template has the extension property."
-        )
+    client_type = "openai_chat_completions_token"
     inference_pool = await setup_inference_pool(
         rollout_client_config, model_name=rollout_model_name, client_type=client_type
     )
@@ -148,6 +159,9 @@ async def orchestrate(config: OrchestratorConfig):
         processor = AutoProcessor.from_pretrained(
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
+
+    # Setup renderer pool for parallel pretokenization
+    renderer_pool = _create_renderer_pool(config.model.name, config.model.renderer, pool_size=64, logger=logger)
 
     # Setup monitor
     logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
@@ -489,9 +503,7 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Schedule generating the training batch
         temperature = compute_temperature(progress.step, config.sampling, config.max_steps)
-        sampling_args = get_sampling_args(
-            config.sampling, temperature=temperature, use_token_client=config.use_token_client
-        )
+        sampling_args = get_sampling_args(config.sampling, temperature=temperature)
         scheduler.set_sampling_args(sampling_args)
         train_task = asyncio.create_task(scheduler.generate_batch(step=progress.step))
 
@@ -546,22 +558,19 @@ async def orchestrate(config: OrchestratorConfig):
         # Convert rollouts to training samples
         parallel_preprocess_start = time.perf_counter()
 
-        # Pretokenize before VLM image cache build (which strips image data from messages)
-        for rollout in train_rollouts:
-            pretokenize_rollout_trajectory(rollout, tokenizer, processor=processor)
-
-        # VLM: build image cache for efficient batched preprocessing
+        # VLM: build image cache (which strips image data from messages)
+        vlm_cache = None
         if is_vlm:
             vlm_cache = build_vlm_image_cache(train_rollouts, processor)
             logger.info(
                 f"VLM timing: extract={vlm_cache.extract_time:.2f}s, preprocess={vlm_cache.preprocess_time:.2f}s "
                 f"({vlm_cache.num_unique_images} unique images from {vlm_cache.num_unique_examples} examples)"
             )
-        else:
-            vlm_cache = None
 
-        # Process rollouts in parallel
+        # Pretokenize + interleave rollouts in parallel via RendererPool
         def process_rollout(rollout: vf.RolloutOutput, rollout_idx: int) -> list[TrainingSample] | None:
+            with renderer_pool.checkout() as renderer:
+                pretokenize_rollout_trajectory(rollout, renderer)
             return interleave_rollout(rollout, vlm_cache=vlm_cache, cache_key=rollout_idx)
 
         loop = asyncio.get_event_loop()
