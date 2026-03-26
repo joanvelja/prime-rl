@@ -1,7 +1,7 @@
 max_steps = 10000000
 seq_len = 32768
 max_async_level = 1
-output_dir = "/data/outputs/glm5-rlm"
+output_dir = "/data/outputs/glm5-rlm-prod"
 
 [log]
 level = "debug"
@@ -17,8 +17,7 @@ name = "zai-org/GLM-5"
 type = "nccl"
 port = 29502
 timeout = 12000
-use_vllm_format_transfer = true
-quantize_fp8 = true
+quantize_in_weight_transfer = true
 
 [deployment]
 type = "multi_node"
@@ -38,9 +37,10 @@ job_name = "RLM-GLM5"
 partition = "cluster"
 
 [ckpt]
-interval = 20
+interval = 10
 keep_last = 5
-resume_step = 140
+keep_interval = 40
+resume_step = 20
 
 [trainer]
 dist_timeout_seconds = 7200
@@ -76,7 +76,13 @@ rollouts_per_example = 16
 oversampling_factor = 3
 tasks_per_minute = 3072
 max_off_policy_steps = 16
-use_token_client = false
+use_token_client = true
+
+[orchestrator.client]
+connect_timeout = 30.0
+
+[orchestrator.client.extra_headers_from_state]
+X-Session-ID = "example_id"
 
 [orchestrator.sampling]
 temperature = 1.0
@@ -121,7 +127,6 @@ args = { repl_language="python", expose_message_history=true, root_max_completio
 
 [orchestrator.eval]
 interval = 20
-# skip_eval_on_resume = true # test online eval once
 skip_eval_on_resume = true
 eval_base_model = false
 
@@ -174,6 +179,10 @@ args = { repl_language="python", expose_message_history=true, root_max_completio
 # id = "ddbc-rllm"
 # name = "ddbc-rllm-python"
 # args = { repl_language="python", expose_message_history=true, root_max_completion_tokens=4096, sub_max_completion_tokens=10240, max_iterations = 20, code_execution_timeout = 600, sandbox_labels = ["rlm-prod-cluster-eval"], max_sub_llm_parallelism = 5, sub_prompt_verbosity = "light", root_prompt_verbosity = "light", cpu_cores = 2, memory_gb = 4, disk_size_gb = 4, timeout_minutes = 60, sandbox_client_max_workers = 512 }
+
+[[orchestrator.filters]]
+type = "gibberish"
+enforce = true
 
 [orchestrator.buffer]
 env_ratios = [
