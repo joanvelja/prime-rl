@@ -135,14 +135,112 @@ def _convert_prime_moe_layer_to_hf(state_dict: dict[str, Tensor], prefix: str):
     _rename_keys(state_dict, f"{mlp}fc2_latent_proj.", f"{mixer}fc2_latent_proj.")
 
 
+def _infer_mtp_sublayer_type(state_dict: dict[str, Tensor], prefix: str) -> str:
+    """Infer sublayer type from keys after prefix (before mixer→self_attn/mlp rename)."""
+    for k in state_dict:
+        if not k.startswith(prefix):
+            continue
+        suffix = k[len(prefix) :]
+        if suffix.startswith("mixer.gate.") or suffix.startswith("mixer.experts."):
+            return "moe"
+        if suffix.startswith("mixer.q_proj") or suffix.startswith("mixer.k_proj"):
+            return "attention"
+    return "attention"
+
+
+def _convert_mtp_hf_to_prime(state_dict: dict[str, Tensor]):
+    """Convert MTP weights from HF format to PrimeRL format in-place.
+
+    HF Nemotron-H stores MTP as: mtp.layers.{flat_idx}.{mixer/norm/enorm/hnorm/eh_proj/final_layernorm}.*
+    The flat sublayers follow a pattern (e.g. *E = attention + MoE per step).
+    """
+    mtp_keys = [k for k in state_dict if k.startswith("mtp.")]
+    if not mtp_keys:
+        return
+
+    # Drop shared embedding (reuses backbone embedding)
+    for k in [k for k in mtp_keys if "embed_tokens" in k or "embeddings" in k]:
+        del state_dict[k]
+
+    flat_indices = sorted({int(k.split(".")[2]) for k in state_dict if k.startswith("mtp.layers.")})
+    if not flat_indices:
+        return
+
+    # Extract shared fusion from first sublayer
+    first = f"mtp.layers.{flat_indices[0]}"
+    for fusion_key in ("enorm.", "hnorm.", "eh_proj."):
+        for k in [k for k in list(state_dict) if k.startswith(f"{first}.{fusion_key}")]:
+            state_dict[f"model.mtp.{fusion_key}{k[len(f'{first}.{fusion_key}') :]}"] = state_dict.pop(k)
+
+    # Extract output norm from last sublayer
+    last = f"mtp.layers.{flat_indices[-1]}"
+    for k in [k for k in list(state_dict) if k.startswith(f"{last}.final_layernorm.")]:
+        suffix = k[len(f"{last}.final_layernorm.") :]
+        state_dict[f"model.mtp.norm.{suffix}"] = state_dict.pop(k)
+
+    # Rename remaining sublayer keys and apply per-type conversion
+    for j, flat_idx in enumerate(flat_indices):
+        old_prefix = f"mtp.layers.{flat_idx}."
+        new_prefix = f"model.mtp.layers.0.block.sublayers.{j}."
+
+        for k in [k for k in list(state_dict) if k.startswith(old_prefix)]:
+            state_dict[new_prefix + k[len(old_prefix) :]] = state_dict.pop(k)
+
+        sublayer_type = _infer_mtp_sublayer_type(state_dict, new_prefix)
+        if sublayer_type == "moe":
+            _convert_hf_moe_layer_to_prime(state_dict, new_prefix)
+        elif sublayer_type == "attention":
+            _convert_hf_attention_layer_to_prime(state_dict, new_prefix)
+
+
+def _convert_mtp_prime_to_hf(state_dict: dict[str, Tensor]):
+    """Convert MTP weights from PrimeRL format to HF format in-place."""
+    mtp_keys = [k for k in state_dict if k.startswith("model.mtp.")]
+    if not mtp_keys:
+        return
+
+    sublayer_indices = sorted(
+        {int(k.split(".")[6]) for k in state_dict if k.startswith("model.mtp.layers.0.block.sublayers.")}
+    )
+    last_sublayer = max(sublayer_indices) if sublayer_indices else 0
+
+    # Convert sublayer types back to HF format first
+    for j in sublayer_indices:
+        prefix = f"model.mtp.layers.0.block.sublayers.{j}."
+        if any(k.startswith(f"{prefix}self_attn.") for k in state_dict):
+            _rename_keys(state_dict, f"{prefix}self_attn.", f"{prefix}mixer.")
+        elif any(k.startswith(f"{prefix}mlp.") for k in state_dict):
+            _convert_prime_moe_layer_to_hf(state_dict, prefix)
+
+    # Rename sublayers to flat indices
+    for j in sublayer_indices:
+        old_prefix = f"model.mtp.layers.0.block.sublayers.{j}."
+        new_prefix = f"mtp.layers.{j}."
+        _rename_keys(state_dict, old_prefix, new_prefix)
+
+    # Move fusion components to first sublayer
+    first = f"mtp.layers.{sublayer_indices[0] if sublayer_indices else 0}."
+    for fusion_key in ("enorm.", "hnorm.", "eh_proj."):
+        _rename_keys(state_dict, f"model.mtp.{fusion_key}", f"{first}{fusion_key}")
+
+    # Move output norm to last sublayer
+    last = f"mtp.layers.{last_sublayer}."
+    _rename_keys(state_dict, "model.mtp.norm.", f"{last}final_layernorm.")
+
+    # Clean up any remaining model.mtp keys (e.g. layers container)
+    for k in [k for k in list(state_dict) if k.startswith("model.mtp.")]:
+        del state_dict[k]
+
+
 def convert_hf_to_prime(state_dict: dict[str, Tensor], layers_block_type: list[str]):
     """Convert full model from HF to PrimeRL format in-place."""
     # Handle backbone.* -> model.* prefix (HF NemotronH uses "backbone" instead of "model")
     _rename_keys(state_dict, "backbone.", "model.")
 
-    # Drop multi-token prediction keys (not used in training)
-    for key in [k for k in state_dict if k.startswith("mtp.")]:
-        del state_dict[key]
+    # Convert or drop MTP keys
+    has_mtp = any(k.startswith("mtp.") for k in state_dict)
+    if has_mtp:
+        _convert_mtp_hf_to_prime(state_dict)
 
     # Global renames
     if "model.embeddings.weight" in state_dict:
@@ -156,6 +254,9 @@ def convert_hf_to_prime(state_dict: dict[str, Tensor], layers_block_type: list[s
 
 def convert_prime_to_hf(state_dict: dict[str, Tensor], layers_block_type: list[str]):
     """Convert full model from PrimeRL to HF format in-place."""
+    # Convert MTP before global rename
+    _convert_mtp_prime_to_hf(state_dict)
+
     # Global renames
     if "model.embed_tokens.weight" in state_dict:
         state_dict["model.embeddings.weight"] = state_dict.pop("model.embed_tokens.weight")

@@ -191,7 +191,10 @@ def get_load_balance_stats(
 
 
 def get_model(
-    config: ModelConfig, device: torch.device = torch.device("cpu"), dtype: torch.dtype = torch.bfloat16
+    config: ModelConfig,
+    device: torch.device = torch.device("cpu"),
+    dtype: torch.dtype = torch.bfloat16,
+    load_mtp: bool = False,
 ) -> nn.Module:
     logger = get_logger()
     logger.info(
@@ -253,6 +256,10 @@ def get_model(
     # NOTE: For VLM models, we do NOT propagate dtype to sub_configs.
     # The model should load in its default dtype (bf16) to match vLLM inference.
     # The FSDP MixedPrecisionPolicy handles compute dtype separately.
+
+    # Signal custom model implementations to build MTP layers during __init__
+    target_for_mtp = getattr(model_config, "text_config", model_config)
+    target_for_mtp._load_mtp = load_mtp
 
     logger.debug(f"Loaded model config ({model_config.to_dict()})")
 
@@ -747,8 +754,12 @@ def setup_model(
 
     logger = get_logger()
 
+    load_mtp = config.mtp is not None
+
     # 1. We load to meta device by default
-    model = get_model(config, device=torch.device("meta"), dtype=DTYPE_MAP[config.optimization_dtype])
+    model = get_model(
+        config, device=torch.device("meta"), dtype=DTYPE_MAP[config.optimization_dtype], load_mtp=load_mtp
+    )
 
     possible_to_load_to_meta = can_reinit_empty_buffers(model)
 
@@ -760,7 +771,9 @@ def setup_model(
     # 1a. We load to CPU if we cannot reinit empty buffers
     if not possible_to_load_to_meta:
         logger.warning("Cannot load model to meta device only, loading to CPU instead.")
-        model = get_model(config, device=torch.device("cpu"), dtype=DTYPE_MAP[config.optimization_dtype])
+        model = get_model(
+            config, device=torch.device("cpu"), dtype=DTYPE_MAP[config.optimization_dtype], load_mtp=load_mtp
+        )
 
     lm_head_chunk_size: int | None = None
     if isinstance(config.fused_lm_head_token_chunk_size, int):

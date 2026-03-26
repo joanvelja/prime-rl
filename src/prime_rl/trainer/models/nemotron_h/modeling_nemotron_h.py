@@ -213,6 +213,8 @@ BLOCK_TYPE_MAP = {
     "attention": NemotronHAttentionLayer,
 }
 
+_MTP_PATTERN_MAP = {"*": NemotronHAttentionLayer, "E": NemotronHMoELayer}
+
 
 def _build_layer(config: NemotronHConfig, layer_idx: int):
     layer_type = config.layers_block_type[layer_idx]
@@ -220,6 +222,42 @@ def _build_layer(config: NemotronHConfig, layer_idx: int):
     if layer_type == "mamba":
         return cls(config, layer_idx=layer_idx)
     return cls(config)
+
+
+class NemotronHMTPBlock(nn.Module):
+    """Single MTP block: sequence of attention + MoE sublayers following a pattern."""
+
+    def __init__(self, config: NemotronHConfig, pattern: str):
+        super().__init__()
+        self.sublayers = nn.ModuleList([_MTP_PATTERN_MAP[c](config) for c in pattern])
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        max_seqlen: int | None = None,
+    ) -> torch.Tensor:
+        for layer in self.sublayers:
+            hidden_states = layer(
+                hidden_states, position_embeddings=position_embeddings, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+            )
+        return hidden_states
+
+
+class NemotronHMTP(nn.Module):
+    """MTP module for Nemotron-H with shared fusion and per-step sublayer blocks."""
+
+    def __init__(self, config: NemotronHConfig):
+        super().__init__()
+        self.enorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+        self.hnorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+
+        pattern = getattr(config, "mtp_hybrid_override_pattern", "*E")
+        num_mtp = getattr(config, "num_nextn_predict_layers", 1)
+        self.layers = nn.ModuleList([NemotronHMTPBlock(config, pattern) for _ in range(num_mtp)])
 
 
 @auto_docstring
@@ -369,6 +407,9 @@ class NemotronHModel(NemotronHPreTrainedModel):
         # NemotronH does not use RoPE - position information comes from Mamba layers
         self.rotary_emb = None
 
+        if getattr(config, "_load_mtp", False):
+            self.mtp = NemotronHMTP(config)
+
         self.gradient_checkpointing = False
         self.post_init()
 
@@ -401,6 +442,10 @@ class NemotronHModel(NemotronHPreTrainedModel):
         else:
             max_seqlen = None
             cu_seqlens = None
+
+        # Cache for MTP layer reuse (same packing structure as backbone)
+        self._cu_seqlens = cu_seqlens
+        self._max_seqlen = max_seqlen
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids) if self.rotary_emb is not None else None
@@ -460,6 +505,23 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
             labels[:, slice_indices] if labels is not None else None,
             temperature=temperature,
         )
+
+    # ------------------------------------------------------------------
+    # MTP interface
+    # ------------------------------------------------------------------
+
+    @property
+    def mtp_layers(self) -> nn.ModuleList | None:
+        mtp = getattr(self.model, "mtp", None)
+        return mtp.layers if mtp is not None else None
+
+    def mtp_layer_forward(self, mtp_layer, hidden_states, token_embeds, position_ids, position_embeddings):
+        mtp = self.model.mtp
+        e = mtp.enorm(token_embeds)
+        h = mtp.hnorm(hidden_states)
+        combined = mtp.eh_proj(torch.cat([e, h], dim=-1))
+        out = mtp_layer(combined, cu_seqlens=self.model._cu_seqlens, max_seqlen=self.model._max_seqlen)
+        return mtp.norm(out)
 
     def init_buffers_post_meta(self):
         pass

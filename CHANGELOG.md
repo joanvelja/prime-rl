@@ -2,6 +2,8 @@
 
 Documenting changes which affect configuration usage patterns (added/moved/removed/renamed fields, notable logic changes).
 
+- **`model.mtp`**: Added Multi-Token Prediction auxiliary training config (`MTPConfig | None`, default: `None`). When set, trains the model's MTP layers with an auxiliary CE loss alongside the main objective. Sub-fields: `loss_scaling_factor` (default: 0.1) and `lm_head_chunk_size` (default: 512). Requires a `PreTrainedModelPrimeRL` subclass with MTP support (e.g. Nemotron-H, GLM-4 MoE, Qwen3.5 MoE). (2026-03-26)
+- **`inference.speculative_config`**: Added speculative decoding configuration passthrough to vLLM (`dict | None`, default: `None`). For MTP models: `{"method": "mtp", "num_speculative_tokens": 1}`. See vLLM docs for supported methods and parameters. (2026-03-26)
 - **`loss_impl = "quack_fused"` (SFT)**: Added `quack_fused` option for the SFT `loss_impl` field. Uses quack-kernels for chunked linear + cross-entropy with CuTe DSL CUDA kernels, avoiding full logits materialization. Requires `quack-kernels` package. Does not support Gemma logit softcapping. Custom model impl (`model.impl = "custom"`) also gains quack RMSNorm acceleration on CUDA automatically. (2026-03-26)
 - **`model.tp` (trainer `ModelConfig`)**: Removed from the trainer model config. Existing trainer configs must delete this field; it is no longer accepted. (2026-03-26)
 - **`orchestrator.env[].num_workers`**: Added configurable env server worker count (`int | "auto"`, default: `"auto"`). When `"auto"`, scales based on concurrency (1 worker per 256 concurrent rollouts). Only used when the orchestrator spawns the env server (i.e. `address` is not set). (2026-03-25)

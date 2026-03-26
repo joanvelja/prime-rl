@@ -111,6 +111,18 @@ class Glm4MoeDecoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
+class Glm4MoeMTPLayer(nn.Module):
+    """Self-contained MTP prediction layer with fusion + decoder block + output norm."""
+
+    def __init__(self, config: Glm4MoeConfig, layer_idx: int):
+        super().__init__()
+        self.enorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
+        self.hnorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
+        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.block = Glm4MoeDecoderLayer(config, layer_idx)
+        self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
+
+
 @auto_docstring
 class Glm4MoePreTrainedModel(PreTrainedModelPrimeRL):
     config: Glm4MoeConfig
@@ -193,6 +205,12 @@ class Glm4MoeModel(Glm4MoePreTrainedModel):
         self.rotary_emb = RotaryEmbedding(rotary_config)
         self.gradient_checkpointing = False
 
+        if getattr(config, "_load_mtp", False):
+            num_mtp = getattr(config, "num_nextn_predict_layers", 1)
+            self.mtp_layers = nn.ModuleList(
+                [Glm4MoeMTPLayer(config, config.num_hidden_layers + i) for i in range(num_mtp)]
+            )
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -229,6 +247,10 @@ class Glm4MoeModel(Glm4MoePreTrainedModel):
         else:
             max_seqlen = None
             cu_seqlens = None
+
+        # Cache for MTP layer reuse (same packing structure as backbone)
+        self._cu_seqlens = cu_seqlens
+        self._max_seqlen = max_seqlen
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -326,6 +348,18 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel, GenerationMixin):
             labels[:, slice_indices] if labels is not None else None,
             temperature=temperature,
         )
+
+    def mtp_layer_forward(self, mtp_layer, hidden_states, token_embeds, position_ids, position_embeddings):
+        e = mtp_layer.enorm(token_embeds)
+        h = mtp_layer.hnorm(hidden_states)
+        combined = mtp_layer.eh_proj(torch.cat([e, h], dim=-1))
+        out = mtp_layer.block(
+            combined,
+            position_embeddings=position_embeddings,
+            cu_seqlens=self.model._cu_seqlens,
+            max_seqlen=self.model._max_seqlen,
+        )
+        return mtp_layer.norm(out)
 
     def init_buffers_post_meta(self):
         buffer_names = [name for name, _ in self.named_buffers()]

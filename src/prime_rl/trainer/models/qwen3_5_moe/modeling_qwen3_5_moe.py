@@ -685,6 +685,25 @@ class Qwen3_5MoePreTrainedModel(PreTrainedModelPrimeRL):
         return state_dict
 
 
+class Qwen3_5MoeMTP(nn.Module):
+    """MTP module with shared fusion components and per-step decoder layers."""
+
+    def __init__(self, config: Qwen3_5MoeConfig):
+        super().__init__()
+        self.enorm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hnorm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.norm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        num_mtp = getattr(config, "mtp_num_hidden_layers", 1)
+        original_types = config.layer_types
+        config.layer_types = original_types + ["full_attention"] * num_mtp
+        self.layers = nn.ModuleList(
+            [Qwen3_5MoeDecoderLayer(config, config.num_hidden_layers + i) for i in range(num_mtp)]
+        )
+        config.layer_types = original_types
+
+
 class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
     def __init__(self, config: Qwen3_5MoeConfig):
         super().__init__(config)
@@ -698,6 +717,9 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
         self.norm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = _create_rotary_emb(config)
         self.gradient_checkpointing = False
+
+        if getattr(config, "_load_mtp", False):
+            self.mtp = Qwen3_5MoeMTP(config)
 
         self.post_init()
 
@@ -729,6 +751,10 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
         else:
             max_seqlen = None
             cu_seqlens = None
+
+        # Cache for MTP layer reuse (same packing structure as backbone)
+        self._cu_seqlens = cu_seqlens
+        self._max_seqlen = max_seqlen
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -763,6 +789,8 @@ def _build_text_config(composite_config: PretrainedConfig) -> Qwen3_5MoeConfig:
     )
     if attn_impl is not None:
         text_config._attn_implementation = attn_impl
+    if getattr(composite_config.text_config, "_load_mtp", False):
+        text_config._load_mtp = True
     return text_config
 
 
@@ -880,6 +908,40 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+
+    # ------------------------------------------------------------------
+    # MTP interface
+    # ------------------------------------------------------------------
+
+    def _text_model(self) -> Qwen3_5MoeModel:
+        return self.model.language_model if self._is_vlm else self.model
+
+    @property
+    def mtp_layers(self) -> nn.ModuleList | None:
+        mtp = getattr(self._text_model(), "mtp", None)
+        return mtp.layers if mtp is not None else None
+
+    @property
+    def mtp_embed_tokens(self) -> nn.Module:
+        return self._text_model().embed_tokens
+
+    @property
+    def mtp_rotary_emb(self) -> nn.Module | None:
+        return self._text_model().rotary_emb
+
+    def mtp_layer_forward(self, mtp_layer, hidden_states, token_embeds, position_ids, position_embeddings):
+        text_model = self._text_model()
+        mtp = text_model.mtp
+        e = mtp.enorm(token_embeds)
+        h = mtp.hnorm(hidden_states)
+        combined = mtp.eh_proj(torch.cat([e, h], dim=-1))
+        out = mtp_layer(
+            combined,
+            position_embeddings=position_embeddings,
+            cu_seqlens=text_model._cu_seqlens,
+            max_seqlen=text_model._max_seqlen,
+        )
+        return mtp.norm(out)
 
     # ------------------------------------------------------------------
     # State dict detection & conversion (handles both text-only and VLM)

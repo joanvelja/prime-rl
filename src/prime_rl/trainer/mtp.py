@@ -51,7 +51,7 @@ def compute_mtp_token_losses(
 
     h = hidden_states.detach()
     detached_weight = model.lm_head.weight.detach()
-    total_loss = torch.zeros(B, S, device=hidden_states.device)
+    total_loss: Tensor | None = None
 
     current_ids = input_ids
     current_pos = position_ids
@@ -73,15 +73,20 @@ def compute_mtp_token_losses(
         layer = layers[0] if shared else layers[step]
         mtp_out = model.mtp_layer_forward(layer, h, embeds, shifted_pos, pos_emb)
 
+        chunks = []
         for start in range(0, S, chunk_size):
             end = min(start + chunk_size, S)
             logits = F.linear(mtp_out[:, start:end, :], detached_weight)
-            total_loss[:, start:end] += F.cross_entropy(
-                logits.reshape(-1, V),
-                labels[:, start:end].reshape(-1),
-                reduction="none",
-            ).reshape(B, end - start)
+            chunks.append(
+                F.cross_entropy(
+                    logits.reshape(-1, V),
+                    labels[:, start:end].reshape(-1),
+                    reduction="none",
+                ).reshape(B, end - start)
+            )
             del logits
+        step_loss = torch.cat(chunks, dim=1)
+        total_loss = step_loss if total_loss is None else total_loss + step_loss
 
         h = mtp_out
         current_ids = shifted_ids

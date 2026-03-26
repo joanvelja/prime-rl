@@ -61,15 +61,20 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
         position_ids: Tensor | None,
         position_embeddings: tuple[Tensor, Tensor] | None,
     ) -> Tensor:
-        """Run a single MTP layer. Override for model-specific forward signatures."""
-        out = mtp_layer(
-            input_embeds=token_embeds,
-            hidden_states=hidden_states,
-            attention_mask=None,
-            position_ids=position_ids,
-            position_embeddings=position_embeddings,
-        )
-        return out[0] if isinstance(out, tuple) else out
+        """Run a single MTP layer. Override for model-specific forward signatures.
+
+        Default assumes mtp_layer has enorm/hnorm/eh_proj/block sub-modules
+        following the DeepSeek-V3/GLM-4 pattern (per-layer fusion).
+        """
+        import torch
+
+        e = mtp_layer.enorm(token_embeds)
+        h = mtp_layer.hnorm(hidden_states)
+        combined = mtp_layer.eh_proj(torch.cat([e, h], dim=-1))
+        out = mtp_layer.block(combined, position_embeddings=position_embeddings)
+        if hasattr(mtp_layer, "norm"):
+            out = mtp_layer.norm(out)
+        return out
 
     @classmethod
     def from_config(cls, config, **kwargs):

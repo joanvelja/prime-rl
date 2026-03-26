@@ -437,7 +437,10 @@ def train(config: TrainerConfig):
             if mtp_token_loss is not None and mtp_config is not None:
                 from prime_rl.trainer.mtp import compute_mtp_mask
 
-                mtp_mask = compute_mtp_mask(loss_mask, num_steps=out.get("mtp_num_steps", 1))
+                mtp_loss_mask = (
+                    shard_for_cp(loss_mask, cp_rank=cp_rank, cp_world_size=cp_size) if cp_enabled else loss_mask
+                )
+                mtp_mask = compute_mtp_mask(mtp_loss_mask, num_steps=out.get("mtp_num_steps", 1))
                 mtp_count = mtp_mask.sum().clamp(min=1)
                 mtp_loss = (mtp_token_loss * mtp_mask).sum() / mtp_count
                 loss = loss + mtp_config.loss_scaling_factor * mtp_loss
