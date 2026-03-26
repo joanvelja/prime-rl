@@ -78,11 +78,11 @@ disagg = [
     "nixl-cu12 ; platform_machine == 'x86_64'",
     "vllm-router ; platform_machine == 'x86_64'",
 ]
-
-[dependency-groups]
 quack = [
     "quack-kernels>=0.3.3",
 ]
+
+[dependency-groups]
 mamba-ssm = [
     "mamba-ssm>=2.3.0",
 ]
