@@ -202,13 +202,6 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = 1
 
-    tp: Annotated[
-        int,
-        Field(
-            description="The tensor parallelism size to use. If 1, then no TP will be used.",
-        ),
-    ] = 1
-
     cp: Annotated[
         int,
         Field(
