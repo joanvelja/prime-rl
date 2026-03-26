@@ -38,7 +38,7 @@ def _int_view(tensor: Tensor) -> Tensor:
 
 def broadcast_integer(integer: int, communicator: PyNcclCommunicator) -> None:
     """Broadcast an integer to a process group using NCCL communicator."""
-    integer_tensor = torch.tensor([integer], dtype=torch.long).cuda()
+    integer_tensor = torch.tensor([integer], dtype=torch.long).to(communicator.device)
     communicator.broadcast(integer_tensor, src=0)
 
 
@@ -61,9 +61,9 @@ def _broadcast_metadata(
     for dtype, items in dtype_groups.items():
         metadata[dtype] = [(key, value.shape, value.numel()) for key, value in items]
     state = pickle.dumps(metadata)
-    size_tensor = torch.tensor([len(state)], dtype=torch.long).cuda()
+    size_tensor = torch.tensor([len(state)], dtype=torch.long).to(communicator.device)
     communicator.broadcast(size_tensor, src=0)
-    state_tensor = torch.ByteTensor(list(state)).cuda()
+    state_tensor = torch.ByteTensor(list(state)).to(communicator.device)
     communicator.broadcast(state_tensor, src=0)
 
 
@@ -125,7 +125,7 @@ def _broadcast_delta(
         total_delta_bytes += values.numel() * values.element_size()
         total_delta_bytes += indices.numel() * indices.element_size()
 
-        num_changed_tensor = torch.tensor([indices.numel()], dtype=torch.long).cuda()
+        num_changed_tensor = torch.tensor([indices.numel()], dtype=torch.long).to(communicator.device)
         communicator.broadcast(num_changed_tensor, src=0)
         if indices.numel() > 0:
             communicator.broadcast(indices, src=0)
@@ -251,7 +251,7 @@ class NCCLWeightBroadcastSender:
         total_delta_bytes = 0
 
         for seq_idx, cpu_dict in enumerate(gathered):
-            gpu_dict = {k: v.cuda() for k, v in cpu_dict.items()}
+            gpu_dict = {k: v.to(self.communicator.device) for k, v in cpu_dict.items()}
             if self.delta_compression:
                 n_elem, n_changed, full_bytes, delta_bytes = self._send_delta_aware(gpu_dict, seq_idx)
                 total_elements += n_elem
