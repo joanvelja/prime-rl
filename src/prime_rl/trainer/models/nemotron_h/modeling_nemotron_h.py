@@ -79,11 +79,42 @@ def _patch_mamba2_use_triton_ssd():
     logger.info("Patched NemotronHMamba2Mixer to use mamba_ssm Triton SSD kernels")
 
 
+def _validate_zamba2_compat(config: NemotronHConfig):
+    """Fail fast if the config is missing the Zamba2 fields the HF mixer consumes."""
+    required_aliases = (
+        "mamba_expand",
+        "mamba_d_state",
+        "mamba_d_conv",
+        "mamba_ngroups",
+        "mamba_headdim",
+        "n_mamba_heads",
+        "use_mem_eff_path",
+        "add_bias_linear",
+    )
+    missing = [attr for attr in required_aliases if not hasattr(config, attr)]
+    if missing:
+        missing_names = ", ".join(missing)
+        raise AttributeError(
+            "NemotronHConfig is missing the Zamba2 compatibility aliases required by "
+            f"NemotronHMamba2Mixer: {missing_names}."
+        )
+
+    correct_intermediate = config.mamba_num_heads * config.mamba_head_dim
+    actual_intermediate = int(config.mamba_expand * config.hidden_size)
+    if actual_intermediate != correct_intermediate:
+        raise ValueError(
+            "NemotronHConfig.mamba_expand must satisfy "
+            "int(mamba_expand * hidden_size) == mamba_num_heads * mamba_head_dim "
+            f"(got {actual_intermediate} vs {correct_intermediate})."
+        )
+
+
 class NemotronHMambaLayer(GradientCheckpointingLayer):
     """Mamba-2 SSM layer: norm -> NemotronHMamba2Mixer -> residual."""
 
     def __init__(self, config: NemotronHConfig, layer_idx: int):
         super().__init__()
+        _validate_zamba2_compat(config)
         _patch_mamba2_use_triton_ssd()
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
         self.mamba = NemotronHMamba2Mixer(config, layer_idx=layer_idx)
