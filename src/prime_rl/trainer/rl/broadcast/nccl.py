@@ -352,9 +352,14 @@ class NCCLWeightBroadcast(WeightBroadcast):
         step: int,
         start_time: float,
     ) -> None:
-        self._wait_for_nccl_ready(notified_runs)
-        self.sender.send_all_layers(gathered, step)
-        self.logger.debug(f"Pipelined broadcast completed in {time.perf_counter() - start_time:.2f}s (wall)")
+        try:
+            self._wait_for_nccl_ready(notified_runs)
+            self.sender.send_all_layers(gathered, step)
+        except Exception as error:
+            self._bg_error = error
+            self.logger.exception("Pipelined NCCL broadcast failed")
+        else:
+            self.logger.debug(f"Pipelined broadcast completed in {time.perf_counter() - start_time:.2f}s (wall)")
 
     def _join_background(self) -> None:
         """Wait for a previous pipelined broadcast to finish, re-raising errors."""
