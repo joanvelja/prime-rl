@@ -2566,6 +2566,9 @@ flash-attn-3 = [
 flash-attn-cute = [
     { name = "flash-attn-4", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
+quack = [
+    { name = "quack-kernels", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -2577,9 +2580,6 @@ dev = [
 ]
 mamba-ssm = [
     { name = "mamba-ssm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-]
-quack = [
-    { name = "quack-kernels", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 
 [package.metadata]
@@ -2615,6 +2615,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=1.10.13" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?branch=main" },
     { name = "pyzmq", specifier = ">=27.1.0" },
+    { name = "quack-kernels", marker = "extra == 'quack'", specifier = ">=0.3.3" },
     { name = "reverse-text", marker = "extra == 'envs'", index = "https://hub.primeintellect.ai/primeintellect/simple/" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ring-flash-attn", specifier = ">=0.1.8" },
@@ -2634,7 +2635,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.24.2" },
     { name = "wiki-search", marker = "extra == 'envs'", index = "https://hub.primeintellect.ai/primeintellect/simple/" },
 ]
-provides-extras = ["flash-attn", "flash-attn-3", "flash-attn-cute", "envs", "disagg"]
+provides-extras = ["flash-attn", "flash-attn-3", "flash-attn-cute", "envs", "disagg", "quack"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2645,7 +2646,6 @@ dev = [
     { name = "ruff", specifier = ">=0.12.1" },
 ]
 mamba-ssm = [{ name = "mamba-ssm", specifier = ">=2.3.0" }]
-quack = [{ name = "quack-kernels", specifier = ">=0.3.3" }]
 
 [[package]]
 name = "prime-sandboxes"
