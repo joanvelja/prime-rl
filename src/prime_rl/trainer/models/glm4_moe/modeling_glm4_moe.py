@@ -177,6 +177,12 @@ class Glm4MoePreTrainedModel(PreTrainedModelPrimeRL):
         convert_hf_layer_to_tt(state_dict, layer_idx)
         return state_dict
 
+    def convert_non_layer_to_hf(self, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+        from prime_rl.trainer.models.glm4_moe.converting_glm4_moe import _convert_mtp_prime_to_hf
+
+        _convert_mtp_prime_to_hf(state_dict, self.config.num_hidden_layers)
+        return state_dict
+
 
 @auto_docstring
 class Glm4MoeModel(Glm4MoePreTrainedModel):

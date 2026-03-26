@@ -141,6 +141,26 @@ class LoRAConfig(BaseConfig):
     ] = []
 
 
+class MTPConfig(BaseConfig):
+    """Configures auxiliary Multi-Token Prediction (MTP) training."""
+
+    loss_scaling_factor: Annotated[
+        float,
+        Field(
+            ge=0.0,
+            description="Scale applied to the auxiliary MTP cross-entropy loss before adding it to the main objective.",
+        ),
+    ] = 0.1
+
+    lm_head_chunk_size: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Sequence chunk size used when projecting MTP hidden states through the shared LM head.",
+        ),
+    ] = 512
+
+
 class DebugModelConfig(BaseConfig):
     """Debugging feature around model and distributed training."""
 
@@ -271,6 +291,13 @@ class ModelConfig(BaseModelConfig):
         LoRAConfig | None,
         Field(
             description="Whether to apply LoRA to the model. If None, will not apply LoRA.",
+        ),
+    ] = None
+
+    mtp: Annotated[
+        MTPConfig | None,
+        Field(
+            description="Optional Multi-Token Prediction auxiliary training config for models with MTP support.",
         ),
     ] = None
 

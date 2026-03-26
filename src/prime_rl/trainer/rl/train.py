@@ -435,7 +435,7 @@ def train(config: TrainerConfig):
             # Add MTP auxiliary loss
             mtp_token_loss = out.get("mtp_token_loss")
             if mtp_token_loss is not None and mtp_config is not None:
-                from prime_rl.trainer.mtp import compute_mtp_mask
+                from prime_rl.trainer.mtp import compute_mtp_loss_stats
 
                 mtp_loss_mask = (
                     shard_for_cp(loss_mask, cp_rank=cp_rank, cp_world_size=cp_size) if cp_enabled else loss_mask
@@ -443,12 +443,14 @@ def train(config: TrainerConfig):
                 mtp_pos_ids = (
                     shard_for_cp(position_ids, cp_rank=cp_rank, cp_world_size=cp_size) if cp_enabled else position_ids
                 )
-                mtp_mask = compute_mtp_mask(
-                    mtp_loss_mask, num_steps=out.get("mtp_num_steps", 1), position_ids=mtp_pos_ids
+                mtp_loss, mtp_loss_sum = compute_mtp_loss_stats(
+                    mtp_token_loss,
+                    mtp_loss_mask,
+                    num_steps=out.get("mtp_num_steps", 1),
+                    position_ids=mtp_pos_ids,
+                    cp_group=cp_group if cp_enabled else None,
                 )
-                mtp_count = mtp_mask.sum().clamp(min=1)
-                mtp_loss = (mtp_token_loss * mtp_mask).sum() / mtp_count
-                loss = loss + mtp_config.loss_scaling_factor * mtp_loss
+                loss = loss + mtp_config.loss_scaling_factor * (mtp_loss_sum / loss_scale)
                 tensors["mtp_loss"].append(mtp_loss.detach().to("cpu").unsqueeze(0))
 
             # Backward pass

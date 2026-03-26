@@ -676,7 +676,12 @@ class Qwen3_5MoePreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def convert_layer_to_hf(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        convert_tt_layer_to_hf(state_dict, layer_idx)
+        from prime_rl.trainer.models.qwen3_5_moe.converting_qwen3_5_moe import _convert_mtp_prime_to_hf
+
+        if layer_idx == -1:
+            _convert_mtp_prime_to_hf(state_dict)
+        else:
+            convert_tt_layer_to_hf(state_dict, layer_idx)
         return state_dict
 
     @classmethod
@@ -982,10 +987,15 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
 
     @classmethod
     def convert_layer_to_hf(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
+        from prime_rl.trainer.models.qwen3_5_moe.converting_qwen3_5_moe import _convert_mtp_prime_to_hf
+
         vlm = _has_vlm_keys(state_dict)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=True)
-        convert_tt_layer_to_hf(state_dict, layer_idx)
+        if layer_idx == -1:
+            _convert_mtp_prime_to_hf(state_dict)
+        else:
+            convert_tt_layer_to_hf(state_dict, layer_idx)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=False)
         return state_dict

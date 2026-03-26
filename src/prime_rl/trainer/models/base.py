@@ -26,6 +26,25 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
         return getattr(self.model, "mtp_layers", None)
 
     @property
+    def mtp_layer_list(self) -> tuple[nn.Module, ...]:
+        """Return MTP layers as an ordered tuple."""
+        layers = self.mtp_layers
+        if layers is None:
+            return ()
+        if isinstance(layers, nn.ModuleDict):
+            return tuple(layers.values())
+        return tuple(layers)
+
+    @property
+    def mtp_module(self) -> nn.Module | None:
+        """Return the top-level trainable MTP module/container."""
+        shared_mtp = getattr(getattr(self, "model", None), "mtp", None)
+        if isinstance(shared_mtp, nn.Module):
+            return shared_mtp
+        layers = self.mtp_layers
+        return layers if isinstance(layers, nn.Module) else None
+
+    @property
     def mtp_embed_tokens(self) -> nn.Module:
         """Return the token embedding module used for MTP input."""
         for attr in ("embed_tokens", "embeddings"):
@@ -46,8 +65,7 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
         For non-shared weights this equals len(mtp_layers).
         For shared weights this may be larger (same layer applied multiple times).
         """
-        layers = self.mtp_layers
-        return len(layers) if layers is not None else 0
+        return len(self.mtp_layer_list)
 
     @property
     def mtp_shared_weights(self) -> bool:
@@ -166,6 +184,16 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
             layer_idx: The index of the layer to convert.
         """
         raise NotImplementedError(f"convert_layer_to_prime is not implemented for {cls.__name__}")
+
+    def convert_non_layer_to_hf(self, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+        """
+        Convert non-layer weights from PrimeRL format to HuggingFace format in-place.
+
+        This is used by NCCL broadcast for the shard containing embeddings, norms,
+        and auxiliary modules that live outside the main transformer layer stack.
+        """
+        type(self).convert_layer_to_hf(state_dict, -1)
+        return state_dict
 
     @classmethod
     def convert_layer_to_vllm_kernel(

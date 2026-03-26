@@ -363,6 +363,9 @@ def _patch_model_forward(model: nn.Module) -> None:
     ) -> PrimeLmOutput:
         # For VLM with images, don't create position_ids - let model compute MRoPE internally
         is_multimodal = kwargs.get("pixel_values") is not None
+        mtp_config = getattr(self, "_mtp_config", None)
+        if mtp_config is not None and is_multimodal:
+            raise NotImplementedError("MTP training is not supported with multimodal/VLM inputs.")
         if position_ids is None and not is_multimodal:
             reference_tensor = input_ids if input_ids is not None else inputs_embeds
             position_ids = torch.arange(1, reference_tensor.shape[1] + 1, device=reference_tensor.device).unsqueeze(0)
@@ -387,7 +390,6 @@ def _patch_model_forward(model: nn.Module) -> None:
         )
 
         # MTP auxiliary loss (computed inside FSDP forward context so all params are available)
-        mtp_config = getattr(self, "_mtp_config", None)
         if mtp_config is not None and input_ids is not None:
             from prime_rl.trainer.mtp import compute_mtp_token_losses
 

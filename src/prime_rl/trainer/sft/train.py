@@ -233,12 +233,16 @@ def train(config: SFTConfig):
         mtp_loss_sum = torch.tensor(0.0, device="cuda")
         mtp_token_loss = out.get("mtp_token_loss")
         if mtp_token_loss is not None and mtp_config is not None:
-            from prime_rl.trainer.mtp import compute_mtp_mask
+            from prime_rl.trainer.mtp import compute_mtp_loss_stats
 
-            mtp_mask = compute_mtp_mask(loss_mask, num_steps=out.get("mtp_num_steps", 1), position_ids=position_ids)
-            mtp_count = mtp_mask.sum().clamp(min=1)
-            mtp_loss_sum = (mtp_token_loss * mtp_mask).sum()
-            loss_sum = loss_sum + mtp_config.loss_scaling_factor * mtp_loss_sum * (token_count / mtp_count)
+            mtp_loss_mean, mtp_loss_sum = compute_mtp_loss_stats(
+                mtp_token_loss,
+                loss_mask,
+                num_steps=out.get("mtp_num_steps", 1),
+                position_ids=position_ids,
+                cp_group=cp_group if cp_enabled else None,
+            )
+            loss_sum = loss_sum + mtp_config.loss_scaling_factor * mtp_loss_sum
 
         del out
         return loss_sum, token_count, mtp_loss_sum
