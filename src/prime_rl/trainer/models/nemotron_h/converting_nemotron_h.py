@@ -148,11 +148,23 @@ def _infer_mtp_sublayer_type(state_dict: dict[str, Tensor], prefix: str) -> str:
     return "attention"
 
 
+def _detect_pattern_length(types: list[str]) -> int:
+    """Find the shortest repeating period in a sublayer type sequence."""
+    n = len(types)
+    for period in range(1, n + 1):
+        if n % period != 0:
+            continue
+        if all(types[i] == types[i % period] for i in range(n)):
+            return period
+    return n
+
+
 def _convert_mtp_hf_to_prime(state_dict: dict[str, Tensor]):
     """Convert MTP weights from HF format to PrimeRL format in-place.
 
     HF Nemotron-H stores MTP as: mtp.layers.{flat_idx}.{mixer/norm/enorm/hnorm/eh_proj/final_layernorm}.*
-    The flat sublayers follow a pattern (e.g. *E = attention + MoE per step).
+    The flat sublayers follow a repeating pattern (e.g. *E = attention + MoE per step).
+    For multi-step MTP, flat indices are grouped by pattern length into prediction steps.
     """
     mtp_keys = [k for k in state_dict if k.startswith("mtp.")]
     if not mtp_keys:
@@ -178,10 +190,16 @@ def _convert_mtp_hf_to_prime(state_dict: dict[str, Tensor]):
         suffix = k[len(f"{last}.final_layernorm.") :]
         state_dict[f"model.mtp.norm.{suffix}"] = state_dict.pop(k)
 
-    # Rename remaining sublayer keys and apply per-type conversion
+    # Detect pattern length from sublayer types to group into prediction steps
+    types = [_infer_mtp_sublayer_type(state_dict, f"mtp.layers.{i}.") for i in flat_indices]
+    pattern_len = _detect_pattern_length(types)
+
+    # Rename remaining sublayer keys, distributing across prediction steps
     for j, flat_idx in enumerate(flat_indices):
+        step = j // pattern_len
+        local = j % pattern_len
         old_prefix = f"mtp.layers.{flat_idx}."
-        new_prefix = f"model.mtp.layers.0.block.sublayers.{j}."
+        new_prefix = f"model.mtp.layers.{step}.sublayers.{local}."
 
         for k in [k for k in list(state_dict) if k.startswith(old_prefix)]:
             state_dict[new_prefix + k[len(old_prefix) :]] = state_dict.pop(k)
@@ -199,33 +217,35 @@ def _convert_mtp_prime_to_hf(state_dict: dict[str, Tensor]):
     if not mtp_keys:
         return
 
-    sublayer_indices = sorted(
-        {int(k.split(".")[6]) for k in state_dict if k.startswith("model.mtp.layers.0.block.sublayers.")}
+    # Collect all (step, local) pairs from model.mtp.layers.{step}.sublayers.{local}.*
+    step_local_pairs = sorted(
+        {
+            (int(k.split(".")[3]), int(k.split(".")[5]))
+            for k in state_dict
+            if k.startswith("model.mtp.layers.") and ".sublayers." in k
+        }
     )
-    last_sublayer = max(sublayer_indices) if sublayer_indices else 0
 
-    # Convert sublayer types back to HF format first
-    for j in sublayer_indices:
-        prefix = f"model.mtp.layers.0.block.sublayers.{j}."
+    # Convert sublayer types back to HF format, then flatten to sequential indices
+    flat_idx = 0
+    last_flat = 0
+    for step, local in step_local_pairs:
+        prefix = f"model.mtp.layers.{step}.sublayers.{local}."
         if any(k.startswith(f"{prefix}self_attn.") for k in state_dict):
             _rename_keys(state_dict, f"{prefix}self_attn.", f"{prefix}mixer.")
         elif any(k.startswith(f"{prefix}mlp.") for k in state_dict):
             _convert_prime_moe_layer_to_hf(state_dict, prefix)
 
-    # Rename sublayers to flat indices
-    for j in sublayer_indices:
-        old_prefix = f"model.mtp.layers.0.block.sublayers.{j}."
-        new_prefix = f"mtp.layers.{j}."
-        _rename_keys(state_dict, old_prefix, new_prefix)
+        _rename_keys(state_dict, prefix, f"mtp.layers.{flat_idx}.")
+        last_flat = flat_idx
+        flat_idx += 1
 
     # Move fusion components to first sublayer
-    first = f"mtp.layers.{sublayer_indices[0] if sublayer_indices else 0}."
     for fusion_key in ("enorm.", "hnorm.", "eh_proj."):
-        _rename_keys(state_dict, f"model.mtp.{fusion_key}", f"{first}{fusion_key}")
+        _rename_keys(state_dict, f"model.mtp.{fusion_key}", f"mtp.layers.0.{fusion_key}")
 
     # Move output norm to last sublayer
-    last = f"mtp.layers.{last_sublayer}."
-    _rename_keys(state_dict, "model.mtp.norm.", f"{last}final_layernorm.")
+    _rename_keys(state_dict, "model.mtp.norm.", f"mtp.layers.{last_flat}.final_layernorm.")
 
     # Clean up any remaining model.mtp keys (e.g. layers container)
     for k in [k for k in list(state_dict) if k.startswith("model.mtp.")]:
