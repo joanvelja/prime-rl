@@ -371,6 +371,14 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
             **fsdp_config,
         )
 
+    # FSDP-wrap MTP layers individually (if present) so their parameters are
+    # sharded/unsharded independently rather than lumped into the root group.
+    mtp_layers = getattr(language_model, "mtp_layers", None)
+    if mtp_layers is not None:
+        for mtp_block in mtp_layers:
+            fully_shard(mtp_block, mesh=hsdp_mesh, **fsdp_config)
+        get_logger().info(f"Applied FSDP to {len(mtp_layers)} MTP layer(s)")
+
     shard_norm_and_lm_head = hasattr(model, "config") and not model.config.tie_word_embeddings
 
     if shard_norm_and_lm_head:
@@ -759,6 +767,12 @@ def setup_model(
         lm_head_chunk_size = config.fused_lm_head_token_chunk_size
 
     inject_prime_lm_head(model, chunk_size=lm_head_chunk_size, fused_cross_entropy=fused_cross_entropy)
+
+    # Setup MTP training if configured
+    if config.mtp is not None:
+        from prime_rl.trainer.mtp import setup_mtp_training
+
+        setup_mtp_training(model, config.mtp)
 
     # Apply LoRA before FSDP setup
     if config.lora is not None:

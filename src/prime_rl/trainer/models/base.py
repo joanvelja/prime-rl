@@ -1,3 +1,4 @@
+import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_utils import PreTrainedModel
 
@@ -9,7 +10,66 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
     Provides a unified interface for state dict conversion between different formats
     (e.g., HuggingFace format vs. training-optimized format) and buffer initialization
     after loading with meta device.
+
+    Subclasses that support Multi-Token Prediction should override the ``mtp_*``
+    properties and ``mtp_layer_forward`` to expose their MTP components.
     """
+
+    # ------------------------------------------------------------------
+    # MTP interface — override in subclasses that have MTP layers
+    # ------------------------------------------------------------------
+
+    @property
+    def mtp_layers(self) -> nn.ModuleList | nn.ModuleDict | None:
+        """Return the MTP layer container, or None if this model has no MTP support."""
+        return getattr(self.model, "mtp_layers", None)
+
+    @property
+    def mtp_embed_tokens(self) -> nn.Module:
+        """Return the token embedding module used for MTP input."""
+        for attr in ("embed_tokens", "embeddings"):
+            mod = getattr(self.model, attr, None)
+            if mod is not None:
+                return mod
+        raise AttributeError(f"Cannot find token embedding module on {type(self).__name__}")
+
+    @property
+    def mtp_rotary_emb(self) -> nn.Module | None:
+        """Return the rotary embedding module, or None."""
+        return getattr(self.model, "rotary_emb", None)
+
+    @property
+    def mtp_num_prediction_steps(self) -> int:
+        """Number of MTP prediction depths to train.
+
+        For non-shared weights this equals len(mtp_layers).
+        For shared weights this may be larger (same layer applied multiple times).
+        """
+        layers = self.mtp_layers
+        return len(layers) if layers is not None else 0
+
+    @property
+    def mtp_shared_weights(self) -> bool:
+        """Whether MTP layers share parameters across prediction steps."""
+        return False
+
+    def mtp_layer_forward(
+        self,
+        mtp_layer: nn.Module,
+        hidden_states: Tensor,
+        token_embeds: Tensor,
+        position_ids: Tensor | None,
+        position_embeddings: tuple[Tensor, Tensor] | None,
+    ) -> Tensor:
+        """Run a single MTP layer. Override for model-specific forward signatures."""
+        out = mtp_layer(
+            input_embeds=token_embeds,
+            hidden_states=hidden_states,
+            attention_mask=None,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+        )
+        return out[0] if isinstance(out, tuple) else out
 
     @classmethod
     def from_config(cls, config, **kwargs):

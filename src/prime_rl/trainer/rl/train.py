@@ -142,6 +142,7 @@ def train(config: TrainerConfig):
     # Set up the loss function
     logger.info(f"Setting up loss function ({config.loss})")
     loss_fn = setup_loss_fn(config.loss)
+    mtp_config = config.model.mtp
 
     # Set up the optimizer
     logger.info(f"Initializing optimizer ({config.optim})")
@@ -431,6 +432,17 @@ def train(config: TrainerConfig):
                 loss_scale=loss_scale,
             )
 
+            # Add MTP auxiliary loss
+            mtp_token_loss = out.get("mtp_token_loss")
+            if mtp_token_loss is not None and mtp_config is not None:
+                from prime_rl.trainer.mtp import compute_mtp_mask
+
+                mtp_mask = compute_mtp_mask(loss_mask, num_steps=out.get("mtp_num_steps", 1))
+                mtp_count = mtp_mask.sum().clamp(min=1)
+                mtp_loss = (mtp_token_loss * mtp_mask).sum() / mtp_count
+                loss = loss + mtp_config.loss_scaling_factor * mtp_loss
+                tensors["mtp_loss"].append(mtp_loss.detach().to("cpu").unsqueeze(0))
+
             # Backward pass
             with maybe_record_function("backward"):
                 loss.backward()
@@ -505,6 +517,8 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {tensor_stats['loss/mean']:.4f} | Entropy: {tensor_stats['entropy/mean']:.4f}"
         if "mismatch_kl/mean" in tensor_stats:
             step_message += f" | Mismatch KL: {tensor_stats['mismatch_kl/mean']:.4f}"
+        if "mtp_loss/mean" in tensor_stats:
+            step_message += f" | MTP Loss: {tensor_stats['mtp_loss/mean']:.4f}"
         step_message += f" | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
         if "max_vio/mean" in tensor_stats:
             step_message += f" | Max Vio: {tensor_stats['max_vio/mean']:.4f}"

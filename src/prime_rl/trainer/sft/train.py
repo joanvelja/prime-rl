@@ -197,8 +197,10 @@ def train(config: SFTConfig):
         case _:
             raise ValueError(f"Invalid loss implementation: {config.loss_impl}")
 
-    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returning (loss_sum, token_count) over unmasked tokens."""
+    mtp_config = config.model.mtp
+
+    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass returning (loss_sum, token_count, mtp_loss_sum) over unmasked tokens."""
         input_ids = micro_batch["input_ids"].to("cuda")
         position_ids = micro_batch["position_ids"].to("cuda")
         target_ids = micro_batch["target_ids"].to("cuda")
@@ -228,8 +230,18 @@ def train(config: SFTConfig):
                 loss_sum = token_loss[loss_mask].sum()
                 del logits
 
+        mtp_loss_sum = torch.tensor(0.0, device="cuda")
+        mtp_token_loss = out.get("mtp_token_loss")
+        if mtp_token_loss is not None and mtp_config is not None:
+            from prime_rl.trainer.mtp import compute_mtp_mask
+
+            mtp_mask = compute_mtp_mask(loss_mask, num_steps=out.get("mtp_num_steps", 1))
+            mtp_count = mtp_mask.sum().clamp(min=1)
+            mtp_loss_sum = (mtp_token_loss * mtp_mask).sum()
+            loss_sum = loss_sum + mtp_config.loss_scaling_factor * mtp_loss_sum * (token_count / mtp_count)
+
         del out
-        return loss_sum, token_count
+        return loss_sum, token_count, mtp_loss_sum
 
     maybe_record_function = nullcontext
 
@@ -241,7 +253,7 @@ def train(config: SFTConfig):
 
         with torch.no_grad():
             for micro_batch in data_iter:
-                loss_sum, token_count = compute_loss(micro_batch)
+                loss_sum, token_count, _mtp_loss = compute_loss(micro_batch)
                 if not torch.isnan(loss_sum.detach()):
                     total_loss_sum += loss_sum.detach()
                     total_token_count += token_count
@@ -322,6 +334,7 @@ def train(config: SFTConfig):
         forward_backward_start_time = time.perf_counter()
 
         step_loss_sum = torch.tensor(0.0, device="cuda")
+        step_mtp_loss_sum = torch.tensor(0.0, device="cuda")
         step_local_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
         nan_loss_count = torch.tensor(0, device="cuda")
         batch_max_vio = torch.tensor(0.0, device="cuda")
@@ -334,9 +347,10 @@ def train(config: SFTConfig):
                 )
 
             with maybe_record_function("forward"):
-                local_loss_sum, local_token_count = compute_loss(micro_batch)
+                local_loss_sum, local_token_count, local_mtp_loss_sum = compute_loss(micro_batch)
 
             step_local_token_count += local_token_count
+            step_mtp_loss_sum += local_mtp_loss_sum.detach()
 
             if torch.isnan(local_loss_sum.detach()):
                 nan_loss_count += 1
@@ -388,6 +402,11 @@ def train(config: SFTConfig):
             batch_loss = 0.0
         nan_loss_count = nan_loss_count.item()
 
+        mtp_loss_mean = 0.0
+        if mtp_config is not None:
+            dist.all_reduce(step_mtp_loss_sum, op=dist.ReduceOp.SUM, group=dp_cp_group)
+            mtp_loss_mean = (step_mtp_loss_sum / global_token_count_val).item() if global_token_count_val > 0 else 0.0
+
         logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
         grad_norm = clip_grad_norm_(
             model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
@@ -422,6 +441,8 @@ def train(config: SFTConfig):
         # Log step metrics
         step_time = time.perf_counter() - step_start_time
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f} | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
+        if mtp_config is not None:
+            step_message += f" | MTP Loss: {mtp_loss_mean:.4f}"
         if is_tt_moe_model(model) and batch_max_vio.item() > 0:
             step_message += f" | Max Vio: {batch_max_vio.item():.4f}"
         logger.success(step_message)
@@ -473,6 +494,8 @@ def train(config: SFTConfig):
             "loss/nan_count": nan_loss_count,
             "step": progress.step,
         }
+        if mtp_config is not None:
+            loss_log_metrics["loss/mtp"] = mtp_loss_mean
         # Log tensor stats
         monitor.log(loss_log_metrics, step=progress.step)
 

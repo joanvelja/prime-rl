@@ -19,6 +19,8 @@ class PrimeLmOutput(TypedDict, total=False):
     logprobs: Tensor | None
     entropy: Tensor | None
     loss: Tensor | None
+    mtp_token_loss: Tensor | None
+    mtp_num_steps: int
 
 
 def cast_float_and_contiguous(output: PrimeLmOutput) -> PrimeLmOutput:
@@ -27,12 +29,17 @@ def cast_float_and_contiguous(output: PrimeLmOutput) -> PrimeLmOutput:
     def _float_and_contiguous(tensor: Tensor | None) -> Tensor | None:
         return tensor.float().contiguous() if tensor is not None else None
 
-    return PrimeLmOutput(
+    result = PrimeLmOutput(
         logits=_float_and_contiguous(output.get("logits")),
         logprobs=_float_and_contiguous(output.get("logprobs")),
         entropy=_float_and_contiguous(output.get("entropy")),
         loss=output.get("loss"),
     )
+    mtp_tl = output.get("mtp_token_loss")
+    if mtp_tl is not None:
+        result["mtp_token_loss"] = mtp_tl.float().contiguous()
+        result["mtp_num_steps"] = output.get("mtp_num_steps", 1)
+    return result
 
 
 class FusedOutputLinear(torch.nn.Linear):
@@ -373,11 +380,28 @@ def _patch_model_forward(model: nn.Module) -> None:
         )
 
         # Pass through the wrapped lm_head
-        return self.lm_head(
+        result = self.lm_head(
             hidden_states[:, slice_indices, :],
             labels[:, slice_indices] if labels is not None else None,
             temperature=temperature[:, slice_indices] if temperature is not None else None,
         )
+
+        # MTP auxiliary loss (computed inside FSDP forward context so all params are available)
+        mtp_config = getattr(self, "_mtp_config", None)
+        if mtp_config is not None and input_ids is not None:
+            from prime_rl.trainer.mtp import compute_mtp_token_losses
+
+            mtp_token_loss, mtp_num_steps = compute_mtp_token_losses(
+                self,
+                hidden_states,
+                input_ids,
+                position_ids,
+                chunk_size=mtp_config.lm_head_chunk_size,
+            )
+            result["mtp_token_loss"] = mtp_token_loss
+            result["mtp_num_steps"] = mtp_num_steps
+
+        return result
 
     # Bind the new forward to the model
     model.forward = types.MethodType(new_forward, model)

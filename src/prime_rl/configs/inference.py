@@ -297,6 +297,15 @@ class InferenceConfig(BaseConfig):
         ),
     ] = False
 
+    speculative_config: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Speculative decoding configuration passed to vLLM. "
+            'For MTP models (e.g. Nemotron-H): {"method": "mtp", "num_speculative_tokens": 1}. '
+            "See vLLM docs for supported methods and parameters.",
+        ),
+    ] = None
+
     vllm_extra: Annotated[
         dict[str, Any],
         Field(
@@ -426,6 +435,7 @@ class InferenceConfig(BaseConfig):
             "all2all_backend": "all2all_backend",
             "enable_eplb": "enable_eplb",
             "seed": "seed",
+            "speculative_config": "speculative_config",
         }
 
         for config_key, vllm_key in to_vllm.items():
@@ -443,5 +453,9 @@ class InferenceConfig(BaseConfig):
         if hasattr(namespace, "rope_scaling"):
             if namespace.rope_scaling is None:
                 delattr(namespace, "rope_scaling")
+
+        # Remove speculative_config if not set
+        if hasattr(namespace, "speculative_config") and namespace.speculative_config is None:
+            delattr(namespace, "speculative_config")
 
         return namespace
