@@ -380,7 +380,9 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
 
     # FSDP-wrap MTP layers individually (if present) so their parameters are
     # sharded/unsharded independently rather than lumped into the root group.
-    mtp_layers = getattr(language_model, "mtp_layers", None)
+    # Use `model` (the ForCausalLM wrapper) so the mtp_layers property resolves
+    # correctly for models that store MTP under a container (e.g. model.mtp.layers).
+    mtp_layers = getattr(model, "mtp_layers", None)
     if mtp_layers is not None:
         for mtp_block in mtp_layers:
             fully_shard(mtp_block, mesh=hsdp_mesh, **fsdp_config)
