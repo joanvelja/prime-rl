@@ -1,6 +1,7 @@
 import pickle
 import time
 from pathlib import Path
+from threading import Thread
 from typing import Callable, Generator, cast
 
 import torch
@@ -23,6 +24,16 @@ from prime_rl.utils.vlm import get_layer_prefix
 
 NCCL_READY_MARKER = "NCCL_READY"
 
+BROADCAST_MODE_FULL = 0
+BROADCAST_MODE_DELTA = 1
+
+_INT_DTYPE_BY_SIZE = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
+
+
+def _int_view(tensor: Tensor) -> Tensor:
+    """Reinterpret a tensor as its matching-width integer dtype for bit-exact comparison."""
+    return tensor.view(_INT_DTYPE_BY_SIZE[tensor.element_size()])
+
 
 def broadcast_integer(integer: int, communicator: PyNcclCommunicator) -> None:
     """Broadcast an integer to a process group using NCCL communicator."""
@@ -30,41 +41,89 @@ def broadcast_integer(integer: int, communicator: PyNcclCommunicator) -> None:
     communicator.broadcast(integer_tensor, src=0)
 
 
-def broadcast_state_dict(state_dict: dict[str, Tensor], communicator: PyNcclCommunicator) -> None:
-    """Broadcast a state dict to NCCL process group using the PyNcclCommunicator."""
-    # Group tensors by dtype
+def _build_dtype_groups(state_dict: dict[str, Tensor]) -> dict[torch.dtype, list[tuple[str, Tensor]]]:
     dtype_groups: dict[torch.dtype, list[tuple[str, Tensor]]] = {}
     for key, value in state_dict.items():
         assert not isinstance(value, DTensor), (
             "DTensor is not supported for broadcast, should have been converted to tensor already"
         )
-        dtype = value.dtype
-        if dtype not in dtype_groups:
-            dtype_groups[dtype] = []
-        dtype_groups[dtype].append((key, value))
+        if value.dtype not in dtype_groups:
+            dtype_groups[value.dtype] = []
+        dtype_groups[value.dtype].append((key, value))
+    return dtype_groups
 
-    # Build metadata: for each dtype group, store keys and shapes
+
+def _broadcast_metadata(
+    dtype_groups: dict[torch.dtype, list[tuple[str, Tensor]]], communicator: PyNcclCommunicator
+) -> None:
     metadata = {}
     for dtype, items in dtype_groups.items():
         metadata[dtype] = [(key, value.shape, value.numel()) for key, value in items]
-
-    # Send metadata
     state = pickle.dumps(metadata)
     size_tensor = torch.tensor([len(state)], dtype=torch.long).cuda()
     communicator.broadcast(size_tensor, src=0)
     state_tensor = torch.ByteTensor(list(state)).cuda()
     communicator.broadcast(state_tensor, src=0)
 
-    # Concatenate and broadcast tensors grouped by dtype
-    for dtype, items in dtype_groups.items():
-        # Flatten all tensors and concatenate
-        flat_tensors = [value.flatten() for _, value in items]
-        concatenated = torch.cat(flat_tensors)
+
+def broadcast_state_dict(
+    state_dict: dict[str, Tensor],
+    communicator: PyNcclCommunicator,
+    *,
+    cache: bool = False,
+) -> dict[int, Tensor] | None:
+    """Broadcast a state dict via NCCL.
+
+    When cache=True, returns a dict mapping dtype-group index to CPU-resident
+    concatenated tensors (used as the baseline for subsequent delta broadcasts).
+    """
+    dtype_groups = _build_dtype_groups(state_dict)
+    _broadcast_metadata(dtype_groups, communicator)
+
+    cached: dict[int, Tensor] | None = {} if cache else None
+    for group_idx, (dtype, items) in enumerate(dtype_groups.items()):
+        concatenated = torch.cat([value.flatten() for _, value in items])
+        if cached is not None:
+            cached[group_idx] = concatenated.cpu()
         communicator.broadcast(concatenated, src=0)
         del concatenated
-        # Clean up individual tensors
-        for _, value in items:
-            del value
+    return cached
+
+
+def _broadcast_delta(
+    state_dict: dict[str, Tensor],
+    prev_cache: dict[int, Tensor],
+    communicator: PyNcclCommunicator,
+) -> tuple[dict[int, Tensor], int, int]:
+    """Broadcast delta-compressed state dict. Returns (new_cache, total_elements, total_changed)."""
+    dtype_groups = _build_dtype_groups(state_dict)
+    _broadcast_metadata(dtype_groups, communicator)
+
+    new_cache: dict[int, Tensor] = {}
+    total_elements = 0
+    total_changed = 0
+
+    for group_idx, (dtype, items) in enumerate(dtype_groups.items()):
+        current_concat = torch.cat([value.flatten() for _, value in items])
+        prev_concat = prev_cache[group_idx].to(current_concat.device)
+
+        changed_mask = _int_view(current_concat) != _int_view(prev_concat)
+        indices = changed_mask.nonzero(as_tuple=True)[0].to(torch.int32)
+        values = current_concat[indices.long()]
+
+        total_elements += current_concat.numel()
+        total_changed += indices.numel()
+
+        num_changed_tensor = torch.tensor([indices.numel()], dtype=torch.long).cuda()
+        communicator.broadcast(num_changed_tensor, src=0)
+        if indices.numel() > 0:
+            communicator.broadcast(indices, src=0)
+            communicator.broadcast(values, src=0)
+
+        new_cache[group_idx] = current_concat.cpu()
+        del current_concat, prev_concat, changed_mask, indices, values
+
+    return new_cache, total_elements, total_changed
 
 
 def filter_state_dict_by_layers(
@@ -119,14 +178,16 @@ class NCCLWeightBroadcastSender:
         timeout: int,
         dtype: torch.dtype = torch.bfloat16,
         quantize_in_weight_transfer: bool = False,
+        delta_compression: bool = False,
     ):
         self.logger = get_logger()
         self.world = get_world()
         self.dtype = dtype
         self.quantize_in_weight_transfer = quantize_in_weight_transfer
+        self.delta_compression = delta_compression
+        self._layer_cache: dict[int, dict[int, Tensor]] = {}
 
         if self.world.is_master:
-            # Trainer is on rank 0 in process group with all inference GPUs
             pg = StatelessProcessGroup.create(
                 host=host, port=port, rank=rank, world_size=world_size, store_timeout=timeout
             )
@@ -137,27 +198,83 @@ class NCCLWeightBroadcastSender:
 
     @torch.no_grad()
     def broadcast_weights(self, model: nn.Module, step: int) -> None:
-        """Broadcast the state dict of a model into the inference pool using NCCL."""
+        """Broadcast model weights. All ranks participate in DTensor gather; only master sends via NCCL."""
+        gathered = self.gather_all_layers(model)
+        if self.world.is_master:
+            self.send_all_layers(gathered, step)
+
+    @torch.no_grad()
+    def gather_all_layers(self, model: nn.Module) -> list[dict[str, Tensor]]:
+        """Gather and preprocess all layers (collective, all ranks).
+
+        Returns list of CPU state dicts on master, empty list on non-master.
+        """
         state_dict = model.state_dict()
         layer_prefix = get_layer_prefix(model.config)
         num_layers = get_max_layer_num(state_dict, layer_prefix)
-        num_state_dict_to_send = num_layers + 1  # we send all layer plus the remaining weights
 
-        if self.world.is_master:
-            broadcast_integer(num_state_dict_to_send, self.communicator)
-
-        self.logger.debug(f"Broadcasting {num_state_dict_to_send} layer state dicts")
         preprocess_fn: Callable[[nn.Module, dict[str, Tensor], int], dict[str, Tensor]]
         if self.quantize_in_weight_transfer:
             preprocess_fn = preprocess_layer_quantized
         else:
             preprocess_fn = preprocess_layer_checkpoint
 
+        gathered: list[dict[str, Tensor]] = []
         for layer_id, layer_state_dict in filter_state_dict_by_layers(state_dict, num_layers, layer_prefix):
             layer_state_dict = self._resolve_dtensors(layer_state_dict)
             layer_state_dict = preprocess_fn(model, layer_state_dict, layer_id)
             if self.world.is_master:
-                broadcast_state_dict(layer_state_dict, self.communicator)
+                gathered.append({k: v.cpu() for k, v in layer_state_dict.items()})
+            del layer_state_dict
+        del state_dict
+        return gathered
+
+    @torch.no_grad()
+    def send_all_layers(self, gathered: list[dict[str, Tensor]], step: int) -> None:
+        """Send previously gathered layers via NCCL. Master only."""
+        broadcast_integer(len(gathered), self.communicator)
+
+        total_elements = 0
+        total_changed = 0
+
+        for seq_idx, cpu_dict in enumerate(gathered):
+            gpu_dict = {k: v.cuda() for k, v in cpu_dict.items()}
+            if self.delta_compression:
+                n_elem, n_changed = self._send_delta_aware(gpu_dict, seq_idx)
+                total_elements += n_elem
+                total_changed += n_changed
+            else:
+                broadcast_state_dict(gpu_dict, self.communicator)
+            del gpu_dict
+
+        del gathered
+        torch.cuda.empty_cache()
+
+        if self.delta_compression and total_elements > 0:
+            self._log_delta_stats(step, total_elements, total_changed)
+
+    def _send_delta_aware(self, state_dict: dict[str, Tensor], seq_idx: int) -> tuple[int, int]:
+        """Send full (first time) or delta (subsequent). Returns (total_elements, changed_elements)."""
+        prev = self._layer_cache.get(seq_idx)
+        if prev is None:
+            broadcast_integer(BROADCAST_MODE_FULL, self.communicator)
+            self._layer_cache[seq_idx] = broadcast_state_dict(state_dict, self.communicator, cache=True)
+            return 0, 0
+
+        broadcast_integer(BROADCAST_MODE_DELTA, self.communicator)
+        new_cache, n_total, n_changed = _broadcast_delta(state_dict, prev, self.communicator)
+        self._layer_cache[seq_idx] = new_cache
+        return n_total, n_changed
+
+    def _log_delta_stats(self, step: int, total_elements: int, total_changed: int) -> None:
+        sparsity = 1.0 - total_changed / total_elements
+        elem_bytes = 2
+        full_gb = total_elements * elem_bytes / 1e9
+        delta_gb = total_changed * (elem_bytes + 4) / 1e9
+        self.logger.info(
+            f"Delta broadcast step {step}: {total_changed:,}/{total_elements:,} elements changed "
+            f"({sparsity:.2%} sparsity, ~{delta_gb:.3f} GB delta vs ~{full_gb:.3f} GB full)"
+        )
 
     def _resolve_dtensors(self, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         for key, value in list(state_dict.items()):
@@ -167,7 +284,12 @@ class NCCLWeightBroadcastSender:
 
 
 class NCCLWeightBroadcast(WeightBroadcast):
-    """Broadcast weights into the inference engine using NCCL."""
+    """Broadcast weights into the inference engine using NCCL.
+
+    When delta_compression is enabled, the broadcast is pipelined: the DTensor
+    gather runs synchronously (all trainer ranks), then the NCCL send runs in a
+    background thread on the master rank so training can continue.
+    """
 
     def __init__(
         self,
@@ -180,7 +302,8 @@ class NCCLWeightBroadcast(WeightBroadcast):
         self.logger = get_logger()
         self.world = get_world()
         self.multi_run_manager = get_multi_run_manager()
-        self.nccl_broadcast_sender = NCCLWeightBroadcastSender(
+        self.pipeline = config.delta_compression
+        self.sender = NCCLWeightBroadcastSender(
             config.host,
             config.port,
             0,
@@ -189,20 +312,59 @@ class NCCLWeightBroadcast(WeightBroadcast):
             config.timeout,
             dtype,
             quantize_in_weight_transfer=config.quantize_in_weight_transfer,
+            delta_compression=config.delta_compression,
         )
+        self._bg_thread: Thread | None = None
+        self._bg_error: Exception | None = None
 
     @torch.no_grad()
     def broadcast_weights(self, model: nn.Module, step: int) -> None:
         """Broadcast the state dict of a model into the inference pool using NCCL and notifies the orchestrator."""
         self.logger.debug("Starting broadcasting weights to inference engine via NCCL")
         start_time = time.perf_counter()
+
+        self._join_background()
+
         notified_runs: list[tuple[int, Path]] = []
         if self.world.is_master:
             notified_runs = self._notify_orchestrator()
-            # Wait for inference workers to signal readiness before starting NCCL broadcast
+
+        # All ranks participate in the collective gather
+        gathered = self.sender.gather_all_layers(model)
+
+        if self.pipeline and self.world.is_master:
+            self.logger.debug(f"Weights gathered in {time.perf_counter() - start_time:.2f}s, starting pipelined send")
+            self._bg_thread = Thread(
+                target=self._background_send,
+                args=(gathered, notified_runs, step, start_time),
+                daemon=True,
+            )
+            self._bg_thread.start()
+        elif self.world.is_master:
             self._wait_for_nccl_ready(notified_runs)
-        self.nccl_broadcast_sender.broadcast_weights(model, step)
-        self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
+            self.sender.send_all_layers(gathered, step)
+            self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
+
+    def _background_send(
+        self,
+        gathered: list[dict[str, Tensor]],
+        notified_runs: list[tuple[int, Path]],
+        step: int,
+        start_time: float,
+    ) -> None:
+        self._wait_for_nccl_ready(notified_runs)
+        self.sender.send_all_layers(gathered, step)
+        self.logger.debug(f"Pipelined broadcast completed in {time.perf_counter() - start_time:.2f}s (wall)")
+
+    def _join_background(self) -> None:
+        """Wait for a previous pipelined broadcast to finish, re-raising errors."""
+        if self._bg_thread is not None:
+            self._bg_thread.join()
+            self._bg_thread = None
+            if self._bg_error is not None:
+                error = self._bg_error
+                self._bg_error = None
+                raise RuntimeError("Background NCCL broadcast failed") from error
 
     def _notify_orchestrator(self) -> list[tuple[int, Path]]:
         """Notify the orchestrator to initiate weight broadcast.

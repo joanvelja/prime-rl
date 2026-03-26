@@ -153,6 +153,17 @@ class SharedWeightBroadcastConfig(BaseConfig):
         ),
     ] = False
 
+    delta_compression: Annotated[
+        bool,
+        Field(
+            description=(
+                "Send only changed weights between consecutive training steps. "
+                "Exploits the fact that RL updates are small, so ~98% of bf16 elements "
+                "remain bit-identical between adjacent checkpoints."
+            ),
+        ),
+    ] = False
+
 
 class BaseDeploymentConfig(BaseModel):
     """Configures a base deployment."""
@@ -602,6 +613,7 @@ class RLConfig(BaseConfig):
                     port=self.weight_broadcast.port,
                     timeout=self.weight_broadcast.timeout,
                     quantize_in_weight_transfer=self.weight_broadcast.quantize_in_weight_transfer,
+                    delta_compression=self.weight_broadcast.delta_compression,
                 )
                 self.orchestrator.weight_broadcast = OrchestratorNCCLWeightBroadcastConfig(
                     type=self.weight_broadcast.type,
@@ -609,6 +621,7 @@ class RLConfig(BaseConfig):
                     timeout=self.weight_broadcast.timeout,
                     inference_world_size=inference_world_size,
                     quantize_in_weight_transfer=self.weight_broadcast.quantize_in_weight_transfer,
+                    delta_compression=self.weight_broadcast.delta_compression,
                 )
             elif self.weight_broadcast.type == "filesystem":
                 self.trainer.weight_broadcast = TrainerFileSystemWeightBroadcastConfig()
@@ -729,6 +742,14 @@ class RLConfig(BaseConfig):
                         "Number of inference GPUs must be divisible by the tensor parallel size"
                     )
                     self.inference.parallel.dp = num_infer_gpus // self.inference.parallel.tp
+
+            # Update NCCL weight broadcast world size now that inference DP is finalized
+            if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
+                total_infer_gpus = self.deployment.num_infer_gpus
+                assert self.trainer.weight_broadcast.type == "nccl"
+                self.trainer.weight_broadcast.inference_world_size = total_infer_gpus
+                assert self.orchestrator.weight_broadcast.type == "nccl"
+                self.orchestrator.weight_broadcast.inference_world_size = total_infer_gpus
 
         elif self.deployment.type == "multi_node":  # multi-node
             self.orchestrator.num_train_workers = self.deployment.num_train_nodes * self.deployment.gpus_per_node

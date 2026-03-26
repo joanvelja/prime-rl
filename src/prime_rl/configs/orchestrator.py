@@ -661,6 +661,11 @@ class NCCLWeightBroadcastConfig(BaseModel):
         Field(description="Use kernel-format FP8 quantized NCCL transfer for weight updates."),
     ] = False
 
+    delta_compression: Annotated[
+        bool,
+        Field(description="Send only changed weights between consecutive training steps."),
+    ] = False
+
     inference_world_size: Annotated[
         int,
         Field(

@@ -347,6 +347,7 @@ async def init_nccl_broadcast(
     timeout: int,
     inference_world_size: int | None = None,
     quantize_in_weight_transfer: bool = False,
+    delta_compression: bool = False,
 ) -> None:
     """Initialize NCCL broadcast on all inference servers.
 
@@ -381,6 +382,7 @@ async def init_nccl_broadcast(
                     "gpus_per_server": gpus_per_server,
                     "timeout": timeout,
                     "quantize_in_weight_transfer": quantize_in_weight_transfer,
+                    "delta_compression": delta_compression,
                 },
             )
             response.raise_for_status()
