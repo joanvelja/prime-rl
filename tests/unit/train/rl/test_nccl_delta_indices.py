@@ -67,8 +67,22 @@ def test_broadcast_metadata_uses_communicator_device() -> None:
 
 
 def test_broadcast_delta_uses_selected_index_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(trainer_nccl, "_broadcast_metadata", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(trainer_nccl, "get_index_dtype_for_numel", lambda _numel: torch.int64)
+    monkeypatch.setattr(
+        trainer_nccl,
+        "_broadcast_metadata",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        trainer_nccl,
+        "get_index_dtype_for_numel",
+        lambda _numel: torch.int64,
+    )
+    monkeypatch.setattr(
+        torch.Tensor,
+        "cuda",
+        lambda self, *args, **kwargs: self,
+        raising=False,
+    )
 
     communicator = RecordingCommunicator(device=torch.device("meta"))
     state_dict = {"weight": torch.tensor([1.0, 5.0, 3.0], dtype=torch.float32)}
@@ -81,7 +95,10 @@ def test_broadcast_delta_uses_selected_index_dtype(monkeypatch: pytest.MonkeyPat
     assert total_elements == 3
     assert total_changed == 1
     assert full_bytes == 3 * torch.tensor([], dtype=torch.float32).element_size()
-    assert delta_bytes == torch.tensor([], dtype=torch.float32).element_size() + torch.tensor([], dtype=torch.int64).element_size()
+    assert delta_bytes == (
+        torch.tensor([], dtype=torch.float32).element_size()
+        + torch.tensor([], dtype=torch.int64).element_size()
+    )
     assert communicator.broadcasted[0].device == communicator.device
     assert communicator.broadcasted[1].dtype == torch.int64
 
@@ -129,12 +146,20 @@ def test_receive_delta_uses_selected_index_dtype(monkeypatch: pytest.MonkeyPatch
 
     receiver = object.__new__(worker_nccl.NCCLWeightBroadcastReceiver)
     receiver.communicator = communicator
-    receiver._buffers = {(0, 0): torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)}
+    receiver._buffers = {
+        (0, 0): torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32),
+    }
 
     received = list(worker_nccl.NCCLWeightBroadcastReceiver._receive_delta(receiver, layer_idx=0))
 
     assert communicator.requested_dtypes[3] == torch.int64
-    assert torch.equal(receiver._buffers[(0, 0)], torch.tensor([1.0, 5.0, 3.0], dtype=torch.float32))
+    assert torch.equal(
+        receiver._buffers[(0, 0)],
+        torch.tensor([1.0, 5.0, 3.0], dtype=torch.float32),
+    )
     assert len(received) == 1
     assert received[0][0] == "weight"
-    assert torch.equal(received[0][1], torch.tensor([1.0, 5.0, 3.0], dtype=torch.float32))
+    assert torch.equal(
+        received[0][1],
+        torch.tensor([1.0, 5.0, 3.0], dtype=torch.float32),
+    )
