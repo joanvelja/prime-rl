@@ -29,16 +29,15 @@ PRIME-RL: Async RL Training at Scale
 
 ## Overview
 
-PRIME-RL is a framework for large-scale reinforcement learning. It is designed to be easy-to-use and hackable, yet capable of scaling to 1000+ GPUs. Beyond that, here is why we think you might like it:
-
+PRIME-RL is a framework for large-scale reinforcement learning. It is designed to be easy to use and hackable, yet capable of scaling to 1000+ GPUs. Here is what we think sets it apart:
 
 1. Fully asynchronous RL for high-throughput agentic training at scale.
-2. Performant: Designed to train 1T+ MoE over 1000+ GPUs with [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) training and [vLLM](https://github.com/vllm-project/vllm) inference backend.
-3. Integrates natively with [`verifiers`](https://github.com/PrimeIntellect-ai/verifiers) environments via the [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=most_stars). With built in support for swe and agentic environments.
-4. Supports end-to-end post-training, including SFT and RL training and evals
+2. Performant: built to train 1T+ MoE models on 1000+ GPUs with [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) for training and [vLLM](https://github.com/vllm-project/vllm) for inference.
+3. Native integration with [`verifiers`](https://github.com/PrimeIntellect-ai/verifiers) environments through the [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=most_stars), including built-in support for SWE and agentic environments.
+4. End-to-end post-training: SFT, RL training, and evals.
 5. Multi-node deployment with Slurm and Kubernetes support.
-6. Multi-modal support for VLMs like Qwen3-VL.
-7. Hackable, modular and extensible by nature
+6. Multimodal support for VLMs such as Qwen3-VL.
+7. Hackable, modular, and extensible by design.
 
 
 ## Models support
