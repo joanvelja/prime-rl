@@ -2,7 +2,6 @@ import asyncio
 import io
 import json
 import os
-import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +20,7 @@ from prime_rl.configs.shared import PrimeMonitorConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor.base import Monitor
+from prime_rl.utils.monitor.sampling import sample_rollouts_for_logging
 
 
 def _json(val: Any) -> str:
@@ -257,14 +257,12 @@ class PrimeMonitor(Monitor):
         ):
             return
 
-        ratio = self.config.log_extras.sample_ratio
-        if ratio is not None:
-            if ratio <= 0.0:
-                return
-            if ratio < 1.0:
-                max_samples = max(1, int(len(rollouts) * ratio))
-                if len(rollouts) > max_samples:
-                    rollouts = random.sample(rollouts, max_samples)
+        rollouts = sample_rollouts_for_logging(
+            rollouts,
+            self.config.log_extras.sample_ratio,
+        )
+        if not rollouts:
+            return
 
         assert self.last_log_samples_step <= step, "Step must be greater than last logged step"
         assert step not in self._pending_sample_steps, f"Step {step} upload already in progress"
