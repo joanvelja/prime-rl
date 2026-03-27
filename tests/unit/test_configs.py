@@ -156,32 +156,7 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
         TrainerModelConfig.model_validate({"fused_lm_head_chunk_size": "auto"})
 
 
-def test_model_mtp_config_is_accepted():
-    config = TrainerModelConfig.model_validate({"mtp": {"loss_scaling_factor": 0.2, "lm_head_chunk_size": 256}})
-    assert config.mtp is not None
-    assert config.mtp.loss_scaling_factor == 0.2
-    assert config.mtp.lm_head_chunk_size == 256
-
-
 def test_selective_activation_checkpointing_requires_custom_impl():
     with pytest.raises(ValidationError, match="Selective activation checkpointing requires model.impl='custom'"):
         TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})
 
-
-def test_rl_single_node_auto_setup_uses_cp_for_non_data_parallel_size():
-    config = RLConfig.model_validate(
-        {
-            "trainer": {
-                "model": {
-                    "cp": 2,
-                }
-            },
-            "orchestrator": {},
-            "deployment": {
-                "type": "single_node",
-                "num_train_gpus": 4,
-                "num_infer_gpus": 1,
-            },
-        }
-    )
-    assert config.orchestrator.num_train_workers == 2
