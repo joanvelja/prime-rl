@@ -1,13 +1,12 @@
-# Qwen30b Math
+# Qwen 2.5 32B Math
 
-This example guide you to 
-
+This example guides you through RL training [Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B) on math tasks.
 
 ## Requirements
 
-you need to have access to a slurm cluster with at least 4 nodes to run this example.  Each nodes must have a shared filesystem to communicate. In this guide we assume that the nfs is mounted on `/shared`, you can change it to your own path.
+You need access to a Slurm cluster with at least 4 nodes to run this example. Each node must have a shared filesystem. In this guide we assume the NFS is mounted at `/shared`; you can change it to your own path.
 
-You also need to have prime-rl clone on your cluster into the shared filesystem.
+You also need to have prime-rl cloned on your cluster into the shared filesystem.
 
 ```bash
 git clone https://github.com/PrimeIntellect-ai/prime-rl.git /shared/prime-rl
@@ -15,7 +14,7 @@ cd /shared/prime-rl
 uv sync --all-extras
 ```
 
-You might also want to create a .env inside the prime-rl directory to store the environment variables that might be use during training like wandb and huggingface tokens. The .env file will be automatically source during training.
+You might also want to create a `.env` file inside the prime-rl directory to store environment variables used during training like W&B and Hugging Face tokens. The `.env` file is automatically sourced during training.
 
 ```bash
 touch .env
@@ -28,28 +27,27 @@ echo "HUGGINGFACE_TOKEN=your_huggingface_token" >> .env
 
 ## Tmux session
 
-we recommand using the tmux helper to start the run and look at the logs.
+We recommend using the tmux helper to start the run and look at the logs.
 
-from your slurm head node:
+From your Slurm head node:
 
 ```bash
 bash scripts/slurm_tmux.sh qwen30b-math /shared/outputs/qwen30b-math
 ```
 
-you can then attach to it by doing `tmux attach -t qwen30b-math`.
+You can then attach to it by doing `tmux attach -t qwen30b-math`.
 
 ## Start the run
 
+Run the following command to start the RL training:
 
-run the following command to start the RL training:
-
-PS: if using the tmux helper, you can run the command in the `Terminal` (window 0) pane and look at the logs in the `Logs` (window 1) pane.
+PS: If using the tmux helper, you can run the command in the `Terminal` (window 0) pane and look at the logs in the `Logs` (window 1) pane.
 
 ```bash
 uv run rl @ examples/qwen30b_math/rl.toml --output-dir /shared/outputs/qwen30b-math
 ```
 
-output of the command
+Output of the command:
 ```
 XXX:XX:XX    INFO Wrote subconfigs to /shared/outputs/qwen30b-math/configs [rl.py::515]
 XXX:XX:XX    INFO Wrote SLURM script to /shared/outputs/qwen30b-math/rl.sbatch [rl.py::534]
