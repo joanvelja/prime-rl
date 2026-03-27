@@ -10,7 +10,21 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor, Partial
 from torchtitan.distributed.expert_parallel import expert_parallel
+
+EPCommBackend = Literal["standard", "deepep"]
+
+
+def _prepare_deepep_input(x: torch.Tensor) -> torch.Tensor:
+    if not isinstance(x, DTensor):
+        return x
+    if x.device_mesh.ndim != 1 or x.device_mesh.mesh_dim_names != ("tp",):
+        raise ValueError(
+            "DeepEP expects a 1D TP DTensor input before unwrapping to the local shard, "
+            f"got mesh_dim_names={x.device_mesh.mesh_dim_names!r}."
+        )
+    return x.to_local(grad_placements=(Partial(),))
 
 
 @dataclass
@@ -85,8 +99,7 @@ class BCFeedForward(nn.Module):
 
 # TODO: keeping this for-loop implementation for comparison
 #       and readability, may remove later
-@expert_parallel
-def _run_experts_for_loop(
+def _run_experts_for_loop_impl(
     w1: torch.Tensor,
     w2: torch.Tensor,
     w3: torch.Tensor,
@@ -122,7 +135,28 @@ def _run_experts_for_loop(
 
 
 @expert_parallel
+def _run_experts_for_loop(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    return _run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
+
+
+@expert_parallel
 def _run_experts_grouped_mm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
+
+
+def _run_experts_grouped_mm_impl(
     w1: torch.Tensor,
     w2: torch.Tensor,
     w3: torch.Tensor,
@@ -154,12 +188,32 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
+        self.ep_comm_backend: EPCommBackend = "standard"
+
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+
+    def _forward_local(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        if not isinstance(self.w1, DTensor):
+            raise ValueError(
+                f"{self.ep_comm_backend} expert kernels require EP-sharded DTensor weights. "
+                "Make sure expert parallelism is enabled before running the model."
+            )
+        w1 = self.w1.to_local()
+        w2 = self.w2.to_local()
+        w3 = self.w3.to_local()
+        if self.use_grouped_mm:
+            return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
+        return _run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
+        if self.ep_comm_backend == "deepep":
+            return self._forward_local(x, num_tokens_per_expert)
+
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
@@ -337,6 +391,8 @@ class MoE(nn.Module):
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
         )
+        self.ep_comm_backend: EPCommBackend = "standard"
+        self.experts.set_ep_comm_backend(self.ep_comm_backend)
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
@@ -353,6 +409,7 @@ class MoE(nn.Module):
             else None
         )
         self.score_before_experts = moe_args.score_before_experts
+        self.deepep_token_chunk_size: int | None = None
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
@@ -375,6 +432,23 @@ class MoE(nn.Module):
             persistent=False,
         )
 
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+        self.experts.set_ep_comm_backend(backend)
+
+    def set_deepep_token_chunk_size(self, chunk_size: int | None) -> None:
+        self.deepep_token_chunk_size = chunk_size
+
+    def _prepare_deepep_input(self, x: torch.Tensor) -> torch.Tensor:
+        return _prepare_deepep_input(x)
+
+    def _run_local_routed_experts(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.experts(x, num_tokens_per_expert)
+
     def _run_routed_experts(
         self,
         x: torch.Tensor,
@@ -396,6 +470,56 @@ class MoE(nn.Module):
 
         return routed_output
 
+    def _run_deepep_routed_experts(
+        self,
+        x: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        top_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        from prime_rl.trainer.distributed.deepep import (
+            combine_tokens,
+            dispatch_tokens_async,
+            finalize_dispatch_tokens,
+            sync_combine,
+        )
+        from prime_rl.trainer.distributed.expert_parallel import get_ep_group
+
+        group = get_ep_group(self.experts)
+        chunk_size = min(self.deepep_token_chunk_size or x.shape[0], x.shape[0])
+
+        def dispatch_chunk(start: int, end: int):
+            return dispatch_tokens_async(
+                x[start:end],
+                selected_experts_indices[start:end],
+                top_scores[start:end],
+                num_experts=self.experts.num_experts,
+                group=group,
+                score_before_experts=self.score_before_experts,
+            )
+
+        def run_pending_chunk(pending_state):
+            hidden_states, num_tokens_per_expert, dispatch_state = finalize_dispatch_tokens(pending_state)
+            routed_output = self._run_local_routed_experts(hidden_states, num_tokens_per_expert)
+            # Keep combine outside the checkpointed routed-expert region so
+            # selective AC only recomputes local expert matmuls.
+            return combine_tokens(routed_output, dispatch_state)
+
+        pending_state = dispatch_chunk(0, chunk_size)
+        routed_outputs: list[torch.Tensor] = []
+
+        for chunk_start in range(chunk_size, x.shape[0], chunk_size):
+            chunk_end = min(chunk_start + chunk_size, x.shape[0])
+            next_pending_state = dispatch_chunk(chunk_start, chunk_end)
+            routed_outputs.append(run_pending_chunk(pending_state))
+            pending_state = next_pending_state
+
+        routed_outputs.append(run_pending_chunk(pending_state))
+
+        shared_output = self.shared_expert(x) if self.shared_expert is not None else None
+        sync_combine()
+        routed_output = routed_outputs[0] if len(routed_outputs) == 1 else torch.cat(routed_outputs, dim=0)
+        return routed_output if shared_output is None else shared_output + routed_output
+
     def forward(
         self,
         x: torch.Tensor,
@@ -409,6 +533,9 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        if self.ep_comm_backend == "deepep":
+            x = self._prepare_deepep_input(x)
+
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -433,6 +560,10 @@ class MoE(nn.Module):
         # routed expert compute below.
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
+
+        if self.ep_comm_backend == "deepep":
+            routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
+            return routed_output.reshape(bs, slen, dim)
 
         # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
@@ -484,8 +615,7 @@ def relu2(x: torch.Tensor) -> torch.Tensor:
     return F.relu(x).square()
 
 
-@expert_parallel
-def _run_nongated_experts_for_loop(
+def _run_nongated_experts_for_loop_impl(
     w1: torch.Tensor,
     w2: torch.Tensor,
     _w3: torch.Tensor,
@@ -511,7 +641,17 @@ def _run_nongated_experts_for_loop(
 
 
 @expert_parallel
-def _run_nongated_experts_grouped_mm(
+def _run_nongated_experts_for_loop(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    return _run_nongated_experts_for_loop_impl(w1, w2, _w3, x, num_tokens_per_expert)
+
+
+def _run_nongated_experts_grouped_mm_impl(
     w1: torch.Tensor,
     w2: torch.Tensor,
     _w3: torch.Tensor,
@@ -524,6 +664,17 @@ def _run_nongated_experts_grouped_mm(
     h = relu2(torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets))
     out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
     return out
+
+
+@expert_parallel
+def _run_nongated_experts_grouped_mm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    return _run_nongated_experts_grouped_mm_impl(w1, w2, _w3, x, num_tokens_per_expert)
 
 
 class NonGatedGroupedExperts(nn.Module):
@@ -541,12 +692,31 @@ class NonGatedGroupedExperts(nn.Module):
         # Dummy w3 for @expert_parallel decorator compatibility (expects w1, w2, w3 signature)
         self.w3 = nn.Parameter(torch.empty(0))
         self.use_grouped_mm = use_grouped_mm
+        self.ep_comm_backend: EPCommBackend = "standard"
+
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+
+    def _forward_local(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        if not isinstance(self.w1, DTensor):
+            raise ValueError(
+                f"{self.ep_comm_backend} expert kernels require EP-sharded DTensor weights. "
+                "Make sure expert parallelism is enabled before running the model."
+            )
+        w1 = self.w1.to_local()
+        w2 = self.w2.to_local()
+        w3 = self.w3.to_local()
+        if self.use_grouped_mm:
+            return _run_nongated_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
+        return _run_nongated_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
+        if self.ep_comm_backend == "deepep":
+            return self._forward_local(x, num_tokens_per_expert)
         if self.use_grouped_mm:
             return _run_nongated_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
@@ -682,8 +852,11 @@ class LatentMoE(nn.Module):
             num_experts=num_experts,
             use_grouped_mm=use_grouped_mm,
         )
+        self.ep_comm_backend: EPCommBackend = "standard"
+        self.experts.set_ep_comm_backend(self.ep_comm_backend)
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=top_k)
         self.shared_expert = BCNonGatedFeedForward(dim=dim, hidden_dim=shared_expert_intermediate_size)
+        self.deepep_token_chunk_size: int | None = None
 
         if latent_dim is not None:
             self.fc1_latent_proj = nn.Linear(dim, latent_dim, bias=False)
@@ -709,6 +882,20 @@ class LatentMoE(nn.Module):
             persistent=False,
         )
 
+    def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
+        self.ep_comm_backend = backend
+        self.experts.set_ep_comm_backend(backend)
+
+    def set_deepep_token_chunk_size(self, chunk_size: int | None) -> None:
+        self.deepep_token_chunk_size = chunk_size
+
+    def _run_local_routed_experts(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.experts(x, num_tokens_per_expert)
+
     def _run_routed_experts(
         self,
         x: torch.Tensor,
@@ -729,7 +916,62 @@ class LatentMoE(nn.Module):
         routed_output = self.fc2_latent_proj(routed_output)
         return routed_output
 
+    def _run_deepep_routed_experts(
+        self,
+        x: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        top_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        from prime_rl.trainer.distributed.deepep import (
+            combine_tokens,
+            dispatch_tokens_async,
+            finalize_dispatch_tokens,
+            sync_combine,
+        )
+        from prime_rl.trainer.distributed.expert_parallel import get_ep_group
+
+        group = get_ep_group(self.experts)
+        # Project before dispatch so DeepEP communicates the smaller latent activations.
+        latent_x = self.fc1_latent_proj(x)
+        chunk_size = min(self.deepep_token_chunk_size or latent_x.shape[0], latent_x.shape[0])
+
+        def dispatch_chunk(start: int, end: int):
+            return dispatch_tokens_async(
+                latent_x[start:end],
+                selected_experts_indices[start:end],
+                top_scores[start:end],
+                num_experts=self.experts.num_experts,
+                group=group,
+                score_before_experts=False,
+            )
+
+        def run_pending_chunk(pending_state):
+            hidden_states, num_tokens_per_expert, dispatch_state = finalize_dispatch_tokens(pending_state)
+            routed_output = self._run_local_routed_experts(hidden_states, num_tokens_per_expert)
+            return combine_tokens(routed_output, dispatch_state)
+
+        pending_state = dispatch_chunk(0, chunk_size)
+        routed_outputs: list[torch.Tensor] = []
+
+        for chunk_start in range(chunk_size, latent_x.shape[0], chunk_size):
+            chunk_end = min(chunk_start + chunk_size, latent_x.shape[0])
+            next_pending_state = dispatch_chunk(chunk_start, chunk_end)
+            routed_outputs.append(run_pending_chunk(pending_state))
+            pending_state = next_pending_state
+
+        routed_outputs.append(run_pending_chunk(pending_state))
+
+        shared_output = self.shared_expert(x)
+        sync_combine()
+        routed_output = routed_outputs[0] if len(routed_outputs) == 1 else torch.cat(routed_outputs, dim=0)
+        routed_output = routed_output * self.routed_scaling_factor
+        routed_output = self.fc2_latent_proj(routed_output)
+        return shared_output + routed_output
+
     def forward(self, x: torch.Tensor, routed_experts: torch.Tensor | None = None) -> torch.Tensor:
+        if self.ep_comm_backend == "deepep":
+            x = _prepare_deepep_input(x)
+
         bs, slen, dim = x.shape
         x_flat = x.view(-1, dim)
 
@@ -737,6 +979,10 @@ class LatentMoE(nn.Module):
 
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
+
+        if self.ep_comm_backend == "deepep":
+            routed_output = self._run_deepep_routed_experts(x_flat, selected_experts_indices, top_scores)
+            return routed_output.reshape(bs, slen, dim)
 
         (
             top_scores_experts_sorted,

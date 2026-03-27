@@ -62,7 +62,7 @@ def get_supported_targets(layer: nn.Module) -> frozenset[str]:
         supported_targets.add("mla_up_proj")
     if mlp is not None and _is_dense_mlp(mlp):
         supported_targets.add("mlp")
-    if mlp is not None and hasattr(mlp, "_run_routed_experts"):
+    if mlp is not None and (hasattr(mlp, "_run_routed_experts") or hasattr(mlp, "_run_local_routed_experts")):
         supported_targets.add("routed_experts")
     if mamba is not None:
         supported_targets.add("mamba")
@@ -81,7 +81,6 @@ def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[s
     enabled_targets = normalized_targets & get_supported_targets(layer)
     self_attn = getattr(layer, "self_attn", None)
     mlp = getattr(layer, "mlp", None)
-
     mamba = getattr(layer, "mamba", None)
     linear_attn = getattr(layer, "linear_attn", None)
 
@@ -93,7 +92,10 @@ def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[s
     if mlp is not None and "mlp" in enabled_targets:
         checkpoint_method(mlp, "forward")
     if mlp is not None and "routed_experts" in enabled_targets:
-        checkpoint_method(mlp, "_run_routed_experts")
+        if hasattr(mlp, "_run_routed_experts"):
+            checkpoint_method(mlp, "_run_routed_experts")
+        if hasattr(mlp, "_run_local_routed_experts"):
+            checkpoint_method(mlp, "_run_local_routed_experts")
     if mamba is not None and "mamba" in enabled_targets:
         checkpoint_method(mamba, "forward")
     if linear_attn is not None and "linear_attn" in enabled_targets:
