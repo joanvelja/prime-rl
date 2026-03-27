@@ -1,4 +1,4 @@
-# Qwen30b Math
+# Intellect-3.1
 
 This example guide you to train our [INTELLECT-3.1](https://huggingface.co/PrimeIntellect/INTELLECT-3.1) model on top of [GLM-4.5-Air-Base](https://huggingface.co/zai-org/GLM-4.5-Air-Base).
 

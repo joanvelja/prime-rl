@@ -44,7 +44,7 @@ lr = 1e-6
 weight_decay = 0.01
 
 [orchestrator]
-batch_size = 512
+batch_size = 2048
 oversampling_factor = 2
 
 [[orchestrator.env]]

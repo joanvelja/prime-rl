@@ -1,11 +1,11 @@
 # MiniMax-M2.5 SWE
 
-This example guide you to 
+This example guide you to RL train [MiniMax-M2.5](https://huggingface.co/MiniMaxAI/MiniMax-M2.5) model on agentic swe tasks.
 
 
 ## Requirements
 
-you need to have access to a slurm cluster with at least 4 nodes to run this example.  Each nodes must have a shared filesystem to communicate. In this guide we assume that the nfs is mounted on `/shared`, you can change it to your own path.
+you need to have access to a slurm cluster with at least 16 nodes to run this example.  Each nodes must have a shared filesystem to communicate. In this guide we assume that the nfs is mounted on `/shared`, you can change it to your own path.
 
 You also need to have prime-rl clone on your cluster into the shared filesystem.
 
