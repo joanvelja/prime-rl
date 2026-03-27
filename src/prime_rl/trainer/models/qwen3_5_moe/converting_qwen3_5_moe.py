@@ -93,9 +93,6 @@ def _convert_prime_layer_to_hf(state_dict: dict[str, Tensor], prefix: str):
         state_dict[f"{prefix}.mlp.shared_expert_gate.weight"] = state_dict.pop(seg_key)
 
 
-# ---- Public per-layer API (backward-compatible) ----
-
-
 def convert_hf_layer_to_tt(state_dict: dict[str, Tensor], layer_idx: int):
     """Convert a single backbone layer from HF to PrimeRL format in-place."""
     _convert_hf_layer_to_prime(state_dict, f"model.layers.{layer_idx}")
@@ -105,8 +102,6 @@ def convert_tt_layer_to_hf(state_dict: dict[str, Tensor], layer_idx: int):
     """Convert a single backbone layer from PrimeRL to HF format in-place."""
     _convert_prime_layer_to_hf(state_dict, f"model.layers.{layer_idx}")
 
-
-# ---- MTP weight conversion ----
 
 # HF checkpoint key prefix → PrimeRL key prefix
 _MTP_FUSION_MAP_HF_TO_PRIME = {
@@ -165,9 +160,6 @@ def _convert_mtp_prime_to_hf(state_dict: dict[str, Tensor]):
     for hf_prefix, prime_prefix in _MTP_FUSION_MAP_HF_TO_PRIME.items():
         for k in [k for k in list(state_dict) if k.startswith(prime_prefix)]:
             state_dict[hf_prefix + k[len(prime_prefix) :]] = state_dict.pop(k)
-
-
-# ---- Bulk conversion API ----
 
 
 def convert_hf_to_tt_moe(state_dict: dict[str, Tensor]):

@@ -503,10 +503,6 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
             temperature=temperature,
         )
 
-    # ------------------------------------------------------------------
-    # MTP interface
-    # ------------------------------------------------------------------
-
     @property
     def mtp_layers(self) -> nn.ModuleList | None:
         mtp = getattr(self.model, "mtp", None)

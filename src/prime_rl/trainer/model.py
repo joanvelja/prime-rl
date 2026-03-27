@@ -645,13 +645,14 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
                 fallback_layer_types.add(type(transformer_block).__name__)
             transformer_block = checkpoint_wrapper(transformer_block, preserve_rng_state=False)
             full_layers += 1
+
         language_model.layers.register_module(layer_name, transformer_block)
 
     if ac_config.mode == "selective":
         unsupported_targets = frozenset(ac_config.targets) - model_supported_targets
         if unsupported_targets:
             raise ValueError(
-                f"Selective checkpoint targets {sorted(unsupported_targets)} are not supported "
+                f"Selective activation checkpoint targets {sorted(unsupported_targets)} are not supported "
                 f"by the selected model layers. Supported targets across the model: {sorted(model_supported_targets)}"
             )
         if fallback_layer_types:
@@ -699,6 +700,12 @@ def _move_buffers_to_cuda(model: nn.Module, config: ModelConfig) -> None:
             buffer.data = buffer.data.to("cuda")
 
 
+def _reset_runtime_moe_buffers(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, (MoE, LatentMoE)) and module.tokens_per_expert.device.type != "meta":
+            module.tokens_per_expert.zero_()
+
+
 def _validate_flash_attn_4_installed() -> None:
     """Validate that flash-attn-cute is installed and not overwritten by flash-attn.
 
@@ -739,7 +746,7 @@ def setup_model(
     config: ModelConfig,
     parallel_dims: ParallelDims,
     loading_from_checkpoint_later: bool = False,
-    fused_cross_entropy: bool = False,
+    fused_cross_entropy: bool | str = False,
 ) -> nn.Module:
     if config.attn == "flash_attention_3" and not is_flash_attn_3_available():
         raise ValueError(
@@ -835,6 +842,7 @@ def setup_model(
         else:
             load_dcp_from_hf(model, config, parallel_dims)
 
+    _reset_runtime_moe_buffers(model)
     return model
 
 
