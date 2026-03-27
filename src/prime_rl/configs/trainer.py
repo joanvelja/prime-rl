@@ -244,7 +244,7 @@ class ModelConfig(BaseModelConfig):
                 "Only used when ep_comm_backend='deepep'."
             ),
         ),
-    ] = 24
+    ] = 20
 
     deepep_token_chunk_size: Annotated[
         int | None,
