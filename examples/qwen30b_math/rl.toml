@@ -28,6 +28,8 @@ impl = "custom"
 attn = "flash_attention_3"
 ep = 8
 
+[trainer.model.compile]
+
 [trainer.model.ac_offloading]
 max_inflight_activations = 5
 
@@ -49,11 +51,11 @@ max_tokens = 32768
 id = "math-env"
 name = "math"
 
-# [orchestrator.eval]
-# interval = 25
+[orchestrator.eval]
+interval = 25
 
-# [[orchestrator.eval.env]]
-# id = "aime2025"
+[[orchestrator.eval.env]]
+id = "aime2025"
 
 [orchestrator.buffer]
 easy_threshold = 1.0

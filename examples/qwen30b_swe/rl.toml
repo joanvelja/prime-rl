@@ -29,6 +29,8 @@ attn = "flash_attention_3"
 ep = 8
 cp = 2
 
+[trainer.model.compile]
+
 [trainer.model.ac_offloading]
 max_inflight_activations = 5
 
@@ -46,15 +48,19 @@ oversampling_factor = 2
 [[orchestrator.env]]
 id = "min-swe-agent-plus"
 name = "swe"
-args = { max_turns = 200, cpu_cores = 2,  memory_gb = 4, disk_size_gb = 4, labels = ["mini-swe-agent-plus-i4"], total_timeout_minutes = 720, sandbox_client_max_workers = 256, max_command_timeouts = 3, sandbox_command_timeout = 30}
+args = { max_turns = 200, cpu_cores = 2,  memory_gb = 4, disk_size_gb = 4, labels = ["mini-swe-agent-plus"], total_timeout_minutes = 720, sandbox_client_max_workers = 256, max_command_timeouts = 3, sandbox_command_timeout = 30}
 
-# [orchestrator.eval]
-# interval = 25
+[orchestrator.eval]
+interval = 25
 
 [[orchestrator.eval.env]]
 id = "min-swe-agent-plus"
 name = "swe-bench-verified-quick"
-args = { dataset_name="PrimeIntellect/SWE-Bench-Verified-Quick", max_turns = 200, cpu_cores = 2,  memory_gb = 4, disk_size_gb = 4, labels = ["mini-swe-agent-plus-i4"], total_timeout_minutes = 720, sandbox_client_max_workers = 256, max_command_timeouts = 3, sandbox_command_timeout = 30}
+args = { dataset_name="PrimeIntellect/SWE-Bench-Verified-Quick", max_turns = 200, cpu_cores = 2,  memory_gb = 4, disk_size_gb = 4, labels = ["mini-swe-agent-plus"], total_timeout_minutes = 720, sandbox_client_max_workers = 256, max_command_timeouts = 3, sandbox_command_timeout = 30}
+
+[[orchestrator.eval.env]]
+id = "aime2025"
+
 
 [orchestrator.buffer]
 easy_threshold = 1.0
