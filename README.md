@@ -29,13 +29,40 @@ PRIME-RL: Async RL Training at Scale
 
 ## Overview
 
-PRIME-RL is a framework for large-scale asynchronous reinforcement learning. It is designed to be easy-to-use and hackable, yet capable of scaling to 1000+ GPUs. Beyond that, here is why we think you might like it:
+PRIME-RL is a framework for large-scale reinforcement learning. It is designed to be easy-to-use and hackable, yet capable of scaling to 1000+ GPUs. Beyond that, here is why we think you might like it:
 
-1. Integrates natively with [`verifiers`](https://github.com/PrimeIntellect-ai/verifiers) environments via the [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=most_stars)
-2. Supports end-to-end post-training, including SFT and RL training and evals
-3. Multi-node deployment with [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) training and [vLLM](https://github.com/vllm-project/vllm) inference backend
-4. Designed for asynchronous agentic RL training at scale
-5. Hackable, modular and extensible by nature
+
+1. Fully asynchronous RL for high-throughput agentic training at scale.
+2. Performant: Designed to train 1T+ MoE over 1000+ GPUs with [FSDP2](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) training and [vLLM](https://github.com/vllm-project/vllm) inference backend.
+3. Integrates natively with [`verifiers`](https://github.com/PrimeIntellect-ai/verifiers) environments via the [Environments Hub](https://app.primeintellect.ai/dashboard/environments?ex_sort=most_stars). With built in support for swe and agentic environments.
+4. Supports end-to-end post-training, including SFT and RL training and evals
+5. Multi-node deployment with Slurm and Kubernetes support.
+6. Multi-modal support for VLMs like Qwen3-VL.
+7. Hackable, modular and extensible by nature
+
+
+## Models support
+
+Custom training stacks live under `src/prime_rl/trainer/models/`; with `[model] impl = "auto"` the trainer picks them when the HF config type is registered. **EP** = expert parallelism (MoE); **CP** = context parallelism (ring FlashAttention; Qwen3.5-MoE also shards hybrid linear-attn). Configure `ep` / `cp` on `[model]` ([configs](docs/configs.md)). If `cp > 1`, `data.seq_len` must divide `2 * cp`.
+
+| Family | Example IDs | MoE | EP | CP |
+|--------|-------------|-----|----|-----|
+| GLM-5 (`glm_moe_dsa`) | `zai-org/GLM-5`, `zai-org/GLM-5-FP8` | yes | ✓ | — |
+| Qwen3 MoE (`qwen3_moe`) | `Qwen/Qwen3-30B-A3B`, … | yes | ✓ | ✓ |
+| Qwen3.5 MoE (`qwen3_5_moe`) | `Qwen/Qwen3.5-35B-A3B`, … | yes | ✓ | ✓ |
+| Qwen3 / Qwen3.5 VLMs | [multimodal.md](docs/multimodal.md) (`qwen3_vl`, `qwen3_5`, `qwen3_5_moe`) | MoE only on MoE VLMs | MoE rows only | ✓* |
+| MiniMax M2 (`minimax_m2`) | `MiniMax/MiniMax-M2` | yes | ✓ | ✓ |
+| Nemotron H (`nemotron_h`) | `nvidia/Nemotron-3-Nano-30B-A3B`, `nvidia/Nemotron-3-Super-120B-A12B`, … | yes | ✓ | — |
+| INTELLECT-3 (`afmoe`) | `PrimeIntellect/INTELLECT-3`, … | yes | ✓ | ✓ |
+| GLM-4 · GLM-4.5 MoE (`glm4_moe`) | `THUDM/GLM-4-9B-0414`, `zai-org/GLM-4.5-Air`, `zai-org/GLM-4.5`, … | yes | ✓ | ✓ |
+| GPT-OSS (HF, MoE) | `openai/gpt-oss-20b`, `openai/gpt-oss-120b` | yes | —† | ✓* |
+| Llama (dense) | `meta-llama/Llama-3.1-8B`, … | no | — | ✓ |
+| Other HF causal LMs | Qwen3 dense, Mistral, … (`impl = "hf"`) | varies | — | ✓* |
+
+\* Requires a CP-compatible attention mode for that stack (`flash_attention_2`, `flash_attention_3`, or `fa4` where applicable).
+
+Optional extra columns later: `model_type`, LoRA, `[model.vlm]`, FP8 / grouped GEMM, CI coverage.
+
 
 ## Setup
 
@@ -71,21 +98,6 @@ cd prime-rl
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
-```
-
-3. Install dependencies from the lock file
-
-```bash
-uv sync --all-extras
-```
-
-3.1. Optional: Install Flash Attention 3 (on Hopper GPUs only, for flash_attention_3 attention backend)
-
-> *NOTE*: This step will take a while, as it builds the Flash Attention 3 extension from source, as it has no wheels prebuilt.
-> *NOTE*: After this step, you can't run `uv sync --all-extras` or `uv run` as it will uninstall the package, you can avoid it by running `uv sync --inexact` or `uv run --no-sync`
-
-```bash
-uv pip install "flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@main#subdirectory=hopper" --no-build-isolation
 ```
 
 </details>
