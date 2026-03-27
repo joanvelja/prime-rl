@@ -155,7 +155,7 @@ We provide end-to-end training examples in the [`examples`](examples) directory 
 
 ### Basic Training: 1 to 8 GPUs
 
-Follow this guide to learn the basic of Prime-RL, you can train your own models on 2 to 8 GPUs. Ideal for getting started and exploring the capabilities of the framework. This guides provides most usecase, single turn , multi turn, tool callin etcc on toyish environments and small models.
+Follow this guide to learn the basics of Prime-RL. You can train your own models on 1 to 8 GPUs. Ideal for getting started and exploring the capabilities of the framework. These guides cover most use cases -- single-turn, multi-turn, tool calling, etc. -- on toy environments and small models.
 
 1. [**Reverse Text**](examples/reverse_text/README.md): Train `Qwen3-0.6B` to reverse a small chunk of text. Demonstrates tiny-scale single-turn SFT and RL training. Can be trained on a single consumer GPU in a few minutes, and is ideal for getting started.
 2. [**Wordle**](examples/wordle/README.md): Train `Qwen3-1.7B` to play Wordle. A fun example of multi-turn SFT and RL training. Can be trained on a 2-4 H100 GPUs in a few hours. Ideal for exploring the multi-turn training capabilities of the framework.
@@ -165,14 +165,14 @@ Follow this guide to learn the basic of Prime-RL, you can train your own models 
 
 ### Advanced Training: 8+ GPUs:
 
-Follow this guide to train large model on hard environments and increase reasoning and agentic capabilities. From single turn reasoning to agentic training on complex environments. 
-These guide are designed to be run from a slurm cluster but can also be adapted to k8s deployments.
+Follow this guide to train large models on hard environments and increase reasoning and agentic capabilities. From single-turn reasoning to agentic training on complex environments.
+These guides are designed to be run from a Slurm cluster but can also be adapted to k8s deployments.
 
-1. [**Qwen30b Math**](examples/qwen30b_math/README.md): Train `Qwen3-30B-A3B` to solve hard math problems.
-2. [**Qwen30b SWE**](....md): Train `Qwen3-30B-A3B` to solve hard SWE problems.
-3. [**Intellect-3.1**](....md): Reproduce our`INTELLECT-3.1` training run.
-3. [**Minimax agentic**](....md): Train `Qwen3-30B-A3B` to solve hard agentic problems.
-4. [**High trouhghtput GLM-5**](....md): Train `GLM-5` with PD disaggregation and fp8 inference on swe.
+1. [**Qwen 2.5 32B Math**](examples/qwen30b_math/README.md): Train `Qwen3-30B-A3B` to solve hard math problems.
+2. [**Qwen 2.5 32B SWE**](examples/qwen30b_swe/README.md): Train `Qwen3-30B-A3B` to solve hard SWE problems.
+3. [**Intellect-3.1**](examples/Intellect-3.1/README.md): Reproduce our `INTELLECT-3.1` training run.
+4. [**MiniMax-M2.5 SWE**](examples/minimax_m2.5_swe/README.md): Train `MiniMax-M2.5` on agentic SWE tasks.
+5. [**High-throughput GLM-5**](examples/glm5_pd_disag/README.md): Train `GLM-5` with PD disaggregation and FP8 inference on SWE.
 
 ## Docs
 
@@ -186,6 +186,7 @@ Check out the [docs](docs) directory for in-depth guides on how to use PRIME-RL.
 - [**Checkpointing**](docs/checkpointing.md) - Saving and resuming training from checkpoints
 - [**Benchmarking**](docs/benchmarking.md) - Performance benchmarking and throughput measurement
 - [**Deployment**](docs/deployment.md) - Training deployment on single-GPU, multi-GPU, and multi-node clusters
+- [**Memory Usage**](docs/memory_usage.md) - Techniques for reducing memory usage (activation checkpointing, offloading, EP, CP, LoRA, etc.)
 - [**Troubleshooting**](docs/troubleshooting.md) - Common issues and their solutions
 - [**Multimodal**](docs/multimodal.md) - Training VLMs like Qwen3-VL
 
