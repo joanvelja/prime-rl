@@ -222,6 +222,48 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = 1
 
+    ep_comm_backend: Annotated[
+        Literal["standard", "deepep"],
+        Field(
+            description=(
+                "Communication backend for expert parallelism. "
+                "`standard` uses TorchTitan all-to-all collectives and `deepep` uses DeepEP custom kernels."
+            ),
+        ),
+    ] = "standard"
+
+    deepep_num_sms: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Number of SMs to allocate for DeepEP intranode dispatch/combine kernels. "
+                "Also determines internode RDMA channel count (num_channels = num_sms / 2). "
+                "Lower values leave more SMs for compute; higher values speed up dispatch/combine. "
+                "The optimal value depends on the EP degree and hardware."
+                "Only used when ep_comm_backend='deepep'."
+            ),
+        ),
+    ] = 24
+
+    deepep_token_chunk_size: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Optional token chunk size for DeepEP MoE pipelining. "
+                "When set, DeepEP dispatch for chunk i+1 is launched while experts compute chunk i. "
+                "Only used when ep_comm_backend='deepep'."
+            ),
+        ),
+    ] = None
+
+    tp: Annotated[
+        int,
+        Field(
+            description="The tensor parallelism size to use. If 1, then no TP will be used.",
+        ),
+    ] = 1
     cp: Annotated[
         int,
         Field(
@@ -345,6 +387,16 @@ class ModelConfig(BaseModelConfig):
     def flash_attention_4_only_with_custom_impl(self):
         if self.attn == "fa4" and self.impl != "custom":
             raise ValueError("Flash attention 4 is only supported with the custom implementation")
+        return self
+
+    @model_validator(mode="after")
+    def validate_ep_comm_backend(self):
+        if self.ep_comm_backend == "standard":
+            return self
+
+        if self.ep <= 1:
+            raise ValueError(f"model.ep_comm_backend='{self.ep_comm_backend}' requires model.ep > 1.")
+
         return self
 
 
