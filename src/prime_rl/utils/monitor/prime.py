@@ -293,12 +293,18 @@ class PrimeMonitor(Monitor):
         now = datetime.now(timezone.utc)
         rows = []
 
-        for rollout in rollouts:
+        for sample_id, rollout in enumerate(rollouts):
             prompt = rollout.get("prompt")
             completion = rollout.get("completion")
             trajectory = rollout.get("trajectory") or []
             if prompt is None or completion is None or not trajectory:
                 continue
+
+            example_id = rollout.get("example_id")
+            try:
+                problem_id = int(example_id) if example_id is not None else sample_id
+            except (TypeError, ValueError):
+                problem_id = sample_id
 
             trajectory_data = [
                 {
@@ -318,8 +324,8 @@ class PrimeMonitor(Monitor):
                     "run_id": self.run_id,
                     "step": step,
                     "tag": "",
-                    "problem_id": 0,
-                    "sample_id": 0,
+                    "problem_id": problem_id,
+                    "sample_id": sample_id,
                     "prompt": json.dumps(prompt),
                     "completion": json.dumps(completion),
                     "trajectory": json.dumps(trajectory_data),
