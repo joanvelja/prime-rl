@@ -105,31 +105,20 @@ Validate your environment setup
 </summary>
 <br>
 
-1. Check that the environment uses Python 3.12
 
-```bash
-uv run python -V
-```
-
-2. Check that `flash-attn` is installed
-
-```bash
-uv run python -c "import flash_attn"
-```
-
-3. Check that you can run SFT trainer  (*this requires 1 GPU*)
+1. Check that you can run SFT trainer  (*this requires 1 GPU*)
 
 ```bash
 uv run sft @ configs/debug/sft/train.toml
 ```
 
-4. Check that you can run the RL trainer (*this requires 1 GPU*)
+2. Check that you can run the RL trainer (*this requires 1 GPU*)
 
 ```bash
 uv run trainer @ configs/debug/rl/train.toml
 ```
 
-5. Check that you can run the inference server (*this requires 1 GPU*)
+3. Check that you can run the inference server (*this requires 1 GPU*)
 
 ```bash
 uv run inference @ configs/debug/infer.toml
@@ -141,12 +130,6 @@ uv run inference @ configs/debug/infer.toml
 
 ```bash
 uv run orchestrator @ configs/debug/orch.toml
-```
-
-5.2. Check that you can run evals against the inference server
-
-```bash
-uv run eval @ configs/debug/eval.toml
 ```
 
 </details>
@@ -169,13 +152,26 @@ uv run hf auth login
 
 ## Training Examples
 We provide end-to-end training examples in the [`examples`](examples) directory to highlight features of the framework and guide you through the process of training your own models.
+
+### Basic Training: 1 to 8 GPUs
+
+Follow this guide to learn the basic of Prime-RL, you can train your own models on 2 to 8 GPUs. Ideal for getting started and exploring the capabilities of the framework. This guides provides most usecase, single turn , multi turn, tool callin etcc on toyish environments and small models.
+
 1. [**Reverse Text**](examples/reverse_text/README.md): Train `Qwen3-0.6B` to reverse a small chunk of text. Demonstrates tiny-scale single-turn SFT and RL training. Can be trained on a single consumer GPU in a few minutes, and is ideal for getting started.
 2. [**Wordle**](examples/wordle/README.md): Train `Qwen3-1.7B` to play Wordle. A fun example of multi-turn SFT and RL training. Can be trained on a 2-4 H100 GPUs in a few hours. Ideal for exploring the multi-turn training capabilities of the framework.
 3. [**Alphabet Sort**](examples/alphabet_sort/README.md): Train `Qwen3-4B-Instruct-2507` to sort names alphabetically. Demonstrates multi-turn RL training via LoRA without SFT warmup. Can be trained on a single H100 GPU in just over an hour. Ideal for exploring LoRA-based training.
 4. [**Wiki Search**](examples/wiki_search/README.md): Train `Qwen3-4B-Instruct-2507` to answer trivia questions by searching through a Wikipedia. Demonstrates multi-turn with web search tool use.
 5. [**Hendrycks Sanity**](examples/hendrycks_sanity/README.md): Run a sanity check experiment on `DeepSeek-R1-Distill-Qwen-1.5B` using a filtered subset of MATH where the model already partially solves 20-80% of problems. Useful for algorithm ablations.
 
-*More to come...*
+### Advanced Training: 8+ GPUs:
+
+Follow this guide to train large model on hard environments and increase reasoning and agentic capabilities. From single turn reasoning to agentic training on complex environments.
+
+1. [**Qwen30b Math**](....md): Train `Qwen3-30B-A3B` to solve hard math problems.
+2. [**Qwen30b SWE**](....md): Train `Qwen3-30B-A3B` to solve hard SWE problems.
+3. [**Intellect-3.1**](....md): Reproduce our`INTELLECT-3.1` training run.
+3. [**Minimax agentic**](....md): Train `Qwen3-30B-A3B` to solve hard agentic problems.
+4. [**High trouhghtput GLM-5**](....md): Train `GLM-5` with PD disaggregation and fp8 inference on swe.
 
 ## Docs
 
