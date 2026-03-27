@@ -2,6 +2,7 @@
 
 Documenting changes which affect configuration usage patterns (added/moved/removed/renamed fields, notable logic changes).
 
+- **`wandb.log_extras.sample_ratio` / monitor sample logging defaults**: `wandb.log_extras.sample_ratio` is now actually applied to W&B sample-table logging via the shared monitor sampler (it was previously a no-op for WandB). Separately, the orchestrator no longer hard-caps sample logging to 8 rollouts before monitor-level sampling runs, so when monitor `sample_ratio` is `None`, monitors now receive and may log the full rollout batch for a step instead of at most 8 rollouts. This affects both W&B and Prime monitor sample logging behavior. (2026-03-27)
 - **`loss_impl = "quack_fused"` (SFT)**: Added `quack_fused` option for the SFT `loss_impl` field. Uses quack-kernels for chunked linear + cross-entropy with CuTe DSL CUDA kernels, avoiding full logits materialization. Requires `quack-kernels` package. Does not support Gemma logit softcapping. Custom model impl (`model.impl = "custom"`) also gains quack RMSNorm acceleration on CUDA automatically. (2026-03-26)
 - **`model.tp` (trainer `ModelConfig`)**: Removed from the trainer model config. Existing trainer configs must delete this field; it is no longer accepted. (2026-03-26)
 - **`orchestrator.env[].num_workers`**: Added configurable env server worker count (`int | "auto"`, default: `"auto"`). When `"auto"`, scales based on concurrency (1 worker per 256 concurrent rollouts). Only used when the orchestrator spawns the env server (i.e. `address` is not set). (2026-03-25)
