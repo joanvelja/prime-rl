@@ -5,6 +5,7 @@ Also exposes /health endpoint for Kubernetes liveness probes.
 Runs in a background thread to avoid blocking the training loop.
 """
 
+import multiprocessing
 import threading
 import time
 from dataclasses import dataclass
@@ -29,72 +30,74 @@ class RunStats:
     ready: bool
 
 
-class HealthServer:
-    """Lightweight HTTP server exposing /health for Kubernetes liveness probes.
+def _health_process_main(host: str, port: int) -> None:
+    """Minimal /health server in a separate process. Immune to GIL."""
 
-    Can be subclassed to add additional endpoints (e.g., MetricsServer).
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok\n")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    HTTPServer((host, port), Handler).serve_forever()
+
+
+class HealthServer:
+    """HTTP server exposing /health for Kubernetes liveness probes.
+
+    Runs in a separate process so it always responds, even when the
+    trainer holds the GIL during long compute on large models.
     """
 
     def __init__(self, port: int, host: str = "0.0.0.0"):
         self.port = port
         self.host = host
-        self._server: HTTPServer | None = None
-        self._thread: threading.Thread | None = None
+        self._process: multiprocessing.Process | None = None
         self._started = False
 
-    def _make_handler(self) -> type[BaseHTTPRequestHandler]:
-        """Create the request handler class. Override to add endpoints."""
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == "/health":
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"ok\n")
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-
-            def log_message(self, format, *args):
-                pass
-
-        return Handler
-
     def start(self) -> None:
-        """Start the server in a background thread."""
         if self._started:
             logger.warning(f"{self.__class__.__name__} already started")
             return
-
-        self._server = HTTPServer((self.host, self.port), self._make_handler())
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
+        self._process = multiprocessing.Process(
+            target=_health_process_main, args=(self.host, self.port), daemon=True
+        )
+        self._process.start()
         self._started = True
-        logger.info(f"Health server started at http://{self.host}:{self.port}/health")
+        logger.info(f"Health server started at http://{self.host}:{self.port}/health (pid={self._process.pid})")
 
     def stop(self) -> None:
-        """Stop the server and release the port."""
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            if self._thread is not None:
-                self._thread.join(timeout=5.0)
-            self._server = None
-            self._thread = None
+        if self._process is not None:
+            self._process.terminate()
+            self._process.join(timeout=5.0)
+            if self._process.is_alive():
+                self._process.kill()
+            self._process = None
             self._started = False
             logger.info(f"{self.__class__.__name__} stopped")
 
 
 class MetricsServer(HealthServer):
-    """Prometheus metrics server extending HealthServer with /metrics endpoint.
+    """Prometheus metrics server with /metrics (thread) and /health (process).
 
-    Uses an isolated CollectorRegistry to avoid global state pollution.
-    Disabled by default - enable by setting `metrics_server` in trainer config.
+    /metrics + /health on main port via background thread (best-effort, GIL-bound).
+    /health on port+1 via separate process (always responsive, GIL-free).
+    K8s liveness probes should target port+1.
     """
 
     def __init__(self, config: "MetricsServerConfig"):
-        super().__init__(config.port, config.host)
+        super().__init__(config.port + 1, config.host)
+        self._metrics_port = config.port
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
         self.config = config
 
         self._registry = CollectorRegistry()
@@ -178,17 +181,30 @@ class MetricsServer(HealthServer):
         return Handler
 
     def start(self) -> None:
-        """Start the metrics server in a background thread."""
+        """Start metrics thread + GIL-free health process."""
         if self._started:
             logger.warning("Metrics server already started")
             return
 
-        self._server = HTTPServer((self.host, self.port), self._make_handler())
+        # Health process on port+1 (GIL-free, for K8s probes)
+        super().start()
+
+        # Metrics thread on main port (also serves /health as fallback)
+        self._server = HTTPServer((self.host, self._metrics_port), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        self._started = True
-        logger.info(f"Metrics server started at http://{self.host}:{self.port}/metrics")
-        logger.info(f"Health endpoint available at http://{self.host}:{self.port}/health")
+        logger.info(f"Metrics server started at http://{self.host}:{self._metrics_port}/metrics")
+        logger.info(f"GIL-free health at http://{self.host}:{self.port}/health")
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            if self._thread is not None:
+                self._thread.join(timeout=5.0)
+            self._server = None
+            self._thread = None
+        super().stop()
 
     def update(
         self,
