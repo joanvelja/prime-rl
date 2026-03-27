@@ -170,11 +170,12 @@ def compute_mtp_token_losses(
     detached_weight = model.lm_head.weight.detach()
     step_losses = []
     current_ids, current_pos = input_ids, position_ids
+    boundary_pos = position_ids
 
     for step in range(num_steps):
-        shifted_ids = _shift_left(current_ids, current_pos, cp_group=cp_group)
-        labels = _shift_left(shifted_ids, current_pos, cp_group=cp_group)
-        shifted_pos = _shift_left(current_pos, current_pos, cp_group=cp_group) if current_pos is not None else None
+        shifted_ids = _shift_left(current_ids, boundary_pos, cp_group=cp_group)
+        labels = _shift_left(shifted_ids, boundary_pos, cp_group=cp_group)
+        shifted_pos = _shift_left(current_pos, boundary_pos, cp_group=cp_group) if current_pos is not None else None
 
         with torch.no_grad():
             embeds = model.mtp_embed_tokens(shifted_ids)

@@ -14,7 +14,7 @@ from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
-from prime_rl.utils.client import InferencePool, _SpecDecodeMetricsTracker, _fetch_inference_metrics
+from prime_rl.utils.client import InferencePool, _fetch_inference_metrics, _SpecDecodeMetricsTracker
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (

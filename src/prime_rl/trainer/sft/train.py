@@ -15,6 +15,7 @@ from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.utils.pathing import resolve_latest_ckpt_step
 from prime_rl.configs.sft import SFTConfig
+from prime_rl.configs.trainer import MTPConfig
 from prime_rl.utils.cp import setup_cp_params, shard_for_cp
 from prime_rl.trainer.runs import Progress, get_multi_run_manager, setup_multi_run_manager
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
@@ -50,6 +51,18 @@ from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX
 
 from torchtitan.distributed.utils import clip_grad_norm_
+
+
+def _apply_mtp_aux_loss(
+    loss_sum: torch.Tensor,
+    mtp_loss_sum: torch.Tensor,
+    mtp_config: MTPConfig | None,
+    *,
+    include_aux_loss: bool,
+) -> torch.Tensor:
+    if not include_aux_loss or mtp_config is None:
+        return loss_sum
+    return loss_sum + mtp_config.loss_scaling_factor * mtp_loss_sum
 
 
 @clean_exit
@@ -199,7 +212,9 @@ def train(config: SFTConfig):
 
     mtp_config = config.model.mtp
 
-    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def compute_loss(
+        micro_batch: dict, *, include_aux_loss: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass returning (loss_sum, token_count, mtp_loss_sum) over unmasked tokens."""
         input_ids = micro_batch["input_ids"].to("cuda")
         position_ids = micro_batch["position_ids"].to("cuda")
@@ -242,7 +257,12 @@ def train(config: SFTConfig):
                 position_ids=position_ids,
                 cp_group=cp_group if cp_enabled else None,
             )
-            loss_sum = loss_sum + mtp_config.loss_scaling_factor * mtp_loss_sum
+            loss_sum = _apply_mtp_aux_loss(
+                loss_sum,
+                mtp_loss_sum,
+                mtp_config,
+                include_aux_loss=include_aux_loss,
+            )
 
         del out
         return loss_sum, token_count, mtp_loss_sum
@@ -257,7 +277,7 @@ def train(config: SFTConfig):
 
         with torch.no_grad():
             for micro_batch in data_iter:
-                loss_sum, token_count, _mtp_loss = compute_loss(micro_batch)
+                loss_sum, token_count, _mtp_loss = compute_loss(micro_batch, include_aux_loss=False)
                 if not torch.isnan(loss_sum.detach()):
                     total_loss_sum += loss_sum.detach()
                     total_token_count += token_count
