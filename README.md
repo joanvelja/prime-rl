@@ -165,7 +165,8 @@ Follow this guide to learn the basic of Prime-RL, you can train your own models 
 
 ### Advanced Training: 8+ GPUs:
 
-Follow this guide to train large model on hard environments and increase reasoning and agentic capabilities. From single turn reasoning to agentic training on complex environments.
+Follow this guide to train large model on hard environments and increase reasoning and agentic capabilities. From single turn reasoning to agentic training on complex environments. 
+These guide are designed to be run from a slurm cluster but can also be adapted to k8s deployments.
 
 1. [**Qwen30b Math**](....md): Train `Qwen3-30B-A3B` to solve hard math problems.
 2. [**Qwen30b SWE**](....md): Train `Qwen3-30B-A3B` to solve hard SWE problems.
