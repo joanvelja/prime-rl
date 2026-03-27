@@ -6,6 +6,8 @@ Hybrid Mamba-Transformer-MoE architecture with three distinct layer types:
 - Attention layers (using shared FlashAttention/SDPA from prime-rl)
 """
 
+from typing import Optional
+
 import torch
 from torch import Tensor, nn
 from transformers.generation import GenerationMixin
@@ -79,34 +81,35 @@ def _patch_mamba2_use_triton_ssd():
     logger.info("Patched NemotronHMamba2Mixer to use mamba_ssm Triton SSD kernels")
 
 
-def _validate_zamba2_compat(config: NemotronHConfig):
-    """Fail fast if the config is missing the Zamba2 fields the HF mixer consumes."""
-    required_aliases = (
-        "mamba_expand",
-        "mamba_d_state",
-        "mamba_d_conv",
-        "mamba_ngroups",
-        "mamba_headdim",
-        "n_mamba_heads",
-        "use_mem_eff_path",
-        "add_bias_linear",
-    )
-    missing = [attr for attr in required_aliases if not hasattr(config, attr)]
-    if missing:
-        missing_names = ", ".join(missing)
-        raise AttributeError(
-            "NemotronHConfig is missing the Zamba2 compatibility aliases required by "
-            f"NemotronHMamba2Mixer: {missing_names}."
-        )
+def _ensure_zamba2_compat(config: NemotronHConfig):
+    """Add Zamba2-compatible attribute aliases to NemotronHConfig.
 
+    The HF modular NemotronHMamba2Mixer inherits from Zamba2MambaMixer, whose
+    __init__ reads Zamba2-style attribute names before the NemotronH child
+    overrides them. We set the missing aliases so the parent __init__ doesn't
+    crash.
+
+    Critically, ``mamba_expand`` must give ``mamba_num_heads * mamba_head_dim``
+    when multiplied by ``hidden_size``; the config's ``expand`` field does not
+    satisfy this for all model sizes (e.g. Nemotron-3-Nano-30B).
+    """
     correct_intermediate = config.mamba_num_heads * config.mamba_head_dim
-    actual_intermediate = int(config.mamba_expand * config.hidden_size)
-    if actual_intermediate != correct_intermediate:
-        raise ValueError(
-            "NemotronHConfig.mamba_expand must satisfy "
-            "int(mamba_expand * hidden_size) == mamba_num_heads * mamba_head_dim "
-            f"(got {actual_intermediate} vs {correct_intermediate})."
-        )
+    correct_expand = correct_intermediate / config.hidden_size
+
+    aliases = {
+        "mamba_d_state": config.ssm_state_size,
+        "mamba_d_conv": config.conv_kernel,
+        "mamba_ngroups": config.n_groups,
+        "mamba_headdim": config.mamba_head_dim,
+        "n_mamba_heads": config.mamba_num_heads,
+        "add_bias_linear": getattr(config, "use_bias", False),
+        "use_mem_eff_path": True,
+    }
+    for attr, value in aliases.items():
+        if not hasattr(config, attr):
+            setattr(config, attr, value)
+
+    config.mamba_expand = correct_expand
 
 
 class NemotronHMambaLayer(GradientCheckpointingLayer):
@@ -114,8 +117,8 @@ class NemotronHMambaLayer(GradientCheckpointingLayer):
 
     def __init__(self, config: NemotronHConfig, layer_idx: int):
         super().__init__()
-        _validate_zamba2_compat(config)
         _patch_mamba2_use_triton_ssd()
+        _ensure_zamba2_compat(config)
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
         self.mamba = NemotronHMamba2Mixer(config, layer_idx=layer_idx)
         self.mlp = None  # No MoE in this layer type
@@ -123,9 +126,9 @@ class NemotronHMambaLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        max_seqlen: int | None = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -157,9 +160,9 @@ class NemotronHMoELayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        max_seqlen: int | None = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -189,9 +192,9 @@ class NemotronHAttentionLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        max_seqlen: int | None = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
@@ -231,9 +234,9 @@ class NemotronHMTPBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cu_seqlens: torch.LongTensor | None = None,
-        max_seqlen: int | None = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         for layer in self.sublayers:
             hidden_states = layer(
@@ -413,9 +416,9 @@ class NemotronHModel(NemotronHPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -475,12 +478,12 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
 
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
         logits_to_keep: int = 0,
-        temperature: torch.Tensor | None = None,
+        temperature: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> PrimeLmOutput:
         if position_ids is None:
@@ -504,7 +507,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
         )
 
     @property
-    def mtp_layers(self) -> nn.ModuleList | None:
+    def mtp_layers(self) -> Optional[nn.ModuleList]:
         mtp = getattr(self.model, "mtp", None)
         return mtp.layers if mtp is not None else None
 
