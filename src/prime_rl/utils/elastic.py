@@ -298,7 +298,9 @@ class ElasticInferencePool:
             f"Pre-check failed on {ip}: loaded={loaded.path if loaded else None} "
             f"(step={loaded.step if loaded else None}), desired={self._desired.path} (step={self._desired.step})"
         )
-        server.status = "syncing"
+        # Keep server in current status during sync — setting "syncing" here drops it
+        # from ready_urls, which triggers client recreation and breaks in-flight requests
+        # across all runs sharing this inference pod.
 
         if self._desired.name and self._desired.path:
             try:
