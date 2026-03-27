@@ -42,25 +42,23 @@ PRIME-RL is a framework for large-scale reinforcement learning. It is designed t
 
 ## Models support
 
-Custom training stacks live under `src/prime_rl/trainer/models/`; with `[model] impl = "auto"` the trainer picks them when the HF config type is registered. **EP** = expert parallelism (MoE); **CP** = context parallelism (ring FlashAttention; Qwen3.5-MoE also shards hybrid linear-attn). Configure `ep` / `cp` on `[model]` ([configs](docs/configs.md)). If `cp > 1`, `data.seq_len` must divide `2 * cp`.
+
+Most Hugging Face models work out of the box—the trainer is built on Hugging Face Transformers. For selected families (especially large MoE) we also ship highly optimized training code under `src/prime_rl/trainer/models/`, including expert parallelism (EP) for MoE layers and context parallelism (CP) for long sequences (see the table), and additional kernel like [quack-kernels](https://github.com/quack-kernels/quack-kernels).
+
+With `[model] impl = "auto"` (the default), the trainer selects that custom stack when the Hugging Face config type is registered.
 
 | Family | Example IDs | MoE | EP | CP |
 |--------|-------------|-----|----|-----|
-| GLM-5 (`glm_moe_dsa`) | `zai-org/GLM-5`, `zai-org/GLM-5-FP8` | yes | ✓ | — |
-| Qwen3 MoE (`qwen3_moe`) | `Qwen/Qwen3-30B-A3B`, … | yes | ✓ | ✓ |
-| Qwen3.5 MoE (`qwen3_5_moe`) | `Qwen/Qwen3.5-35B-A3B`, … | yes | ✓ | ✓ |
-| Qwen3 / Qwen3.5 VLMs | [multimodal.md](docs/multimodal.md) (`qwen3_vl`, `qwen3_5`, `qwen3_5_moe`) | MoE only on MoE VLMs | MoE rows only | ✓* |
-| MiniMax M2 (`minimax_m2`) | `MiniMax/MiniMax-M2` | yes | ✓ | ✓ |
-| Nemotron H (`nemotron_h`) | `nvidia/Nemotron-3-Nano-30B-A3B`, `nvidia/Nemotron-3-Super-120B-A12B`, … | yes | ✓ | — |
-| INTELLECT-3 (`afmoe`) | `PrimeIntellect/INTELLECT-3`, … | yes | ✓ | ✓ |
-| GLM-4 · GLM-4.5 MoE (`glm4_moe`) | `THUDM/GLM-4-9B-0414`, `zai-org/GLM-4.5-Air`, `zai-org/GLM-4.5`, … | yes | ✓ | ✓ |
-| GPT-OSS (HF, MoE) | `openai/gpt-oss-20b`, `openai/gpt-oss-120b` | yes | —† | ✓* |
-| Llama (dense) | `meta-llama/Llama-3.1-8B`, … | no | — | ✓ |
-| Other HF causal LMs | Qwen3 dense, Mistral, … (`impl = "hf"`) | varies | — | ✓* |
-
-\* Requires a CP-compatible attention mode for that stack (`flash_attention_2`, `flash_attention_3`, or `fa4` where applicable).
-
-Optional extra columns later: `model_type`, LoRA, `[model.vlm]`, FP8 / grouped GEMM, CI coverage.
+| GLM-5 (`glm_moe_dsa`) | `zai-org/GLM-5`, `zai-org/GLM-5-FP8` | yes | ✅ | ❌ |
+| Qwen3 MoE (`qwen3_moe`) | `Qwen/Qwen3-30B-A3B`, … | yes | ✅ | ✅ |
+| Qwen3.5 MoE (`qwen3_5_moe`) | `Qwen/Qwen3.5-35B-A3B`, … | yes | ✅ | ✅ |
+| Qwen3 / Qwen3.5 VLMs | [multimodal.md](docs/multimodal.md) (`qwen3_vl`, `qwen3_5`, `qwen3_5_moe`) | MoE only on MoE VLMs | MoE only | ✅ |
+| MiniMax M2 (`minimax_m2`) | `MiniMax/MiniMax-M2` | yes | ✅ | ✅ |
+| Nemotron H (`nemotron_h`) | `nvidia/Nemotron-3-Nano-30B-A3B`, `nvidia/Nemotron-3-Super-120B-A12B`, … | yes | ✅ | ❌ |
+| INTELLECT-3 (`afmoe`) | `PrimeIntellect/INTELLECT-3`, … | yes | ✅ | ✅ |
+| GLM-4 · GLM-4.5 MoE (`glm4_moe`) | `THUDM/GLM-4-9B-0414`, `zai-org/GLM-4.5-Air`, `zai-org/GLM-4.5`, … | yes | ✅ | ✅ |
+| GPT-OSS (HF, MoE) | `openai/gpt-oss-20b`, `openai/gpt-oss-120b` | yes | ❌ | ✅ |
+| Other HF causal LMs | Qwen3 dense, Mistral, … (`impl = "hf"`) | varies | ❌ | ✅ |
 
 
 ## Setup
@@ -192,6 +190,7 @@ Check out the [docs](docs) directory for in-depth guides on how to use PRIME-RL.
 - [**Benchmarking**](docs/benchmarking.md) - Performance benchmarking and throughput measurement
 - [**Deployment**](docs/deployment.md) - Training deployment on single-GPU, multi-GPU, and multi-node clusters
 - [**Troubleshooting**](docs/troubleshooting.md) - Common issues and their solutions
+- [**Multimodal**](docs/multimodal.md) - Training VLMs like Qwen3-VL
 
 ## Contributing
 
