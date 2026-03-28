@@ -1,3 +1,30 @@
+"""Selective activation checkpointing hooks for custom decoder layers.
+
+New model integration contract:
+
+- `norm`: no explicit hook is required. Every child module whose type name
+  contains `norm` is checkpointed through `forward()`.
+- `attn_proj`: expose `layer.self_attn.attn_projections(...)` for
+  projection-side attention work before the core kernel, plus
+  `layer.self_attn.output_proj(...)` for the post-attention output projection.
+  This target is meant for attention-local work outside the main attention
+  kernel, such as q/k/v projections, attention-local norms, RoPE, gating, and
+  similar model-specific helpers.
+- `mla_up_proj`: expose `layer.self_attn.mla_up_proj(...)` when MLA-style
+  up-projection work should be checkpointed separately from
+  `attn_projections(...)`.
+- `mlp`: expose a dense `layer.mlp.forward(...)`. A module is treated as dense
+  when it does not define `_run_routed_experts` or `tokens_per_expert`.
+- `routed_experts`: expose `layer.mlp._run_routed_experts(...)` for the MoE
+  expert path.
+- `linear_attn`: expose a token-mixer module on `layer.linear_attn` or
+  `layer.mamba`, or reuse `layer.self_attn` when
+  `layer.attention_type == "sliding_attention"`.
+
+These hook names are an intentional public interface for custom model support,
+so new models should follow them directly rather than adding private aliases.
+"""
+
 from collections.abc import Iterable
 from functools import wraps
 
@@ -73,6 +100,7 @@ def _get_linear_attn_module(layer: nn.Module) -> nn.Module | None:
 
 
 def get_supported_targets(layer: nn.Module) -> frozenset[str]:
+    """Infer which selective activation checkpoint targets a decoder layer supports."""
     supported_targets = {"norm"}
     self_attn = getattr(layer, "self_attn", None)
     mlp = getattr(layer, "mlp", None)
