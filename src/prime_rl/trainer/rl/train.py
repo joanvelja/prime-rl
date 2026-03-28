@@ -231,6 +231,9 @@ def train(config: TrainerConfig):
                 broadcast_weights_start_time = time.perf_counter()
                 weight_broadcast.broadcast_weights(model, step=progress.step)
                 broadcast_weights_time = time.perf_counter() - broadcast_weights_start_time
+                delta_stats = getattr(weight_broadcast, "delta_stats", None)
+                if delta_stats:
+                    monitor.log({**delta_stats, "step": progress.step}, step=progress.step)
                 # Clean up old broadcast directories (unless at ckpt interval if using filesystem weight broadcast)
                 ckpt_interval = config.ckpt and config.ckpt.interval
                 interval_to_keep = ckpt_interval if config.weight_broadcast.type == "filesystem" else None

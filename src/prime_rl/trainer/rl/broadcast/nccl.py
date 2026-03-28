@@ -197,6 +197,7 @@ class NCCLWeightBroadcastSender:
         self.quantize_in_weight_transfer = quantize_in_weight_transfer
         self.delta_compression = delta_compression
         self._layer_cache: dict[int, dict[int, Tensor]] = {}
+        self.last_delta_stats: dict[str, float] = {}
 
         if self.world.is_master:
             pg = StatelessProcessGroup.create(
@@ -266,7 +267,12 @@ class NCCLWeightBroadcastSender:
         torch.cuda.empty_cache()
 
         if self.delta_compression and total_elements > 0:
+            self.last_delta_stats = {
+                "weight_broadcast/delta_sparsity": 1.0 - total_changed / total_elements,
+            }
             self._log_delta_stats(step, total_elements, total_changed, total_full_bytes, total_delta_bytes)
+        else:
+            self.last_delta_stats = {}
 
     def _send_delta_aware(self, state_dict: dict[str, Tensor], seq_idx: int) -> tuple[int, int, int, int]:
         """Send full (first time) or delta (subsequent).
@@ -336,6 +342,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
         )
         self._bg_thread: Thread | None = None
         self._bg_error: Exception | None = None
+        self.delta_stats: dict[str, float] = {}
 
     @torch.no_grad()
     def broadcast_weights(self, model: nn.Module, step: int) -> None:
@@ -344,6 +351,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
         start_time = time.perf_counter()
 
         self._join_background()
+        self.delta_stats = self.sender.last_delta_stats
 
         notified_runs: list[tuple[int, Path]] = []
         if self.world.is_master:
@@ -363,6 +371,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
         elif self.world.is_master:
             self._wait_for_nccl_ready(notified_runs)
             self.sender.send_all_layers(gathered, step)
+            self.delta_stats = self.sender.last_delta_stats
             self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
 
     def _background_send(
