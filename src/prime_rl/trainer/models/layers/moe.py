@@ -464,6 +464,10 @@ class MoE(nn.Module):
         )
         from prime_rl.trainer.distributed.expert_parallel import get_ep_group
 
+        if x.shape[0] == 0:
+            shared_output = self.shared_expert(x) if self.shared_expert is not None else None
+            return x.new_zeros(x.shape) if shared_output is None else shared_output
+
         group = get_ep_group(self.experts)
         chunk_size = min(self.deepep_token_chunk_size or x.shape[0], x.shape[0])
 
@@ -901,6 +905,9 @@ class LatentMoE(nn.Module):
             sync_combine,
         )
         from prime_rl.trainer.distributed.expert_parallel import get_ep_group
+
+        if x.shape[0] == 0:
+            return self.shared_expert(x)
 
         group = get_ep_group(self.experts)
         # Project before dispatch so DeepEP communicates the smaller latent activations.
