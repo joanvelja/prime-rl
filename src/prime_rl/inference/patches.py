@@ -716,37 +716,47 @@ def monkey_patch_fused_moe_lora_dp():
 
 
 def monkey_patch_dp_engine_core_pause_resume_deadlock():
-    """Fix deadlock with pause/resume and collective_rpc in DP engine core.
+    """Fix deadlocks with pause/resume and collective_rpc in DP engine core.
 
     When a request arrives for an already-completed wave while the scheduler is
     paused, the unpatched code sends a start_wave notification that triggers
     collective_rpc on other DP engines. But the paused engine can't participate
     in the collective, causing a deadlock.
 
-    Fix: only send the start_wave notification when the scheduler is unpaused,
-    and explicitly set engines_running=True before notifying.
+    Fixes:
+    1) Only send start_wave from add_request when scheduler is unpaused.
+    2) Ignore START_DP_WAVE wakeups while scheduler is paused. Keep advancing
+       current_wave so stale requests can still be routed correctly, but don't
+       enter idle-loop collectives until resume.
 
     Upstream: https://github.com/vllm-project/vllm/pull/37024
     """
     from vllm.v1.core.sched.interface import PauseState
-    from vllm.v1.engine import EngineCoreOutputs
-    from vllm.v1.engine.core import DPEngineCoreProc, EngineCore
+    from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
     from vllm.v1.request import Request
 
     _base_add_request = EngineCore.add_request
+    _base_handle_client_request = EngineCoreProc._handle_client_request
 
     def _patched_add_request(self, request: Request, request_wave: int = 0):
         _base_add_request(self, request, request_wave)
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
+            elif not self.engines_running and self.scheduler.pause_state == PauseState.UNPAUSED:
                 self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+                self.output_queue.put_nowait((-1, EngineCoreOutputs(start_wave=self.current_wave)))
+
+    def _patched_handle_client_request(self, request_type, request):
+        if request_type == EngineCoreRequestType.START_DP_WAVE:
+            new_wave, exclude_eng_index = request
+            if exclude_eng_index != self.engine_index and new_wave >= self.current_wave:
+                self.current_wave = new_wave
+                if not self.engines_running and self.scheduler.pause_state == PauseState.UNPAUSED:
+                    self.engines_running = True
+        else:
+            _base_handle_client_request(self, request_type, request)
 
     DPEngineCoreProc.add_request = _patched_add_request
+    DPEngineCoreProc._handle_client_request = _patched_handle_client_request
