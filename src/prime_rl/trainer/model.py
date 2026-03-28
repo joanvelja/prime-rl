@@ -1,4 +1,3 @@
-import importlib.util
 import logging
 import time
 from pathlib import Path
@@ -169,25 +168,12 @@ def is_tt_moe_model(model: nn.Module) -> bool:
     return hasattr(model.config, "num_experts") or hasattr(model.config, "n_routed_experts")
 
 
-def _validate_ep_comm_backend_runtime(config: ModelConfig) -> None:
-    if config.ep_comm_backend == "standard":
-        return
-    if not torch.cuda.is_available():
-        raise ValueError(f"{config.ep_comm_backend} requires CUDA.")
-    if importlib.util.find_spec("deep_ep") is None:
-        raise ValueError("model.ep_comm_backend='deepep' requires the `deep_ep` package to be installed.")
-
-    major, _minor = torch.cuda.get_device_capability()
-    if major < 8:
-        raise ValueError("DeepEP requires Ampere-or-newer CUDA GPUs.")
-
-    from prime_rl.trainer.distributed.deepep import configure_num_sms
-
-    configure_num_sms(config.deepep_num_sms)
-
-
-def _configure_moe_ep_backend(model: nn.Module, config: ModelConfig) -> None:
+def configure_moe_ep_backend(model: nn.Module, config: ModelConfig) -> None:
     backend = config.ep_comm_backend
+    if backend == "deepep":
+        from prime_rl.trainer.distributed.deepep import configure_num_sms
+
+        configure_num_sms(config.deepep_num_sms)
     language_model = get_language_model(model)
     for transformer_block in language_model.layers:
         if not isinstance(transformer_block.mlp, (MoE, LatentMoE)):
@@ -693,7 +679,7 @@ def apply_ep(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims)
     for transformer_block in language_model.layers:
         block_mlp = getattr(transformer_block, "mlp", None)
         if block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
-            if config.ep_comm_backend == "standard":
+            if config.ep_comm_backend == "torch":
                 parallelize_plan = ExpertParallel()
             else:
                 parallelize_plan = DeepEPExpertParallel()
@@ -774,8 +760,7 @@ def setup_model(
 
     # 1. We load to meta device by default
     model = get_model(config, device=torch.device("meta"), dtype=DTYPE_MAP[config.optimization_dtype])
-    _validate_ep_comm_backend_runtime(config)
-    _configure_moe_ep_backend(model, config)
+    configure_moe_ep_backend(model, config)
 
     possible_to_load_to_meta = can_reinit_empty_buffers(model)
 
@@ -788,7 +773,7 @@ def setup_model(
     if not possible_to_load_to_meta:
         logger.warning("Cannot load model to meta device only, loading to CPU instead.")
         model = get_model(config, device=torch.device("cpu"), dtype=DTYPE_MAP[config.optimization_dtype])
-        _configure_moe_ep_backend(model, config)
+        configure_moe_ep_backend(model, config)
 
     lm_head_chunk_size: int | None = None
     if isinstance(config.fused_lm_head_token_chunk_size, int):

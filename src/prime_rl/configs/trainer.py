@@ -17,6 +17,7 @@ from prime_rl.utils.config import BaseConfig
 # -- Shared trainer configs (used by both SFT and RL trainers) --
 
 AttnImplementation: TypeAlias = Literal["sdpa", "flash_attention_2", "flash_attention_3", "fa4"]
+EPCommBackend: TypeAlias = Literal["torch", "deepep"]
 
 # User-facing name -> internal name. Users set `flash_attention_4` in configs,
 # which gets rewritten to `fa4` before pydantic validation.
@@ -223,14 +224,14 @@ class ModelConfig(BaseModelConfig):
     ] = 1
 
     ep_comm_backend: Annotated[
-        Literal["standard", "deepep"],
+        EPCommBackend,
         Field(
             description=(
                 "Communication backend for expert parallelism. "
-                "`standard` uses TorchTitan all-to-all collectives and `deepep` uses DeepEP custom kernels."
+                "`torch` uses TorchTitan all-to-all collectives and `deepep` uses DeepEP custom kernels."
             ),
         ),
-    ] = "standard"
+    ] = "torch"
 
     deepep_num_sms: Annotated[
         int,
@@ -385,7 +386,7 @@ class ModelConfig(BaseModelConfig):
 
     @model_validator(mode="after")
     def validate_ep_comm_backend(self):
-        if self.ep_comm_backend == "standard":
+        if self.ep_comm_backend == "torch":
             return self
 
         if self.ep <= 1:

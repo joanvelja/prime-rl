@@ -10,21 +10,9 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
 from torchtitan.distributed.expert_parallel import expert_parallel
 
-EPCommBackend = Literal["standard", "deepep"]
-
-
-def _prepare_deepep_input(x: torch.Tensor) -> torch.Tensor:
-    if not isinstance(x, DTensor):
-        return x
-    if x.device_mesh.ndim != 1 or x.device_mesh.mesh_dim_names != ("tp",):
-        raise ValueError(
-            "DeepEP expects a 1D TP DTensor input before unwrapping to the local shard, "
-            f"got mesh_dim_names={x.device_mesh.mesh_dim_names!r}."
-        )
-    return x.to_local(grad_placements=(Partial(),))
+EPCommBackend = Literal["torch", "deepep"]
 
 
 @dataclass
@@ -188,17 +176,12 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
-        self.ep_comm_backend: EPCommBackend = "standard"
+        self.ep_comm_backend: EPCommBackend = "torch"
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
         self.ep_comm_backend = backend
 
-    def _forward_local(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
-        if not isinstance(self.w1, DTensor):
-            raise ValueError(
-                f"{self.ep_comm_backend} expert kernels require EP-sharded DTensor weights. "
-                "Make sure expert parallelism is enabled before running the model."
-            )
+    def _forward_deepep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         w1 = self.w1.to_local()
         w2 = self.w2.to_local()
         w3 = self.w3.to_local()
@@ -212,7 +195,7 @@ class GroupedExperts(nn.Module):
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         if self.ep_comm_backend == "deepep":
-            return self._forward_local(x, num_tokens_per_expert)
+            return self._forward_deepep(x, num_tokens_per_expert)
 
         if self.use_grouped_mm:
             return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
@@ -391,7 +374,7 @@ class MoE(nn.Module):
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
         )
-        self.ep_comm_backend: EPCommBackend = "standard"
+        self.ep_comm_backend: EPCommBackend = "torch"
         self.experts.set_ep_comm_backend(self.ep_comm_backend)
         self.router = TokenChoiceTopKRouter(
             dim=dim,
@@ -438,9 +421,6 @@ class MoE(nn.Module):
 
     def set_deepep_token_chunk_size(self, chunk_size: int | None) -> None:
         self.deepep_token_chunk_size = chunk_size
-
-    def _prepare_deepep_input(self, x: torch.Tensor) -> torch.Tensor:
-        return _prepare_deepep_input(x)
 
     def _run_local_routed_experts(
         self,
@@ -533,9 +513,6 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        if self.ep_comm_backend == "deepep":
-            x = self._prepare_deepep_input(x)
-
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -692,17 +669,12 @@ class NonGatedGroupedExperts(nn.Module):
         # Dummy w3 for @expert_parallel decorator compatibility (expects w1, w2, w3 signature)
         self.w3 = nn.Parameter(torch.empty(0))
         self.use_grouped_mm = use_grouped_mm
-        self.ep_comm_backend: EPCommBackend = "standard"
+        self.ep_comm_backend: EPCommBackend = "torch"
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
         self.ep_comm_backend = backend
 
-    def _forward_local(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
-        if not isinstance(self.w1, DTensor):
-            raise ValueError(
-                f"{self.ep_comm_backend} expert kernels require EP-sharded DTensor weights. "
-                "Make sure expert parallelism is enabled before running the model."
-            )
+    def _forward_deepep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         w1 = self.w1.to_local()
         w2 = self.w2.to_local()
         w3 = self.w3.to_local()
@@ -716,7 +688,7 @@ class NonGatedGroupedExperts(nn.Module):
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         if self.ep_comm_backend == "deepep":
-            return self._forward_local(x, num_tokens_per_expert)
+            return self._forward_deepep(x, num_tokens_per_expert)
         if self.use_grouped_mm:
             return _run_nongated_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
@@ -852,7 +824,7 @@ class LatentMoE(nn.Module):
             num_experts=num_experts,
             use_grouped_mm=use_grouped_mm,
         )
-        self.ep_comm_backend: EPCommBackend = "standard"
+        self.ep_comm_backend: EPCommBackend = "torch"
         self.experts.set_ep_comm_backend(self.ep_comm_backend)
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=top_k)
         self.shared_expert = BCNonGatedFeedForward(dim=dim, hidden_dim=shared_expert_intermediate_size)
@@ -969,9 +941,6 @@ class LatentMoE(nn.Module):
         return shared_output + routed_output
 
     def forward(self, x: torch.Tensor, routed_experts: torch.Tensor | None = None) -> torch.Tensor:
-        if self.ep_comm_backend == "deepep":
-            x = _prepare_deepep_input(x)
-
         bs, slen, dim = x.shape
         x_flat = x.view(-1, dim)
 

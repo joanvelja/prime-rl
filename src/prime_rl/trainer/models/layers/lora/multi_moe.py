@@ -345,7 +345,7 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
             w3_lora_a = w3_lora_a.to_local()
             w3_lora_b = w3_lora_b.to_local()
 
-            if getattr(self.base_layer, "ep_comm_backend", "standard") != "deepep":
+            if getattr(self.base_layer, "ep_comm_backend", "torch") != "deepep":
                 from torchtitan.distributed.expert_parallel import TOKEN_GROUP_ALIGN_SIZE_M
                 from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 
