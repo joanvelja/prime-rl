@@ -28,6 +28,7 @@ from prime_rl.trainer.models import (
     PreTrainedModelPrimeRL,
     PrimeLmOutput,
     cast_float_and_contiguous,
+    get_custom_text_only_vlm_cls,
     get_custom_vlm_cls,
     supports_custom_impl,
 )
@@ -268,8 +269,13 @@ def get_model(
 
     # Determine the implementation to use
     custom_vlm_cls = get_custom_vlm_cls(model_config) if is_vlm_arch else None
+    custom_text_only_vlm_cls = (
+        get_custom_text_only_vlm_cls(model_config) if is_vlm_arch and not is_vlm_training else None
+    )
     if config.impl == "auto":
-        if is_vlm_arch:
+        if custom_text_only_vlm_cls is not None:
+            impl_to_use = "custom"
+        elif is_vlm_arch:
             impl_to_use = "custom" if custom_vlm_cls is not None else "hf"
         else:
             impl_to_use = "custom" if supports_custom_impl(model_config) else "hf"
@@ -278,7 +284,9 @@ def get_model(
         impl_to_use = config.impl
 
     with device:
-        if impl_to_use == "custom" and custom_vlm_cls is not None:
+        if impl_to_use == "custom" and custom_text_only_vlm_cls is not None:
+            model_cls = custom_text_only_vlm_cls
+        elif impl_to_use == "custom" and custom_vlm_cls is not None:
             model_cls = custom_vlm_cls
         elif is_vlm_arch:
             from transformers import AutoModelForImageTextToText

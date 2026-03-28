@@ -30,7 +30,9 @@ def attn(request) -> AttnImplementation:
 @pytest.fixture
 def model(attn):
     config = ModelConfig(name="Qwen/Qwen3-0.6B", attn=attn)
-    return get_model(config)
+    model = get_model(config)
+    inject_prime_lm_head(model, chunk_size=None)
+    return model
 
 
 def test_model_to_gpu(model):
@@ -41,7 +43,8 @@ def test_model_forward(model):
     model = model.to("cuda")
     with torch.autocast("cuda", dtype=torch.bfloat16):
         inputs_ids = torch.randint(0, 100, (BS, SEQ_LEN)).to("cuda")
-        outputs = model(input_ids=inputs_ids)
+        position_ids = torch.arange(SEQ_LEN).unsqueeze(0).repeat(BS, 1).to("cuda")
+        outputs = model(input_ids=inputs_ids, position_ids=position_ids)
         logits = outputs["logits"]
 
         assert logits.shape == (BS, SEQ_LEN, model.config.vocab_size)
