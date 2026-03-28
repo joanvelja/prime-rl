@@ -54,7 +54,7 @@ def normalize_selective_targets(targets: Iterable[str]) -> frozenset[str]:
 
 
 def _supports_attn_proj(self_attn: nn.Module | None) -> bool:
-    return self_attn is not None and hasattr(self_attn, "_attn_projections") and hasattr(self_attn, "_output_proj")
+    return self_attn is not None and hasattr(self_attn, "attn_projections") and hasattr(self_attn, "output_proj")
 
 
 def _get_linear_attn_module(layer: nn.Module) -> nn.Module | None:
@@ -80,7 +80,7 @@ def get_supported_targets(layer: nn.Module) -> frozenset[str]:
 
     if _supports_attn_proj(self_attn):
         supported_targets.add("attn_proj")
-    if self_attn is not None and hasattr(self_attn, "_mla_up_proj"):
+    if self_attn is not None and hasattr(self_attn, "mla_up_proj"):
         supported_targets.add("mla_up_proj")
     if mlp is not None and _is_dense_mlp(mlp):
         supported_targets.add("mlp")
@@ -105,10 +105,10 @@ def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[s
     attn_proj_is_subsumed = "linear_attn" in enabled_targets and linear_attn is self_attn
 
     if self_attn is not None and "attn_proj" in enabled_targets and not attn_proj_is_subsumed:
-        checkpoint_method(self_attn, "_attn_projections")
-        checkpoint_method(self_attn, "_output_proj")
+        checkpoint_method(self_attn, "attn_projections")
+        checkpoint_method(self_attn, "output_proj")
     if self_attn is not None and "mla_up_proj" in enabled_targets:
-        checkpoint_method(self_attn, "_mla_up_proj")
+        checkpoint_method(self_attn, "mla_up_proj")
     if mlp is not None and "mlp" in enabled_targets:
         checkpoint_method(mlp, "forward")
     if mlp is not None and "routed_experts" in enabled_targets:
