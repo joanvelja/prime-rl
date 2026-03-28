@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from prime_rl.inference.vllm.worker.nccl import NCCLWeightBroadcastReceiver
 from prime_rl.configs.trainer import NCCLWeightBroadcastConfig
+from prime_rl.inference.vllm.worker.nccl import NCCLWeightBroadcastReceiver
 from prime_rl.trainer.rl.broadcast.nccl import NCCLWeightBroadcast, NCCLWeightBroadcastSender
 
 
