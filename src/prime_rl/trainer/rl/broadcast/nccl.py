@@ -341,8 +341,11 @@ class NCCLWeightBroadcast(WeightBroadcast):
             delta_compression=config.delta_compression,
         )
         self._bg_thread: Thread | None = None
+        self._bg_step: int | None = None
         self._bg_error: Exception | None = None
         self.delta_stats: dict[str, float] = {}
+        self.delta_stats_step: int | None = None
+        self._completed_delta_stats: tuple[int, dict[str, float]] | None = None
 
     @torch.no_grad()
     def broadcast_weights(self, model: nn.Module, step: int) -> None:
@@ -351,7 +354,6 @@ class NCCLWeightBroadcast(WeightBroadcast):
         start_time = time.perf_counter()
 
         self._join_background()
-        self.delta_stats = self.sender.last_delta_stats
 
         notified_runs: list[tuple[int, Path]] = []
         if self.world.is_master:
@@ -362,6 +364,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
 
         if self.pipeline and self.world.is_master:
             self.logger.debug(f"Weights gathered in {time.perf_counter() - start_time:.2f}s, starting pipelined send")
+            self._bg_step = step
             self._bg_thread = Thread(
                 target=self._background_send,
                 args=(gathered, notified_runs, step, start_time),
@@ -371,7 +374,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
         elif self.world.is_master:
             self._wait_for_nccl_ready(notified_runs)
             self.sender.send_all_layers(gathered, step)
-            self.delta_stats = self.sender.last_delta_stats
+            self._set_completed_delta_stats(step, self.sender.last_delta_stats)
             self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
 
     def _background_send(
@@ -395,10 +398,29 @@ class NCCLWeightBroadcast(WeightBroadcast):
         if self._bg_thread is not None:
             self._bg_thread.join()
             self._bg_thread = None
+            step = self._bg_step
+            self._bg_step = None
             if self._bg_error is not None:
                 error = self._bg_error
                 self._bg_error = None
                 raise RuntimeError("Background NCCL broadcast failed") from error
+            if step is not None:
+                self._set_completed_delta_stats(step, self.sender.last_delta_stats)
+
+    def _set_completed_delta_stats(self, step: int, stats: dict[str, float]) -> None:
+        copied_stats = dict(stats)
+        self.delta_stats = copied_stats
+        self.delta_stats_step = step if copied_stats else None
+        self._completed_delta_stats = (step, copied_stats) if copied_stats else None
+
+    def pop_completed_delta_stats(self) -> tuple[int, dict[str, float]] | None:
+        completed_delta_stats = self._completed_delta_stats
+        self._completed_delta_stats = None
+        return completed_delta_stats
+
+    def flush_completed_delta_stats(self) -> tuple[int, dict[str, float]] | None:
+        self._join_background()
+        return self.pop_completed_delta_stats()
 
     def _notify_orchestrator(self) -> list[tuple[int, Path]]:
         """Notify the orchestrator to initiate weight broadcast.

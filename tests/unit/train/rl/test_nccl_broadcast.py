@@ -1,14 +1,16 @@
 import multiprocessing as mp
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from prime_rl.inference.vllm.worker.nccl import NCCLWeightBroadcastReceiver
-from prime_rl.trainer.rl.broadcast.nccl import NCCLWeightBroadcastSender
+from prime_rl.configs.trainer import NCCLWeightBroadcastConfig
+from prime_rl.trainer.rl.broadcast.nccl import NCCLWeightBroadcast, NCCLWeightBroadcastSender
 
-pytestmark = [pytest.mark.gpu]
 
-
+@pytest.mark.gpu
 @pytest.mark.skip(reason="Skipping NCCL broadcast as it fail only in ci")
 def test_nccl_broadcast(free_port):
     host = "localhost"
@@ -62,3 +64,55 @@ def test_nccl_broadcast(free_port):
     for process in processes:
         process.join()
         assert process.exitcode == 0, f"Process {process.name} exited with code {process.exitcode}"
+
+
+def test_pipelined_completed_delta_stats_keep_originating_step(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("prime_rl.trainer.rl.broadcast.nccl.get_world", lambda: SimpleNamespace(is_master=False))
+    monkeypatch.setattr(
+        "prime_rl.trainer.rl.broadcast.nccl.get_multi_run_manager",
+        lambda: SimpleNamespace(used_idxs=[], ready_to_update={}),
+    )
+
+    config = NCCLWeightBroadcastConfig(host="localhost", port=1234, inference_world_size=1, delta_compression=True)
+    broadcast = NCCLWeightBroadcast(tmp_path, config, device="cpu")
+
+    completed_steps: list[int] = []
+
+    class DummyThread:
+        def join(self) -> None:
+            completed_steps.append(1)
+            broadcast.sender.last_delta_stats = {"weight_broadcast/delta_sparsity": 0.9}
+
+    broadcast._bg_thread = DummyThread()
+    broadcast._bg_step = 1
+    broadcast.sender.last_delta_stats = {"weight_broadcast/delta_sparsity": 0.5}
+
+    broadcast._join_background()
+
+    assert completed_steps == [1]
+    assert broadcast.delta_stats == {"weight_broadcast/delta_sparsity": 0.9}
+    assert broadcast.delta_stats_step == 1
+    assert broadcast.pop_completed_delta_stats() == (1, {"weight_broadcast/delta_sparsity": 0.9})
+    assert broadcast.pop_completed_delta_stats() is None
+
+
+def test_flush_completed_delta_stats_joins_pending_background(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("prime_rl.trainer.rl.broadcast.nccl.get_world", lambda: SimpleNamespace(is_master=False))
+    monkeypatch.setattr(
+        "prime_rl.trainer.rl.broadcast.nccl.get_multi_run_manager",
+        lambda: SimpleNamespace(used_idxs=[], ready_to_update={}),
+    )
+
+    config = NCCLWeightBroadcastConfig(host="localhost", port=1234, inference_world_size=1, delta_compression=True)
+    broadcast = NCCLWeightBroadcast(tmp_path, config, device="cpu")
+
+    class DummyThread:
+        def join(self) -> None:
+            broadcast.sender.last_delta_stats = {"weight_broadcast/delta_sparsity": 0.75}
+
+    broadcast._bg_thread = DummyThread()
+    broadcast._bg_step = 7
+
+    assert broadcast.flush_completed_delta_stats() == (7, {"weight_broadcast/delta_sparsity": 0.75})
+    assert broadcast._bg_thread is None
+    assert broadcast._bg_step is None

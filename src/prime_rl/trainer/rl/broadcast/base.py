@@ -16,3 +16,11 @@ class WeightBroadcast(ABC):
     @abstractmethod
     def broadcast_weights(self, model: nn.Module, step: int):
         pass
+
+    def pop_completed_delta_stats(self) -> tuple[int, dict[str, float]] | None:
+        """Return completed delta stats, if the broadcast implementation has any."""
+        return None
+
+    def flush_completed_delta_stats(self) -> tuple[int, dict[str, float]] | None:
+        """Wait for any pending delta stats to finish and return them."""
+        return self.pop_completed_delta_stats()

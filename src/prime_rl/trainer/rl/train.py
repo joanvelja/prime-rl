@@ -62,6 +62,16 @@ from ring_flash_attn import substitute_hf_flash_attn
 from torchtitan.distributed.utils import clip_grad_norm_
 
 
+def _log_completed_delta_stats(weight_broadcast, monitor) -> None:
+    completed_delta_stats = weight_broadcast.pop_completed_delta_stats()
+    if completed_delta_stats is None:
+        return
+
+    stats_step, delta_stats = completed_delta_stats
+    if delta_stats:
+        monitor.log({**delta_stats, "step": stats_step}, step=stats_step)
+
+
 @clean_exit
 def train(config: TrainerConfig):
     # Setup world and logger
@@ -231,9 +241,7 @@ def train(config: TrainerConfig):
                 broadcast_weights_start_time = time.perf_counter()
                 weight_broadcast.broadcast_weights(model, step=progress.step)
                 broadcast_weights_time = time.perf_counter() - broadcast_weights_start_time
-                delta_stats = getattr(weight_broadcast, "delta_stats", None)
-                if delta_stats:
-                    monitor.log({**delta_stats, "step": progress.step}, step=progress.step)
+                _log_completed_delta_stats(weight_broadcast, monitor)
                 # Clean up old broadcast directories (unless at ckpt interval if using filesystem weight broadcast)
                 ckpt_interval = config.ckpt and config.ckpt.interval
                 interval_to_keep = ckpt_interval if config.weight_broadcast.type == "filesystem" else None
@@ -625,6 +633,13 @@ def train(config: TrainerConfig):
         logger.info("Writing final weight checkpoint")
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
+
+    if weight_broadcast is not None:
+        completed_delta_stats = weight_broadcast.flush_completed_delta_stats()
+        if completed_delta_stats is not None:
+            stats_step, delta_stats = completed_delta_stats
+            if delta_stats:
+                monitor.log({**delta_stats, "step": stats_step}, step=stats_step)
 
     logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
     logger.success("RL trainer finished!")
