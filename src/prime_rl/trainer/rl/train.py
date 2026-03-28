@@ -53,6 +53,10 @@ from prime_rl.trainer.utils import (
 from prime_rl.trainer.world import get_world
 from prime_rl.trainer.runs import setup_multi_run_manager, Progress, get_multi_run_manager
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
+from prime_rl.trainer.models.layers.mtp import (
+    prepare_mtp_training_batch_from_current_tokens,
+    shard_mtp_training_batch_for_cp,
+)
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.metrics_server import HealthServer, MetricsServer, RunStats
 from prime_rl.utils.monitor import setup_monitor
@@ -346,6 +350,14 @@ def train(config: TrainerConfig):
             )
 
             labels = shift_tensor_left(input_ids)
+            mtp_batch = None
+            if config.model.mtp is not None:
+                mtp_batch = prepare_mtp_training_batch_from_current_tokens(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    loss_mask=loss_mask,
+                    num_layers=config.model.mtp.num_layers,
+                )
 
             # VLM + CP is not supported: MRoPE requires global positions but CP shards the sequence
             if cp_enabled and pixel_values is not None:
@@ -354,6 +366,8 @@ def train(config: TrainerConfig):
             if cp_enabled:
                 input_ids, forward_position_ids = setup_cp_params(input_ids, position_ids, cp_rank, cp_size, cp_group)
                 labels = shard_for_cp(labels, cp_rank=cp_rank, cp_world_size=cp_size)
+                if mtp_batch is not None:
+                    mtp_batch = shard_mtp_training_batch_for_cp(mtp_batch, position_ids, cp_rank, cp_size, cp_group)
                 if routed_experts is not None:
                     routed_experts = shard_for_cp(routed_experts, cp_rank=cp_rank, cp_world_size=cp_size)
             else:
@@ -385,6 +399,7 @@ def train(config: TrainerConfig):
                     forward_position_ids,
                     labels=labels,
                     temperature=temperatures,
+                    mtp_batch=mtp_batch,
                     pixel_values=pixel_values,
                     image_grid_thw=image_grid_thw,
                     routed_experts=routed_experts,
@@ -430,6 +445,8 @@ def train(config: TrainerConfig):
                 loss_fn=loss_fn,
                 loss_scale=loss_scale,
             )
+            if out.get("mtp_loss_sum") is not None:
+                loss = loss + out["mtp_loss_sum"] / loss_scale
 
             # Backward pass
             with maybe_record_function("backward"):
@@ -440,6 +457,8 @@ def train(config: TrainerConfig):
             tensors["inference_probs"].append(torch.exp(inference_logprobs)[loss_mask].detach().to("cpu"))
             tensors["entropy"].append(out["entropy"][loss_mask].detach().to("cpu"))
             tensors["loss"].append(loss.detach().to("cpu").unsqueeze(0))
+            if out.get("mtp_loss") is not None:
+                tensors["mtp_loss"].append(out["mtp_loss"].detach().to("cpu").unsqueeze(0))
 
             if is_tt_moe_model(model):
                 load_balance_stats = get_load_balance_stats(model)
@@ -456,6 +475,8 @@ def train(config: TrainerConfig):
             micro_step_message = f"Micro Step {micro_step}/{len(micro_batches)} | Loss: {tensors['loss'][-1].mean().item():.4f} | Entropy: {tensors['entropy'][-1].mean().item():.4f}"
             if "mismatch_kl" in tensors:
                 micro_step_message += f" | Mismatch KL: {tensors['mismatch_kl'][-1].mean().item():.4f}"
+            if "mtp_loss" in tensors:
+                micro_step_message += f" | MTP Loss: {tensors['mtp_loss'][-1].mean().item():.4f}"
             if "max_vio" in tensors:
                 micro_step_message += f" | Max Vio: {tensors['max_vio'][-1].mean().item():.4f}"
             logger.debug(micro_step_message)
@@ -505,6 +526,8 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {tensor_stats['loss/mean']:.4f} | Entropy: {tensor_stats['entropy/mean']:.4f}"
         if "mismatch_kl/mean" in tensor_stats:
             step_message += f" | Mismatch KL: {tensor_stats['mismatch_kl/mean']:.4f}"
+        if "mtp_loss/mean" in tensor_stats:
+            step_message += f" | MTP Loss: {tensor_stats['mtp_loss/mean']:.4f}"
         step_message += f" | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
         if "max_vio/mean" in tensor_stats:
             step_message += f" | Max Vio: {tensor_stats['max_vio/mean']:.4f}"

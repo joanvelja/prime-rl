@@ -157,6 +157,30 @@ class DebugModelConfig(BaseConfig):
     ] = False
 
 
+class MTPConfig(BaseConfig):
+    """Configures auxiliary multi-token prediction (MTP) training."""
+
+    num_layers: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Number of logical draft/MTP prediction steps to train. For models with distinct MTP blocks, "
+                "this must not exceed the number of MTP layers in the checkpoint. Some architectures reuse a "
+                "shared MTP predictor across multiple steps, in which case larger values are valid."
+            ),
+        ),
+    ] = 1
+
+    loss_scaling_factor: Annotated[
+        float,
+        Field(
+            ge=0,
+            description="Total scaling factor applied to the auxiliary MTP loss, divided evenly across configured MTP layers.",
+        ),
+    ] = 0.2
+
+
 class ModelConfig(BaseModelConfig):
     """Configures the model for training."""
 
@@ -280,6 +304,17 @@ class ModelConfig(BaseModelConfig):
             description="Debugging feature around model and distributed training.",
         ),
     ] = DebugModelConfig()
+
+    mtp: Annotated[
+        MTPConfig | None,
+        Field(
+            description=(
+                "Auxiliary multi-token prediction (MTP) training. When set, PrimeRL trains the model's existing draft/MTP layers "
+                "with an additional cross-entropy loss during RL or SFT. This only adds training support; speculative draft "
+                "inference remains unchanged."
+            ),
+        ),
+    ] = None
 
     fused_lm_head_token_chunk_size: Annotated[
         int | Literal["auto", "disabled"],

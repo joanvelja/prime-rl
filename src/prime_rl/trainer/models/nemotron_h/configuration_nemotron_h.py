@@ -64,6 +64,21 @@ class NemotronHConfig(PretrainedConfig):
     PATTERN_MAP = {"M": "mamba", "E": "moe", "*": "attention"}
     REVERSE_PATTERN_MAP = {"mamba": "M", "moe": "E", "attention": "*"}
 
+    @staticmethod
+    def _validate_layers_block_type(
+        layers_block_type, expected_length: int | None = None, param_name: str = "layers_block_type"
+    ) -> None:
+        if not isinstance(layers_block_type, list):
+            raise ValueError(f"{param_name} must be a list of strings. Got type: {type(layers_block_type)}")
+
+        if expected_length is not None and len(layers_block_type) != expected_length:
+            raise ValueError(f"{param_name} must have length {expected_length}. Got length {len(layers_block_type)}.")
+
+        valid_types = {"mamba", "attention", "moe"}
+        if not all(block_type in valid_types for block_type in layers_block_type):
+            invalid = set(layers_block_type) - valid_types
+            raise ValueError(f"{param_name} contains invalid types: {invalid}. Must be one of: {valid_types}")
+
     def __init__(
         self,
         # General
@@ -121,6 +136,9 @@ class NemotronHConfig(PretrainedConfig):
         # PrimeRL training features
         load_balance_coeff=None,
         use_grouped_mm=True,
+        # MTP
+        num_nextn_predict_layers=0,
+        mtp_layers_block_type=None,
         # RoPE
         rope_theta=10000.0,
         rope_scaling=None,
@@ -132,8 +150,15 @@ class NemotronHConfig(PretrainedConfig):
             if layers_block_type is None:
                 layers_block_type = [self.PATTERN_MAP[c] for c in pattern]
 
+        if "mtp_hybrid_override_pattern" in kwargs:
+            pattern = kwargs.pop("mtp_hybrid_override_pattern")
+            if mtp_layers_block_type is None:
+                mtp_layers_block_type = [self.PATTERN_MAP[c] for c in pattern]
+
         if layers_block_type is None:
             layers_block_type = ["mamba", "moe", "attention", "moe"]
+        if mtp_layers_block_type is None:
+            mtp_layers_block_type = ["attention", "moe"]
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -205,6 +230,15 @@ class NemotronHConfig(PretrainedConfig):
         # PrimeRL training features
         self.load_balance_coeff = load_balance_coeff
         self.use_grouped_mm = use_grouped_mm
+        self.num_nextn_predict_layers = num_nextn_predict_layers
+
+        if self.num_nextn_predict_layers > 0:
+            self._validate_layers_block_type(
+                mtp_layers_block_type,
+                expected_length=None,
+                param_name="mtp_layers_block_type",
+            )
+        self.mtp_layers_block_type = mtp_layers_block_type
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -222,6 +256,10 @@ class NemotronHConfig(PretrainedConfig):
     def num_hidden_layers(self, value):
         if value is not None and value < len(self.layers_block_type):
             self.layers_block_type = self.layers_block_type[:value]
+
+    @property
+    def mtp_hybrid_override_pattern(self) -> str:
+        return "".join(self.REVERSE_PATTERN_MAP[layer_type] for layer_type in self.mtp_layers_block_type)
 
 
 __all__ = ["NemotronHConfig"]

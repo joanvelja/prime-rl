@@ -112,6 +112,26 @@ def _ensure_zamba2_compat(config: NemotronHConfig):
     config.mamba_expand = correct_expand
 
 
+def _get_attention_sequence_metadata(
+    config: NemotronHConfig, position_ids: torch.LongTensor
+) -> tuple[torch.LongTensor | None, int | None]:
+    if config._attn_implementation not in ("flash_attention_2", "flash_attention_3", "fa4"):
+        return None, None
+
+    flat_position_ids = position_ids.view(-1)
+    seqlens = torch.cat(
+        [
+            flat_position_ids[0:1],
+            flat_position_ids[:-1][(flat_position_ids == 0)[1:]] + 1,
+            flat_position_ids[-1:] + 1,
+        ]
+    )
+    max_seqlen = seqlens.max().item()
+    cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
+    torch._dynamo.mark_dynamic(cu_seqlens, 0)
+    return cu_seqlens, max_seqlen
+
+
 class NemotronHMambaLayer(GradientCheckpointingLayer):
     """Mamba-2 SSM layer: norm -> NemotronHMamba2Mixer -> residual."""
 
@@ -207,6 +227,112 @@ class NemotronHAttentionLayer(GradientCheckpointingLayer):
         return residual + hidden_states
 
 
+def _init_nemotron_mtp_layer(
+    layer: nn.Module,
+    config: NemotronHConfig,
+    has_start_projections: bool,
+    has_end_norm: bool,
+) -> None:
+    layer.has_start_projections = has_start_projections
+    layer.has_end_norm = has_end_norm
+
+    if has_start_projections:
+        layer.enorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+        layer.hnorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+        layer.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+
+    if has_end_norm:
+        layer.final_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
+
+
+class NemotronHMTPAttentionLayer(NemotronHAttentionLayer):
+    """NemotronH MTP attention layer with optional input fusion and output norm."""
+
+    def __init__(
+        self,
+        config: NemotronHConfig,
+        has_start_projections: bool = False,
+        has_end_norm: bool = False,
+    ):
+        super().__init__(config)
+        _init_nemotron_mtp_layer(self, config, has_start_projections, has_end_norm)
+
+
+class NemotronHMTPMoELayer(NemotronHMoELayer):
+    """NemotronH MTP MoE layer with optional input fusion and output norm."""
+
+    def __init__(
+        self,
+        config: NemotronHConfig,
+        has_start_projections: bool = False,
+        has_end_norm: bool = False,
+    ):
+        super().__init__(config)
+        _init_nemotron_mtp_layer(self, config, has_start_projections, has_end_norm)
+
+
+class NemotronHMultiTokenPredictor(nn.Module):
+    """Shared NemotronH MTP predictor applied for each logical prediction step."""
+
+    prime_mtp_kind = "nemotron_h"
+
+    def __init__(self, config: NemotronHConfig):
+        super().__init__()
+        self.config = config
+        self.layers = nn.ModuleList()
+
+        for idx, layer_type in enumerate(config.mtp_layers_block_type):
+            is_start_of_step = idx == 0
+            is_end_of_step = idx == len(config.mtp_layers_block_type) - 1
+
+            if layer_type == "attention":
+                layer = NemotronHMTPAttentionLayer(
+                    config,
+                    has_start_projections=is_start_of_step,
+                    has_end_norm=is_end_of_step,
+                )
+            elif layer_type == "moe":
+                layer = NemotronHMTPMoELayer(
+                    config,
+                    has_start_projections=is_start_of_step,
+                    has_end_norm=is_end_of_step,
+                )
+            else:
+                raise NotImplementedError(f"NemotronH MTP only supports attention/moe blocks, got {layer_type!r}.")
+
+            self.layers.append(layer)
+
+    def forward(
+        self,
+        input_embeds: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_ids: torch.LongTensor,
+        cu_seqlens: torch.LongTensor | None = None,
+        max_seqlen: int | None = None,
+    ) -> torch.Tensor:
+        first_layer = self.layers[0]
+        if getattr(first_layer, "has_start_projections", False):
+            input_embeds = first_layer.enorm(input_embeds)
+            hidden_states = first_layer.hnorm(hidden_states)
+            hidden_states = first_layer.eh_proj(torch.cat([input_embeds, hidden_states], dim=-1))
+
+        if cu_seqlens is None or max_seqlen is None:
+            cu_seqlens, max_seqlen = _get_attention_sequence_metadata(self.config, position_ids)
+        for layer in self.layers:
+            hidden_states = layer(
+                hidden_states,
+                position_embeddings=None,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+
+        last_layer = self.layers[-1]
+        if getattr(last_layer, "has_end_norm", False):
+            hidden_states = last_layer.final_layernorm(hidden_states)
+
+        return hidden_states
+
+
 BLOCK_TYPE_MAP = {
     "mamba": NemotronHMambaLayer,
     "moe": NemotronHMoELayer,
@@ -227,7 +353,13 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
     config: NemotronHConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["NemotronHMambaLayer", "NemotronHMoELayer", "NemotronHAttentionLayer"]
+    _no_split_modules = [
+        "NemotronHMambaLayer",
+        "NemotronHMoELayer",
+        "NemotronHAttentionLayer",
+        "NemotronHMTPMoELayer",
+        "NemotronHMTPAttentionLayer",
+    ]
     _supports_flash_attn = True
     _supports_sdpa = True
     _can_compile_fullgraph = False
@@ -247,7 +379,11 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def is_hf_state_dict(cls, state_dict: dict[str, Tensor]) -> bool:
-        return any("mixer." in name for name in state_dict) or any("backbone." in name for name in state_dict)
+        return (
+            any("mixer." in name for name in state_dict)
+            or any("backbone." in name for name in state_dict)
+            or any(name.startswith("mtp.layers.") and ".mixer." in name for name in state_dict)
+        )
 
     @classmethod
     def is_prime_state_dict(cls, state_dict: dict[str, Tensor]) -> bool:
@@ -257,6 +393,7 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
             or "self_attn." in name
             or "model.embed_tokens." in name
             or "model.norm." in name
+            or (name.startswith("mtp.layers.") and (".self_attn." in name or ".mlp." in name))
             for name in state_dict
         )
 
@@ -275,15 +412,10 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def convert_layer_to_hf(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import _rename_keys
+        from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import _rename_keys, convert_prime_to_hf
 
         if layer_idx == -1:
-            # Non-layer weights: rename global keys and model.* -> backbone.*
-            if "model.embed_tokens.weight" in state_dict:
-                state_dict["model.embeddings.weight"] = state_dict.pop("model.embed_tokens.weight")
-            if "model.norm.weight" in state_dict:
-                state_dict["model.norm_f.weight"] = state_dict.pop("model.norm.weight")
-            _rename_keys(state_dict, "model.", "backbone.")
+            convert_prime_to_hf(state_dict, [])
         else:
             layer_type = _infer_layer_type_prime(state_dict, layer_idx)
             convert_prime_layer_to_hf(state_dict, layer_idx, layer_type)
@@ -292,18 +424,13 @@ class NemotronHPreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import _rename_keys
+        from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import _rename_keys, convert_hf_to_prime
 
         # Handle backbone.* -> model.* prefix before layer conversion
-        _rename_keys(state_dict, "backbone.", "model.")
-
         if layer_idx == -1:
-            # Non-layer weights: rename global keys
-            if "model.embeddings.weight" in state_dict:
-                state_dict["model.embed_tokens.weight"] = state_dict.pop("model.embeddings.weight")
-            if "model.norm_f.weight" in state_dict:
-                state_dict["model.norm.weight"] = state_dict.pop("model.norm_f.weight")
+            convert_hf_to_prime(state_dict, [])
         else:
+            _rename_keys(state_dict, "backbone.", "model.")
             layer_type = _infer_layer_type_hf(state_dict, layer_idx)
             convert_hf_layer_to_prime(state_dict, layer_idx, layer_type)
         return state_dict
@@ -385,22 +512,7 @@ class NemotronHModel(NemotronHPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        # Compute cu_seqlens and max_seqlen for flash attention
-        if self.config._attn_implementation in ("flash_attention_2", "flash_attention_3", "fa4"):
-            flat_position_ids = position_ids.view(-1)
-            seqlens = torch.cat(
-                [
-                    flat_position_ids[0:1],
-                    flat_position_ids[:-1][(flat_position_ids == 0)[1:]] + 1,
-                    flat_position_ids[-1:] + 1,
-                ]
-            )
-            max_seqlen = seqlens.max().item()
-            cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
-            torch._dynamo.mark_dynamic(cu_seqlens, 0)
-        else:
-            max_seqlen = None
-            cu_seqlens = None
+        cu_seqlens, max_seqlen = _get_attention_sequence_metadata(self.config, position_ids)
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids) if self.rotary_emb is not None else None
@@ -424,6 +536,7 @@ class NemotronHForCausalLM(NemotronHPreTrainedModel, GenerationMixin):
     def __init__(self, config: NemotronHConfig):
         super().__init__(config)
         self.model = NemotronHModel(config)
+        self.mtp = NemotronHMultiTokenPredictor(config) if config.num_nextn_predict_layers > 0 else None
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()

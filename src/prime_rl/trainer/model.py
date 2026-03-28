@@ -37,6 +37,7 @@ from prime_rl.trainer.models.layers.checkpointing import (
     supports_selective_activation_checkpointing,
 )
 from prime_rl.trainer.models.layers.lm_head import inject_prime_lm_head
+from prime_rl.trainer.models.layers.mtp import MTPTrainingBatch, configure_mtp_training
 from prime_rl.trainer.models.layers.moe import LatentMoE, MoE
 from prime_rl.trainer.parallel_dims import ParallelDims
 from prime_rl.trainer.weights import (
@@ -135,13 +136,21 @@ def freeze_vision_encoder(model: nn.Module, override_attr: str | None = None) ->
     logger.info(f"Froze {num_frozen} parameters in vision encoder")
 
 
+def _get_mtp_layers(model: nn.Module) -> list[nn.Module]:
+    mtp = getattr(model, "mtp", None)
+    if mtp is None and hasattr(model, "model"):
+        mtp = getattr(model.model, "mtp", None)
+    layers = getattr(mtp, "layers", None)
+    return list(layers) if isinstance(layers, nn.ModuleList) else []
+
+
 def freeze_moe_router(model: nn.Module) -> None:
     """Freeze MoE router parameters to maintain stable routing during training."""
     logger = get_logger()
     language_model = get_language_model(model)
     num_frozen = 0
 
-    for layer in language_model.layers:
+    for layer in [*language_model.layers, *_get_mtp_layers(model)]:
         mlp = layer.mlp if hasattr(layer, "mlp") else layer.feed_forward if hasattr(layer, "feed_forward") else None
         if mlp is None:
             continue
@@ -356,9 +365,10 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         get_logger().info("Applied FSDP to frozen vision encoder")
 
     language_model = get_language_model(model, override=config.vlm.language_model_attr if is_vlm_training else None)
-    transformer_layers = language_model.layers
+    transformer_layers = list(language_model.layers)
+    mtp_layers = _get_mtp_layers(model)
 
-    for transformer_block in transformer_layers:
+    for transformer_block in [*transformer_layers, *mtp_layers]:
         block_mlp = getattr(transformer_block, "mlp", None)
         if parallel_dims.ep_enabled and block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
             fully_shard(block_mlp.experts, mesh=dp_mod_ep_mesh, **fsdp_config)
@@ -406,7 +416,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
     # if EP is enabled, d2h syncs in the dispatch/combine can interfere with FSDP prefetch, that's why we set it below manually
     # the rest of the function handles only that
 
-    transformer_blocks = list(language_model.layers)
+    transformer_blocks = transformer_layers
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
     embed_module = getattr(language_model, "embed_tokens", None) or getattr(language_model, "embeddings", None)
@@ -426,7 +436,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
                 transformer_block.set_modules_to_forward_prefetch([language_model.norm, model.lm_head])
 
     # backward
-    reversed_transformer_blocks = list(reversed(language_model.layers))
+    reversed_transformer_blocks = list(reversed(transformer_layers))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
     if language_model.norm is not None and model.lm_head is not None and len(language_model.layers) > 0:
@@ -568,6 +578,8 @@ def can_reinit_empty_buffers(model: nn.Module):
     # HF standard transformer model
     if len(buffer_names) == 1 and buffer_names[0] == "model.rotary_emb.inv_freq":
         return True
+    if set(buffer_names) == {"model.rotary_emb.inv_freq", "model.rotary_emb.original_inv_freq"}:
+        return True
 
     # Gemma3 model (has embed_scale and local rotary emb)
     gemma3_buffers = {"model.embed_tokens.embed_scale", "model.rotary_emb.inv_freq", "model.rotary_emb_local.inv_freq"}
@@ -583,8 +595,18 @@ def fix_model_post_empty(model: nn.Module):
     # HF standard transformer model
     if "model.rotary_emb.inv_freq" in buffer_names:
         rotary_emb = model.model.rotary_emb
-        inv_freq, rotary_emb.attention_scaling = rotary_emb.rope_init_fn(rotary_emb.config, rotary_emb.inv_freq.device)
+        if hasattr(rotary_emb, "rope_init_fn"):
+            rope_init_fn = rotary_emb.rope_init_fn
+        else:
+            from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+            rope_init_fn = rotary_emb.compute_default_rope_parameters
+            if getattr(rotary_emb, "rope_type", "default") != "default":
+                rope_init_fn = ROPE_INIT_FUNCTIONS[rotary_emb.rope_type]
+        inv_freq, rotary_emb.attention_scaling = rope_init_fn(rotary_emb.config, rotary_emb.inv_freq.device)
         rotary_emb.inv_freq.copy_(inv_freq)
+        if "model.rotary_emb.original_inv_freq" in buffer_names:
+            rotary_emb.original_inv_freq.copy_(inv_freq)
     # Gemma3 local rotary emb
     if "model.rotary_emb_local.inv_freq" in buffer_names:
         rotary_emb_local = model.model.rotary_emb_local
@@ -661,7 +683,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
 
 def apply_ep(model: nn.Module, parallel_dims: ParallelDims):
     language_model = get_language_model(model)
-    for transformer_block in language_model.layers:
+    for transformer_block in [*language_model.layers, *_get_mtp_layers(model)]:
         block_mlp = getattr(transformer_block, "mlp", None)
         if block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
             parallelize_module(
@@ -759,6 +781,9 @@ def setup_model(
         lm_head_chunk_size = config.fused_lm_head_token_chunk_size
 
     inject_prime_lm_head(model, chunk_size=lm_head_chunk_size, fused_cross_entropy=fused_cross_entropy)
+    if config.vlm is not None and config.mtp is not None:
+        raise ValueError("MTP training is not supported for vision-language models yet.")
+    configure_mtp_training(model, config.mtp)
 
     # Apply LoRA before FSDP setup
     if config.lora is not None:
@@ -819,6 +844,7 @@ def forward(
     position_ids: Int[Tensor, "batch seq"],
     labels: Int[Tensor, "batch seq"] | None = None,
     temperature: Tensor | None = None,
+    mtp_batch: MTPTrainingBatch | None = None,
     routed_experts: Int[Tensor, "batch seq layers topk"] | None = None,
     # Multimodal fields (Qwen3-VL)
     pixel_values: Float[Tensor, "num_patches patch_dim"] | None = None,
@@ -830,6 +856,8 @@ def forward(
         "labels": labels,
         "temperature": temperature,
     }
+    if mtp_batch is not None:
+        kwargs["mtp_batch"] = mtp_batch
 
     # For multimodal (VLM), don't pass position_ids - let the model compute MRoPE internally
     # using image_grid_thw. Qwen3-VL only computes proper MRoPE when position_ids is None.

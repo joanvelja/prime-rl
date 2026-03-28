@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from prime_rl.trainer.models.layers.mtp import MTPTrainingBatch, compute_mtp_loss
 from prime_rl.utils.logger import get_logger
 
 FUSED_CE_IGNORE_INDEX = -100
@@ -19,6 +20,8 @@ class PrimeLmOutput(TypedDict, total=False):
     logprobs: Tensor | None
     entropy: Tensor | None
     loss: Tensor | None
+    mtp_loss: Tensor | None
+    mtp_loss_sum: Tensor | None
 
 
 def cast_float_and_contiguous(output: PrimeLmOutput) -> PrimeLmOutput:
@@ -32,6 +35,8 @@ def cast_float_and_contiguous(output: PrimeLmOutput) -> PrimeLmOutput:
         logprobs=_float_and_contiguous(output.get("logprobs")),
         entropy=_float_and_contiguous(output.get("entropy")),
         loss=output.get("loss"),
+        mtp_loss=_float_and_contiguous(output.get("mtp_loss")),
+        mtp_loss_sum=_float_and_contiguous(output.get("mtp_loss_sum")),
     )
 
 
@@ -352,6 +357,7 @@ def _patch_model_forward(model: nn.Module) -> None:
         labels: torch.Tensor | None = None,
         logits_to_keep: int = 0,
         temperature: torch.Tensor | None = None,
+        mtp_batch: MTPTrainingBatch | None = None,
         **kwargs: object,
     ) -> PrimeLmOutput:
         # For VLM with images, don't create position_ids - let model compute MRoPE internally
@@ -373,11 +379,17 @@ def _patch_model_forward(model: nn.Module) -> None:
         )
 
         # Pass through the wrapped lm_head
-        return self.lm_head(
+        out = self.lm_head(
             hidden_states[:, slice_indices, :],
             labels[:, slice_indices] if labels is not None else None,
             temperature=temperature[:, slice_indices] if temperature is not None else None,
         )
+        mtp_loss_sum, mtp_loss = compute_mtp_loss(self, hidden_states, mtp_batch)
+        if mtp_loss is not None:
+            out["mtp_loss"] = mtp_loss
+        if mtp_loss_sum is not None:
+            out["mtp_loss_sum"] = mtp_loss_sum
+        return out
 
     # Bind the new forward to the model
     model.forward = types.MethodType(new_forward, model)
