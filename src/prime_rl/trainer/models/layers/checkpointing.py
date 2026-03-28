@@ -76,10 +76,6 @@ def _is_dense_mlp(mlp: nn.Module) -> bool:
     return not hasattr(mlp, "_run_routed_experts") and not hasattr(mlp, "tokens_per_expert")
 
 
-def normalize_selective_targets(targets: Iterable[str]) -> frozenset[str]:
-    return frozenset(targets)
-
-
 def _supports_attn_proj(self_attn: nn.Module | None) -> bool:
     return self_attn is not None and hasattr(self_attn, "attn_projections") and hasattr(self_attn, "output_proj")
 
@@ -121,12 +117,12 @@ def get_supported_targets(layer: nn.Module) -> frozenset[str]:
 
 
 def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[str]) -> None:
-    normalized_targets = normalize_selective_targets(targets)
-    invalid_targets = normalized_targets - SELECTIVE_AC_TARGETS
+    target_set = frozenset(targets)
+    invalid_targets = target_set - SELECTIVE_AC_TARGETS
     if invalid_targets:
         raise ValueError(f"Unsupported selective activation checkpoint targets: {sorted(invalid_targets)}")
 
-    enabled_targets = normalized_targets & get_supported_targets(layer)
+    enabled_targets = target_set & get_supported_targets(layer)
     self_attn = getattr(layer, "self_attn", None)
     mlp = getattr(layer, "mlp", None)
     linear_attn = _get_linear_attn_module(layer)
