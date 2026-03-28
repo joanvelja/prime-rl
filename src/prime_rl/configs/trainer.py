@@ -46,12 +46,13 @@ class ActivationCheckpointConfig(BaseConfig):
     targets: Annotated[
         list[str],
         Field(
-            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints QKV projections, QK norms, RoPE, and output projection — everything in the attention layer except the kernel. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints routed expert compute in MoE layers (including LatentMoE). `mamba` checkpoints the Mamba mixer forward in NemotronH Mamba layers. `linear_attn` checkpoints the GatedDeltaNet forward in Qwen3.5-MoE linear attention layers.",
+            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints projection-side attention work outside the kernel, including input/output projections, attention-local norms, RoPE, gating, and model-specific MLA projection helpers where exposed. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints routed expert compute in MoE layers (including LatentMoE). `linear_attn` checkpoints supported token mixers outside the standard softmax-attention path, including NemotronH Mamba layers, Qwen3.5-MoE GatedDeltaNet layers, and AFMoE sliding-window attention layers.",
         ),
     ] = ["norm"]
 
     @model_validator(mode="after")
     def validate_selective_targets(self):
+        self.targets = list(dict.fromkeys(self.targets))
         if self.mode == "selective" and not self.targets:
             raise ValueError("Selective activation checkpointing requires at least one target.")
         return self

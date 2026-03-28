@@ -33,6 +33,7 @@ from prime_rl.trainer.models import (
 )
 from prime_rl.trainer.models.layers.checkpointing import (
     get_supported_targets,
+    normalize_selective_targets,
     set_selective_activation_checkpointing,
     supports_selective_activation_checkpointing,
 )
@@ -607,6 +608,7 @@ def reshard_module(model: nn.Module):
 def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
     logger = get_logger()
     language_model = get_language_model(model)
+    normalized_targets = sorted(normalize_selective_targets(ac_config.targets))
     selective_layers = 0
     full_layers = 0
     fallback_layer_types: set[str] = set()
@@ -618,7 +620,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
 
         if ac_config.mode == "selective" and supports_selective_activation_checkpointing(transformer_block):
             model_supported_targets.update(get_supported_targets(transformer_block))
-            set_selective_activation_checkpointing(transformer_block, ac_config.targets)
+            set_selective_activation_checkpointing(transformer_block, normalized_targets)
             selective_layers += 1
         else:
             if ac_config.mode == "selective":
@@ -629,7 +631,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
         language_model.layers.register_module(layer_name, transformer_block)
 
     if ac_config.mode == "selective":
-        unsupported_targets = frozenset(ac_config.targets) - model_supported_targets
+        unsupported_targets = frozenset(normalized_targets) - model_supported_targets
         if unsupported_targets:
             raise ValueError(
                 f"Selective activation checkpoint targets {sorted(unsupported_targets)} are not supported "
@@ -642,7 +644,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
             )
         logger.info(
             "Applied selective activation checkpointing "
-            f"(freq={ac_config.freq}, targets={ac_config.targets}, selective_layers={selective_layers}, "
+            f"(freq={ac_config.freq}, targets={normalized_targets}, selective_layers={selective_layers}, "
             f"full_fallback_layers={full_layers})"
         )
         return
