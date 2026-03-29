@@ -1,6 +1,7 @@
 from argparse import Namespace
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
+import warnings
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_config import BaseConfig
@@ -11,11 +12,46 @@ from prime_rl.utils.utils import rgetattr, rsetattr
 # TODO: Set thinking/ solution budget
 
 
+class WeightBroadcastConfig(BaseConfig):
+    """Configures weight broadcast settings."""
+
+    type: Annotated[Literal["nccl", "filesystem"], Field(description="The type of weight broadcast to use.")] = (
+        "filesystem"
+    )
+
+
+# Valid vLLM max_lora_rank values (from vllm/config/lora.py)
+# TODO: on newer vLLM, can import via `get_args(vllm.config.lora.MaxLoRARanks)`
+VALID_VLLM_LORA_RANKS = (8, 16, 32, 64, 128, 256, 320, 512)
+
+# vLLM all2all backend options for expert-parallel deployments.
+All2AllBackend = Literal[
+    "allgather_reducescatter",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "flashinfer_all2allv",
+    "naive",
+    "pplx",
+]
+
+
 class ServerConfig(BaseConfig):
     """Configures the inference server."""
 
     host: Annotated[str | None, Field(description="The host to bind to.")] = None
     port: Annotated[int, Field(description="The port to bind to.")] = 8000
+
+
+class RouterConfig(BaseConfig):
+    """Configures the vllm-router."""
+
+    server_config: Annotated[ServerConfig, Field(description="The server configuration.")] = ServerConfig()
+
+    policy: Annotated[Literal["round_robin", "consistent_hash"], Field(description="The routing policy to use.")] = (
+        "round_robin"
+    )
+
+    extra: Annotated[dict[str, Any], Field(description="Extra arguments to pass to the vllm-router as is.")] = {}
 
 
 class ParallelConfig(BaseConfig):
@@ -94,92 +130,12 @@ class ModelConfig(BaseModelConfig):
     ] = None
 
 
-class WeightBroadcastConfig(BaseConfig):
-    """Configures weight broadcast settings."""
-
-    type: Annotated[Literal["nccl", "filesystem"], Field(description="The type of weight broadcast to use.")] = (
-        "filesystem"
-    )
-
-
-# Valid vLLM max_lora_rank values (from vllm/config/lora.py)
-# TODO: on newer vLLM, can import via `get_args(vllm.config.lora.MaxLoRARanks)`
-VALID_VLLM_LORA_RANKS = (8, 16, 32, 64, 128, 256, 320, 512)
-
-# vLLM all2all backend options for expert-parallel deployments.
-All2AllBackend = Literal[
-    "allgather_reducescatter",
-    "deepep_high_throughput",
-    "deepep_low_latency",
-    "flashinfer_all2allv",
-    "naive",
-    "pplx",
-]
-
-
-class BaseInferenceDeploymentConfig(BaseModel):
-    """Base deployment config for inference."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    gpus_per_node: Annotated[int, Field(description="Number of GPUs per node.")] = 8
-
-
-class SingleNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
-    """Configures a single-node inference deployment."""
-
-    type: Literal["single_node"] = "single_node"
-
-
-class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
-    """Configures a multi-node inference deployment. Each node runs an independent vLLM replica."""
-
-    type: Literal["multi_node"] = "multi_node"
-
-    num_nodes: Annotated[int, Field(ge=1, description="Number of inference nodes.")] = 2
-
-    router_port: Annotated[int, Field(description="Port for the vllm-router.")] = 8000
-    backend_port: Annotated[int, Field(description="Port for vLLM backend instances.")] = 8100
-
-
-class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
-    """Configures a disaggregated prefill/decode inference deployment.
-
-    Each inference replica is split into separate prefill and decode node groups.
-    Requires NIXL for KV transfer and a vllm-router for request routing.
-    """
-
-    type: Literal["disaggregated"] = "disaggregated"
-
-    num_prefill_nodes: Annotated[int, Field(ge=1, description="Number of prefill nodes per replica.")] = 1
-    num_decode_nodes: Annotated[int, Field(ge=1, description="Number of decode nodes per replica.")] = 1
-
-    router_port: Annotated[int, Field(description="Port for the vllm-router on each replica.")] = 8000
-    prefill_port: Annotated[int, Field(description="Port for prefill vLLM instances.")] = 8100
-    decode_port: Annotated[int, Field(description="Port for decode vLLM instances.")] = 8200
-
-    @property
-    def num_nodes(self) -> int:
-        return self.num_prefill_nodes + self.num_decode_nodes
-
-
-InferenceDeploymentConfig: TypeAlias = Annotated[
-    SingleNodeInferenceDeploymentConfig | MultiNodeInferenceDeploymentConfig | DisaggregatedInferenceDeploymentConfig,
-    Field(discriminator="type"),
-]
-
-
-class InferenceConfig(BaseConfig):
-    """Configures inference."""
-
-    # The server configuration
-    server: ServerConfig = ServerConfig()
-
-    # The model configuration
+class BaseRuntimeInferenceConfig(BaseConfig):
     model: ModelConfig = Field(default_factory=ModelConfig)
 
-    # The parallel configuration
     parallel: ParallelConfig = ParallelConfig()
+
+    server_config: Annotated[ServerConfig, Field(description="The server configuration.")] = ServerConfig()
 
     enable_lora: Annotated[
         bool,
@@ -286,10 +242,6 @@ class InferenceConfig(BaseConfig):
         ),
     ] = False
 
-    weight_broadcast: Annotated[WeightBroadcastConfig, Field(description="The weight broadcast config.")] = (
-        WeightBroadcastConfig()
-    )
-
     enable_return_routed_experts: Annotated[
         bool,
         Field(
@@ -303,60 +255,6 @@ class InferenceConfig(BaseConfig):
             description="Extra arguments to pass to vLLM. These are applied as attributes on the vLLM namespace after config translation.",
         ),
     ] = {}
-
-    # Launcher-only fields
-
-    deployment: Annotated[
-        InferenceDeploymentConfig,
-        Field(
-            description="Deployment configuration for inference.",
-        ),
-    ] = SingleNodeInferenceDeploymentConfig()
-
-    slurm: Annotated[
-        SlurmConfig | None,
-        Field(
-            description="SLURM configuration. If set, the run will be submitted as a SLURM job instead of running locally.",
-        ),
-    ] = None
-
-    output_dir: Annotated[Path, Field(description="Directory for SLURM logs and generated scripts.")] = Path("outputs")
-
-    dry_run: Annotated[bool, Field(description="Only validate and dump resolved configs and exit early.")] = False
-
-    @model_validator(mode="after")
-    def validate_multi_node_requires_slurm(self):
-        if self.deployment.type == "multi_node" and self.slurm is None:
-            raise ValueError("Must use SLURM for multi-node deployment.")
-        return self
-
-    @model_validator(mode="after")
-    def auto_setup_disaggregated(self):
-        """Auto-configure inference for disaggregated P/D: enable EP and compute DP."""
-        if self.deployment.type == "disaggregated":
-            if "enable_expert_parallel" not in self.model_fields_set:
-                self.enable_expert_parallel = True
-            if "enable_eplb" not in self.model_fields_set:
-                self.enable_eplb = False
-            gpus_per_node = self.deployment.gpus_per_node
-            tp = self.parallel.tp
-            dp_per_node = gpus_per_node // tp
-            if self.data_parallel_size_local is None:
-                self.data_parallel_size_local = dp_per_node
-            if self.parallel.dp == 1:
-                self.parallel.dp = dp_per_node
-            if self.api_server_count == 1:
-                self.api_server_count = dp_per_node
-        return self
-
-    @model_validator(mode="after")
-    def auto_setup_slurm_template(self):
-        if self.slurm is not None and self.slurm.template_path is None:
-            import prime_rl
-
-            templates_dir = Path(prime_rl.__file__).parent / "templates"
-            self.slurm.template_path = templates_dir / "inference.sbatch.j2"
-        return self
 
     @model_validator(mode="after")
     def auto_setup_max_lora_rank(self):
@@ -376,32 +274,12 @@ class InferenceConfig(BaseConfig):
                 raise ValueError(f"max_lora_rank={original_rank} exceeds vLLM maximum of {VALID_VLLM_LORA_RANKS[-1]}")
         return self
 
-    @model_validator(mode="after")
-    def auto_setup_api_server_count(self):
-        """
-        Ensures that we have at least as many API servers as data parallel
-        size. Unless LoRA is enabled, in which case only one API server is
-        supported (vLLM limitation).
-        """
-        if self.vllm_extra.get("headless", False):
-            self.api_server_count = 0
-            return self
-
-        if "api_server_count" not in self.model_fields_set:
-            min_api_server_count = self.data_parallel_size_local or self.parallel.dp
-            if self.api_server_count < min_api_server_count:
-                self.api_server_count = min_api_server_count
-
-        if self.enable_lora:
-            self.api_server_count = 1  # LoRA requires only one API server
-        return self
-
     def to_vllm(self) -> Namespace:
         """Convert InferenceConfig to vLLM-compatible Namespace."""
         namespace = Namespace()
         to_vllm = {
-            "server.host": "host",
-            "server.port": "port",
+            "server_config.host": "host",
+            "server_config.port": "port",
             "model.name": "model",
             "model.dtype": "dtype",
             "model.max_model_len": "max_model_len",
@@ -445,3 +323,248 @@ class InferenceConfig(BaseConfig):
                 delattr(namespace, "rope_scaling")
 
         return namespace
+
+    @model_validator(mode="after")
+    def auto_setup_api_server_count(self):
+        """
+        Ensures that we have at least as many API servers as data parallel
+        size. Unless LoRA is enabled, in which case only one API server is
+        supported (vLLM limitation).
+        """
+        if self.vllm_extra.get("headless", False):
+            self.api_server_count = 0
+            return self
+
+        # User didn't set api_server_count, auto-setup
+        min_api_server_count = self.data_parallel_size_local or self.parallel.dp
+        if self.api_server_count < min_api_server_count:
+            warnings.warn(
+                f"api_server_count ({self.api_server_count}) is less than the minimum recommended ({min_api_server_count}). Setting to {min_api_server_count}."
+            )
+            self.api_server_count = min_api_server_count
+
+        if self.enable_lora:
+            warnings.warn("LoRA is enabled, which only supports one API server. Setting to 1.")
+            self.api_server_count = 1
+
+        return self
+
+    @model_validator(mode="after")
+    def disallow_eplb(self):
+        if self.enable_eplb:
+            raise ValueError("EPLB is currently not supported due to a bug in weight transfer.")
+        return self
+
+
+class DisaggregatedRuntimeInferenceConfig(BaseRuntimeInferenceConfig):
+    num_replicas_per_pod: Annotated[
+        int,
+        Field(
+            description="Pod is a single router instance. Setting this allows you to control the number of prefill/decode replicas per pod, i.e. allowing 2x EP16 prefill replicas to point to 1 EP32 decode replica, all under a single router instance."
+        ),
+    ] = 1
+
+    @model_validator(mode="after")
+    def disallow_headless(self):
+        if self.vllm_extra.get("headless", False):
+            raise ValueError("Headless mode is not supported for disaggregated deployments.")
+        return self
+
+
+class BaseInferenceDeploymentConfig(BaseModel):
+    """Base deployment config for inference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpus_per_node: Annotated[int, Field(description="Number of GPUs per node.")] = 8
+
+
+class SingleNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
+    """Configures a single-node inference deployment."""
+
+    type: Literal["single_node"] = "single_node"
+    runtime_config: Annotated[BaseRuntimeInferenceConfig, Field(description="Runtime inference configuration.")] = (
+        Field(default_factory=BaseRuntimeInferenceConfig)
+    )
+
+
+class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
+    """Configures a multi-node inference deployment. Each node runs an independent vLLM replica."""
+
+    type: Literal["multi_node"] = "multi_node"
+    runtime_config: Annotated[BaseRuntimeInferenceConfig, Field(description="Runtime inference configuration.")] = (
+        Field(default_factory=BaseRuntimeInferenceConfig)
+    )
+
+    num_nodes: Annotated[int, Field(ge=1, description="Number of inference nodes.")] = 2
+    num_pods: Annotated[int, Field(ge=1, description="Number of router instances.")] = 1
+
+    router_config: Annotated[RouterConfig, Field(description="Configuration for the router instance.")] = RouterConfig()
+
+
+class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
+    """Configures a disaggregated prefill/decode inference deployment.
+
+    Notation:
+    - node = single node with GPUs (single host)
+    - P = prefill
+    - D = decode
+    - replica = single vLLM parallelism unit, i.e. EP32, TP16PP2, etc.
+    - pod = single router instance, consists of >= 1 P replica(s) and >= 1 D replica(s)
+
+    Scaling invariants:
+    - internal_parallel_size = num_gpus_per_node // (vllm.tp * vllm.pp * vllm.dp * vllm.cp)
+    - per_pod_size = (num_decode_nodes_per_pod * decode_runtime_config.internal_parallel_size) + (num_prefill_nodes_per_pod * prefill_runtime_config.internal_parallel_size)
+    - num_nodes = num_pods * per_pod_size
+    """
+
+    type: Literal["disaggregated"] = "disaggregated"
+
+    num_nodes: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description="Number of inference nodes. If omitted, inferred from role configs and num_pods.",
+        ),
+    ] = None
+    num_prefill_nodes_per_pod: Annotated[int, Field(ge=1, description="Number of prefill nodes per pod.")] = 1
+    num_decode_nodes_per_pod: Annotated[int, Field(ge=1, description="Number of decode nodes per pod.")] = 1
+
+    num_pods: Annotated[int, Field(ge=1, description="Number of router instances.")] = 1
+
+    prefill_runtime_config: Annotated[
+        DisaggregatedRuntimeInferenceConfig, Field(description="Configuration for the prefill nodes.")
+    ] = Field(default_factory=lambda: DisaggregatedRuntimeInferenceConfig())
+
+    decode_runtime_config: Annotated[
+        DisaggregatedRuntimeInferenceConfig, Field(description="Configuration for the decode nodes.")
+    ] = Field(default_factory=lambda: DisaggregatedRuntimeInferenceConfig())
+
+    router_config: Annotated[RouterConfig, Field(description="Configuration for the router instances.")] = (
+        RouterConfig()
+    )
+
+    @model_validator(mode="after")
+    def auto_setup_local_dp(self):
+        """Auto-setup data parallel size local for prefill and decode nodes."""
+        if self.prefill_runtime_config.data_parallel_size_local is None:
+            self.prefill_runtime_config.data_parallel_size_local = (
+                self.gpus_per_node // self.prefill_runtime_config.parallel.tp
+            )
+        if self.decode_runtime_config.data_parallel_size_local is None:
+            self.decode_runtime_config.data_parallel_size_local = (
+                self.gpus_per_node // self.decode_runtime_config.parallel.tp
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_tp_compatibility(self):
+        for cfg in [self.prefill_runtime_config, self.decode_runtime_config]:
+            if cfg.parallel.tp > self.gpus_per_node:
+                raise ValueError(
+                    f"parallel.tp ({cfg.parallel.tp}) must currently be less than or equal to gpus_per_node ({self.gpus_per_node})"
+                )
+            if self.gpus_per_node % cfg.parallel.tp != 0:
+                raise ValueError(
+                    f"gpus_per_node ({self.gpus_per_node}) must currently be divisible by parallel.tp ({cfg.parallel.tp})"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_local_dp_compatibility(self):
+        for cfg in [self.prefill_runtime_config, self.decode_runtime_config]:
+            if cfg.data_parallel_size_local > self.gpus_per_node:
+                raise ValueError(
+                    f"data_parallel_size_local ({cfg.data_parallel_size_local}) must currently be less than or equal to gpus_per_node ({self.gpus_per_node})"
+                )
+            if cfg.data_parallel_size_local * cfg.parallel.tp != self.gpus_per_node:
+                raise ValueError(
+                    f"data_parallel_size_local ({cfg.data_parallel_size_local}) * parallel.tp ({cfg.parallel.tp}) must currently equal gpus_per_node ({self.gpus_per_node})"
+                )
+
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_global_dp(self):
+        for cfg, num_nodes in [
+            (self.prefill_runtime_config, self.num_prefill_nodes_per_pod),
+            (self.decode_runtime_config, self.num_decode_nodes_per_pod),
+        ]:
+            expected_dp = num_nodes * self.gpus_per_node // cfg.parallel.tp
+            if "dp" not in cfg.parallel.model_fields_set:
+                cfg.parallel.dp = expected_dp
+        return self
+
+    @model_validator(mode="after")
+    def validate_global_dp_compatibility(self):
+        for prefix, cfg, num_nodes in [
+            ("Prefill", self.prefill_runtime_config, self.num_prefill_nodes_per_pod),
+            ("Decode", self.decode_runtime_config, self.num_decode_nodes_per_pod),
+        ]:
+            if cfg.parallel.dp != num_nodes * self.gpus_per_node // cfg.parallel.tp:
+                raise ValueError(
+                    f"{prefix}: parallel.dp must be equal to num_nodes * gpus_per_node // parallel.tp => {num_nodes} * {self.gpus_per_node} // {cfg.parallel.tp}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_disaggregated(self):
+        """Auto-configure disaggregated role configs and infer total node count."""
+        inferred_num_nodes = self.num_pods * (self.num_prefill_nodes_per_pod + self.num_decode_nodes_per_pod)
+
+        if self.num_nodes is None:
+            self.num_nodes = inferred_num_nodes
+        elif self.num_nodes != inferred_num_nodes:
+            raise ValueError(
+                f"deployment.num_nodes ({self.num_nodes}) does not match inferred value "
+                f"({inferred_num_nodes}) from num_pods/replicas/parallel settings."
+            )
+        return self
+
+
+InferenceDeploymentConfig: TypeAlias = Annotated[
+    SingleNodeInferenceDeploymentConfig | MultiNodeInferenceDeploymentConfig | DisaggregatedInferenceDeploymentConfig,
+    Field(discriminator="type"),
+]
+
+
+class InferenceConfig(BaseConfig):
+    """Configures inference."""
+
+    weight_broadcast: Annotated[WeightBroadcastConfig, Field(description="The weight broadcast config.")] = (
+        WeightBroadcastConfig()
+    )
+
+    # Launcher-only fields
+    deployment: Annotated[
+        InferenceDeploymentConfig,
+        Field(
+            description="Deployment configuration for inference.",
+        ),
+    ] = SingleNodeInferenceDeploymentConfig()
+
+    slurm: Annotated[
+        SlurmConfig | None,
+        Field(
+            description="SLURM configuration. If set, the run will be submitted as a SLURM job instead of running locally.",
+        ),
+    ] = None
+
+    output_dir: Annotated[Path, Field(description="Directory for SLURM logs and generated scripts.")] = Path("outputs")
+
+    dry_run: Annotated[bool, Field(description="Only validate and dump resolved configs and exit early.")] = False
+
+    @model_validator(mode="after")
+    def validate_multi_node_or_disaggregated_requires_slurm(self):
+        if self.deployment.type in ["multi_node", "disaggregated"] and self.slurm is None:
+            raise ValueError("Must use SLURM for multi-node or disaggregated deployment.")
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_slurm_template(self):
+        if self.slurm is not None and self.slurm.template_path is None:
+            import prime_rl
+
+            templates_dir = Path(prime_rl.__file__).parent / "templates"
+            self.slurm.template_path = templates_dir / "inference.sbatch.j2"
+        return self
