@@ -100,6 +100,13 @@ class LoRAConfig(BaseConfig):
         ),
     ] = 16
 
+    moe_lora_mode: Annotated[
+        Literal["per_projection", "perft_e"],
+        Field(
+            description="MoE LoRA strategy. 'per_projection' applies separate LoRA to each of w1/w2/w3. 'perft_e' applies a single bypass LoRA to the entire MoE block (PErFT-E).",
+        ),
+    ] = "per_projection"
+
     alpha: Annotated[
         float,
         Field(

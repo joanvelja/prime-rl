@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from prime_rl.configs.trainer import LoRAConfig
 from prime_rl.trainer.models.layers.lora import MultiLoRALinear, MultiLoRAModule
+from prime_rl.trainer.models.layers.lora.fused_moe import MultiLoRAPERFTE
 from prime_rl.trainer.models.layers.lora.multi_moe import MultiLoRAGroupedExperts
 from prime_rl.trainer.models.layers.moe import GroupedExperts
 from prime_rl.trainer.runs import get_multi_run_manager
@@ -171,7 +172,8 @@ def apply_lora_to_model(model: nn.Module, config: LoRAConfig) -> None:
             )
         # Handle GroupedExperts (MoE)
         elif isinstance(base_module, GroupedExperts):
-            lora_module = MultiLoRAGroupedExperts(
+            moe_cls = MultiLoRAPERFTE if config.moe_lora_mode == "perft_e" else MultiLoRAGroupedExperts
+            lora_module = moe_cls(
                 base_layer=base_module,
                 rank=config.rank,
                 n_adapters=n_loras,
