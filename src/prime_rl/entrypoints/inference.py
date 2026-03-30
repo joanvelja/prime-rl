@@ -50,11 +50,15 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
         template_vars.update(
             num_prefill_nodes=config.deployment.num_prefill_nodes,
             num_decode_nodes=config.deployment.num_decode_nodes,
+            num_prefill_replicas=config.deployment.num_prefill_replicas,
+            num_decode_replicas=config.deployment.num_decode_replicas,
             prefill_port=config.deployment.prefill_port,
             decode_port=config.deployment.decode_port,
             router_port=config.deployment.router_port,
             data_parallel_rpc_port=config.data_parallel_rpc_port,
             use_deep_gemm=config.use_deep_gemm,
+            prefill_env_overrides=config.deployment.prefill_env_overrides,
+            decode_env_overrides=config.deployment.decode_env_overrides,
         )
     elif is_multi_node:
         template_vars.update(
