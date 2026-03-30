@@ -43,7 +43,7 @@ PRIME-RL is a framework for large-scale reinforcement learning. It is designed t
 ## Models support
 
 
-Most Hugging Face models work out of the box—the trainer is built on Hugging Face Transformers. For selected families (especially large MoE) we also ship highly optimized training code under `src/prime_rl/trainer/models/`, including expert parallelism (EP) for MoE layers and context parallelism (CP) for long sequences (see the table), and additional kernel like [quack-kernels](https://github.com/quack-kernels/quack-kernels).
+The trainer works with both Hugging Face and Prime custom `ModelForCausalLM` out of the box. For selected families (especially large MoE) we also ship highly optimized training code under `src/prime_rl/trainer/models/`, including expert parallelism (EP) for MoE layers and context parallelism (CP) for long sequences (see the table), and additional kernels like [quack-kernels](https://github.com/quack-kernels/quack-kernels).
 
 With `[model] impl = "auto"` (the default), the trainer selects that custom stack when the Hugging Face config type is registered.
 
@@ -97,6 +97,21 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 ```
 
+3. Install dependencies from the lock file
+
+```bash
+uv sync --all-extras
+```
+
+3.1. Optional: Install Flash Attention 3 (on Hopper GPUs only, for flash_attention_3 attention backend)
+
+> *NOTE*: This step will take a while, as it builds the Flash Attention 3 extension from source, as it has no wheels prebuilt.
+> *NOTE*: After this step, you can't run `uv sync --all-extras` or `uv run` as it will uninstall the package, you can avoid it by running `uv sync --inexact` or `uv run --no-sync`
+
+```bash
+uv pip install "flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@main#subdirectory=hopper" --no-build-isolation
+```
+
 </details>
 
 <details>
@@ -105,20 +120,31 @@ Validate your environment setup
 </summary>
 <br>
 
+1. Check that the environment uses Python 3.12
 
-1. Check that you can run SFT trainer  (*this requires 1 GPU*)
+```bash
+uv run python -V
+```
+
+2. Check that `flash-attn` is installed
+
+```bash
+uv run python -c "import flash_attn"
+```
+
+3. Check that you can run SFT trainer  (*this requires 1 GPU*)
 
 ```bash
 uv run sft @ configs/debug/sft/train.toml
 ```
 
-2. Check that you can run the RL trainer (*this requires 1 GPU*)
+4. Check that you can run the RL trainer (*this requires 1 GPU*)
 
 ```bash
 uv run trainer @ configs/debug/rl/train.toml
 ```
 
-3. Check that you can run the inference server (*this requires 1 GPU*)
+5. Check that you can run the inference server (*this requires 1 GPU*)
 
 ```bash
 uv run inference @ configs/debug/infer.toml
@@ -130,6 +156,12 @@ uv run inference @ configs/debug/infer.toml
 
 ```bash
 uv run orchestrator @ configs/debug/orch.toml
+```
+
+5.2. Check that you can run evals against the inference server
+
+```bash
+uv run eval @ configs/debug/eval.toml
 ```
 
 </details>

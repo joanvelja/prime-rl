@@ -27,7 +27,7 @@ max_inflight_activations = 1
 
 ## Activation checkpointing
 
-Activation checkpointing is a technique that checkpoints the activations of the model to reduce the memory usage of the trainer.
+Activation checkpointing discards intermediate activations during the forward pass and recomputes them during the backward pass, trading compute for memory.
 
 To enable it, use:
 
@@ -35,6 +35,8 @@ To enable it, use:
 [trainer.model.ac]
 freq = 1
 ```
+
+`freq` controls how often layers are checkpointed: every `freq` layers. Lower values yield lower memory usage (e.g. `freq = 1` checkpoints every layer).
 
 ## Activation offloading
 
