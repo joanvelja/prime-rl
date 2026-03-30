@@ -482,7 +482,6 @@ def train(config: TrainerConfig):
             logger.debug(micro_step_message)
 
         # Optionally, clip the gradients
-
         grad_norm = clip_grad_norm_(
             model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
         )

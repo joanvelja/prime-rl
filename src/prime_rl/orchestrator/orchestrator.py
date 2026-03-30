@@ -837,11 +837,21 @@ async def orchestrate(config: OrchestratorConfig):
         )
 
         reward_mean = by_example.reward.mean().mean()
+        mean_generation_ms = by_example.generation_ms.mean().mean()
+        mean_decode_len = by_example.decode_len.mean().mean()
+        decode_tokens_per_second = 1000 * mean_decode_len / mean_generation_ms if mean_generation_ms > 0 else 0.0
         val_reward_str = ""
         if val_results_df is not None:
             val_reward_mean = val_results_df.groupby("example_id").reward.mean().mean()
             val_reward_str = f" Val. Reward: {val_reward_mean:.4f} |"
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} |{val_reward_str} Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
+        step_message = (
+            f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} |{val_reward_str}"
+            f" Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample"
+            f" | Generation: {mean_generation_ms:.1f} ms/sample"
+            f" | Decode Speed: {decode_tokens_per_second:.1f} tokens/s"
+            f" | Async Level: {scheduler.async_level}"
+            f" | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
+        )
         logger.success(step_message)
 
         # Increment step

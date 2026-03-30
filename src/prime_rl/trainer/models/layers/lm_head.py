@@ -378,13 +378,16 @@ def _patch_model_forward(model: nn.Module) -> None:
             slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) and logits_to_keep > 0 else slice(None)
         )
 
-        # Pass through the wrapped lm_head
+        # Compute MTP loss before the lm_head forward so that the FSDP backward
+        # processes lm_head first and MTP second — matching the reverse of the
+        # forward call order and keeping collective sequences deterministic.
+        mtp_loss_sum, mtp_loss = compute_mtp_loss(self, hidden_states, mtp_batch)
+
         out = self.lm_head(
             hidden_states[:, slice_indices, :],
             labels[:, slice_indices] if labels is not None else None,
             temperature=temperature[:, slice_indices] if temperature is not None else None,
         )
-        mtp_loss_sum, mtp_loss = compute_mtp_loss(self, hidden_states, mtp_batch)
         if mtp_loss is not None:
             out["mtp_loss"] = mtp_loss
         if mtp_loss_sum is not None:

@@ -245,6 +245,27 @@ def _init_nemotron_mtp_layer(
         layer.final_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
 
 
+def _apply_nemotron_mtp_start_projections(
+    layer: nn.Module,
+    hidden_states: torch.Tensor,
+    input_embeds: torch.Tensor | None,
+) -> torch.Tensor:
+    if not getattr(layer, "has_start_projections", False):
+        return hidden_states
+    if input_embeds is None:
+        raise ValueError("NemotronH MTP start projections require `input_embeds` on the first MTP layer.")
+
+    input_embeds = layer.enorm(input_embeds)
+    hidden_states = layer.hnorm(hidden_states)
+    return layer.eh_proj(torch.cat([input_embeds, hidden_states], dim=-1))
+
+
+def _apply_nemotron_mtp_final_norm(layer: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    if getattr(layer, "has_end_norm", False):
+        return layer.final_layernorm(hidden_states)
+    return hidden_states
+
+
 class NemotronHMTPAttentionLayer(NemotronHAttentionLayer):
     """NemotronH MTP attention layer with optional input fusion and output norm."""
 
@@ -256,6 +277,23 @@ class NemotronHMTPAttentionLayer(NemotronHAttentionLayer):
     ):
         super().__init__(config)
         _init_nemotron_mtp_layer(self, config, has_start_projections, has_end_norm)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        max_seqlen: int | None = None,
+        input_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = _apply_nemotron_mtp_start_projections(self, hidden_states, input_embeds)
+        hidden_states = super().forward(
+            hidden_states,
+            position_embeddings=position_embeddings,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        return _apply_nemotron_mtp_final_norm(self, hidden_states)
 
 
 class NemotronHMTPMoELayer(NemotronHMoELayer):
@@ -269,6 +307,23 @@ class NemotronHMTPMoELayer(NemotronHMoELayer):
     ):
         super().__init__(config)
         _init_nemotron_mtp_layer(self, config, has_start_projections, has_end_norm)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        max_seqlen: int | None = None,
+        input_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = _apply_nemotron_mtp_start_projections(self, hidden_states, input_embeds)
+        hidden_states = super().forward(
+            hidden_states,
+            position_embeddings=position_embeddings,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        return _apply_nemotron_mtp_final_norm(self, hidden_states)
 
 
 class NemotronHMultiTokenPredictor(nn.Module):
@@ -310,12 +365,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
         cu_seqlens: torch.LongTensor | None = None,
         max_seqlen: int | None = None,
     ) -> torch.Tensor:
-        first_layer = self.layers[0]
-        if getattr(first_layer, "has_start_projections", False):
-            input_embeds = first_layer.enorm(input_embeds)
-            hidden_states = first_layer.hnorm(hidden_states)
-            hidden_states = first_layer.eh_proj(torch.cat([input_embeds, hidden_states], dim=-1))
-
         if cu_seqlens is None or max_seqlen is None:
             cu_seqlens, max_seqlen = _get_attention_sequence_metadata(self.config, position_ids)
         for layer in self.layers:
@@ -324,11 +373,8 @@ class NemotronHMultiTokenPredictor(nn.Module):
                 position_embeddings=None,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                input_embeds=input_embeds,
             )
-
-        last_layer = self.layers[-1]
-        if getattr(last_layer, "has_end_norm", False):
-            hidden_states = last_layer.final_layernorm(hidden_states)
 
         return hidden_states
 

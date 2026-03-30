@@ -1,4 +1,5 @@
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import cast
@@ -48,6 +49,20 @@ from prime_rl.trainer.weights import (
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.vlm import get_language_model, get_vision_encoder, is_vlm_architecture
+
+
+def _get_expected_load_state_dict_keys(model: nn.Module) -> set[str]:
+    state_dict = strip_lora_from_state_dict(model.state_dict())
+    if getattr(getattr(model, "config", None), "tie_word_embeddings", False):
+        state_dict.pop("lm_head.weight", None)
+    return set(state_dict)
+
+
+def _get_missing_checkpoint_keys(save_dir: Path, required_keys: set[str]) -> list[str]:
+    if not save_dir.exists():
+        return sorted(required_keys)
+    checkpoint_keys = set(load_state_dict_keys(save_dir))
+    return sorted(required_keys - checkpoint_keys)
 
 
 def _patch_qwen3_5_moe_conversion_mapping():
@@ -142,6 +157,13 @@ def _get_mtp_layers(model: nn.Module) -> list[nn.Module]:
         mtp = getattr(model.model, "mtp", None)
     layers = getattr(mtp, "layers", None)
     return list(layers) if isinstance(layers, nn.ModuleList) else []
+
+
+def _get_mtp_fsdp_modules(model: nn.Module) -> list[nn.Module]:
+    # Nemotron MTP now applies its shared start/end projections inside the
+    # child layer forwards, so all supported layouts can shard per logical MTP
+    # layer.
+    return _get_mtp_layers(model)
 
 
 def freeze_moe_router(model: nn.Module) -> None:
@@ -367,6 +389,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
     language_model = get_language_model(model, override=config.vlm.language_model_attr if is_vlm_training else None)
     transformer_layers = list(language_model.layers)
     mtp_layers = _get_mtp_layers(model)
+    mtp_fsdp_modules = _get_mtp_fsdp_modules(model)
 
     for transformer_block in [*transformer_layers, *mtp_layers]:
         block_mlp = getattr(transformer_block, "mlp", None)
@@ -375,6 +398,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
 
             block_mlp.experts.set_gradient_divide_factor(parallel_dims.fsdp_gradient_divide_factor)
 
+    for transformer_block in [*transformer_layers, *mtp_fsdp_modules]:
         fully_shard(
             transformer_block,
             mesh=hsdp_mesh,
@@ -489,16 +513,24 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     if isinstance(model, PreTrainedModelPrimeRL):
         snapshot_keys = dict.fromkeys(load_state_dict_keys(snapshot_path))
         model_keys = dict.fromkeys(model.state_dict().keys())
+        expected_load_keys = _get_expected_load_state_dict_keys(model)
 
         if model.is_hf_state_dict(snapshot_keys) and model.is_prime_state_dict(model_keys):
             logger.warning(
                 "Found HF weight format in snapshot state dict and PrimeRL weight format in model state dict. Trying to auto-convert..."
             )
             snapshot_path = snapshot_path / "prime"
-            if not snapshot_path.exists() and get_world().is_master:
+            missing_keys = _get_missing_checkpoint_keys(snapshot_path, expected_load_keys)
+            if missing_keys:
+                logger.warning(
+                    f"Converted PrimeRL snapshot at {snapshot_path} is missing {len(missing_keys)} key(s); "
+                    f"rebuilding it. Example missing key: {missing_keys[0]}"
+                )
+            if missing_keys and get_world().is_master:
                 logger.debug(
                     f"Converting snapshot state dict to PrimeRL format and saving to {snapshot_path} on master rank. This is a one-time operation."
                 )
+                shutil.rmtree(snapshot_path, ignore_errors=True)
                 snapshot_state_dict = load_state_dict(snapshot_path.parent)
                 model.convert_to_prime(snapshot_state_dict)
                 save_state_dict(snapshot_state_dict, snapshot_path)
@@ -509,10 +541,17 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
                 "Found PrimeRL weight format in snapshot state dict and HF weight format in model state dict. Trying to auto-convert..."
             )
             snapshot_path = snapshot_path / "hf"
-            if not snapshot_path.exists() and get_world().is_master:
+            missing_keys = _get_missing_checkpoint_keys(snapshot_path, expected_load_keys)
+            if missing_keys:
+                logger.warning(
+                    f"Converted HF snapshot at {snapshot_path} is missing {len(missing_keys)} key(s); "
+                    f"rebuilding it. Example missing key: {missing_keys[0]}"
+                )
+            if missing_keys and get_world().is_master:
                 logger.debug(
                     f"Converting snapshot state dict to HF format and saving to {snapshot_path} on master rank. This is a one-time operation."
                 )
+                shutil.rmtree(snapshot_path, ignore_errors=True)
                 snapshot_state_dict = load_state_dict(snapshot_path.parent)
                 model.convert_to_hf(snapshot_state_dict)
                 save_state_dict(snapshot_state_dict, snapshot_path)

@@ -89,9 +89,12 @@ def preprocess_layer_checkpoint(
     layer_state_dict: dict[str, Tensor],
     layer_idx: int,
 ) -> dict[str, Tensor]:
-    if isinstance(model, PreTrainedModelPrimeRL) and model.is_prime_state_dict(layer_state_dict):
-        model.convert_layer_to_hf(layer_state_dict, layer_idx)
-        return layer_state_dict
+    if isinstance(model, PreTrainedModelPrimeRL):
+        # The non-layer chunk can still contain PrimeRL-only MTP weights even if
+        # it lacks the MoE/router markers used by `is_prime_state_dict`.
+        if layer_idx < 0 or model.is_prime_state_dict(layer_state_dict):
+            model.convert_layer_to_hf(layer_state_dict, layer_idx)
+            return layer_state_dict
 
     from transformers.core_model_loading import revert_weight_conversion
 
@@ -199,8 +202,13 @@ class NCCLWeightBroadcast(WeightBroadcast):
         notified_runs: list[tuple[int, Path]] = []
         if self.world.is_master:
             notified_runs = self._notify_orchestrator()
-            # Wait for inference workers to signal readiness before starting NCCL broadcast
             self._wait_for_nccl_ready(notified_runs)
+        # All ranks must synchronize here: _resolve_dtensors inside the sender
+        # calls DTensor.full_tensor() which is a collective all-gather across all
+        # ranks.  Without this barrier the master can still be blocked on
+        # _wait_for_nccl_ready while non-master ranks already enter full_tensor(),
+        # causing an NCCL deadlock.
+        torch.distributed.barrier()
         self.nccl_broadcast_sender.broadcast_weights(model, step)
         self.logger.debug(f"Weights broadcasted in {time.perf_counter() - start_time:.2f}s")
 

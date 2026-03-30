@@ -1,3 +1,4 @@
+import os
 import json
 import pickle
 import shutil
@@ -25,6 +26,17 @@ from prime_rl.utils.pathing import get_ckpt_dir
 from prime_rl.utils.utils import format_num, format_time, get_step_path
 
 DEFAULT_TIMEOUT = timedelta(seconds=600)
+
+
+def _configure_nccl_heartbeat_timeout(timeout: timedelta) -> None:
+    if "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC" in os.environ:
+        return
+
+    # PyTorch's NCCL watchdog heartbeat defaults to 480s, which can abort
+    # legitimately long first steps (e.g. large-model compile/warmup) before the
+    # trainer's configured distributed timeout does.
+    timeout_seconds = max(480, int(timeout.total_seconds()))
+    os.environ["TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"] = str(timeout_seconds)
 
 
 def _to_local_tensor(tensor: Tensor | DTensor) -> Tensor:
@@ -105,6 +117,7 @@ def get_ckpt_disk_metrics(output_dir: Path) -> dict[str, float]:
 def setup_torch_distributed(timeout: timedelta = DEFAULT_TIMEOUT, enable_gloo: bool = False):
     device_id = get_world().local_rank
     torch.cuda.set_device(device_id)
+    _configure_nccl_heartbeat_timeout(timeout)
     # Use Gloo backend for CPU and NCCL for GPU when CPU offloading is enabled
     # Otherwise use NCCL for better GPU performance
     backend = None  # by default nccl

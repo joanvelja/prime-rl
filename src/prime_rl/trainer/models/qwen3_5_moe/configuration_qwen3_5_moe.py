@@ -46,6 +46,8 @@ class Qwen3_5MoeConfig(PretrainedConfig):
         num_experts=256,
         output_router_logits=False,
         router_aux_loss_coef=0.001,
+        mtp_num_hidden_layers=0,
+        mtp_use_dedicated_embeddings=False,
         # Layer type configuration
         layer_types=None,
         # PrimeRL additions
@@ -97,6 +99,8 @@ class Qwen3_5MoeConfig(PretrainedConfig):
         self.num_experts = num_experts
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
+        self.mtp_num_hidden_layers = mtp_num_hidden_layers
+        self.mtp_use_dedicated_embeddings = mtp_use_dedicated_embeddings
 
         # PrimeRL additions
         self.load_balance_coeff = load_balance_coeff

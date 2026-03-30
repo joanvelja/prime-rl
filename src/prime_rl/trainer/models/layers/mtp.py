@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Callable
 
 import torch
@@ -12,6 +13,7 @@ from transformers.masking_utils import create_causal_mask
 
 from prime_rl.configs.trainer import MTPConfig
 from prime_rl.utils.cp import _get_cu_seqlens_for_cp, shard_for_cp
+from prime_rl.utils.vlm import get_language_model
 
 
 @dataclass
@@ -199,21 +201,36 @@ def _looks_like_megatron_mtp_layer(layer: nn.Module) -> bool:
     return all(hasattr(layer, name) for name in required)
 
 
-def _resolve_mtp_runtime(model: nn.Module, num_layers: int) -> MTPRuntime:
-    backbone = getattr(model, "model", None)
-    if not isinstance(backbone, nn.Module):
-        raise ValueError("MTP training requires a model backbone at `model.model`.")
+def _looks_like_qwen3_5_moe_decoder_layer(layer: nn.Module) -> bool:
+    params = inspect.signature(layer.forward).parameters
+    return "cu_seqlens" in params and "max_seqlen" in params and "attention_mask" not in params
+
+
+def _resolve_mtp_embed_tokens(backbone: nn.Module, mtp_container: nn.Module | None = None) -> nn.Module:
+    if isinstance(mtp_container, nn.Module):
+        container_embed_tokens = getattr(mtp_container, "embed_tokens", None)
+        if isinstance(container_embed_tokens, nn.Module):
+            return container_embed_tokens
 
     embed_tokens = getattr(backbone, "embed_tokens", None)
-    if not isinstance(embed_tokens, nn.Module):
-        raise ValueError("MTP training requires a token embedding module at `model.model.embed_tokens`.")
+    if isinstance(embed_tokens, nn.Module):
+        return embed_tokens
+
+    raise ValueError("MTP training requires a token embedding module on the language backbone or MTP container.")
+
+
+def _resolve_mtp_runtime(model: nn.Module, num_layers: int) -> MTPRuntime:
+    backbone = get_language_model(model)
+    if not isinstance(backbone, nn.Module):
+        raise ValueError("MTP training requires a language model backbone.")
 
     rotary_emb = getattr(backbone, "rotary_emb", None)
 
     mtp_layers = getattr(backbone, "mtp_layers", None)
     if isinstance(mtp_layers, nn.ModuleList) and len(mtp_layers) >= num_layers:
         if not _looks_like_mimo_layer(mtp_layers[0]) and not _looks_like_megatron_mtp_layer(mtp_layers[0]):
-            raise ValueError("Found `model.model.mtp_layers`, but the layer structure is not supported yet.")
+            raise ValueError("Found `mtp_layers` on the language backbone, but the layer structure is not supported yet.")
+        embed_tokens = _resolve_mtp_embed_tokens(backbone)
         run_layer = _run_mimo_layer if _looks_like_mimo_layer(mtp_layers[0]) else _run_megatron_style_layer
         return MTPRuntime(
             backbone=backbone,
@@ -226,6 +243,10 @@ def _resolve_mtp_runtime(model: nn.Module, num_layers: int) -> MTPRuntime:
     mtp_container = getattr(model, "mtp", None)
     if mtp_container is None:
         mtp_container = getattr(backbone, "mtp", None)
+    embed_tokens = _resolve_mtp_embed_tokens(
+        backbone,
+        mtp_container if isinstance(mtp_container, nn.Module) else None,
+    )
     if isinstance(mtp_container, nn.Module) and _looks_like_nemotron_container(mtp_container):
         return MTPRuntime(
             backbone=backbone,
@@ -238,12 +259,17 @@ def _resolve_mtp_runtime(model: nn.Module, num_layers: int) -> MTPRuntime:
     if isinstance(mtp_container, nn.Module) and _looks_like_qwen_next_container(mtp_container):
         layers = getattr(mtp_container, "layers")
         if isinstance(layers, nn.ModuleList) and len(layers) >= num_layers:
+            run_layer = (
+                _run_qwen3_5_moe_container_layer
+                if _looks_like_qwen3_5_moe_decoder_layer(layers[0])
+                else _run_qwen_next_container_layer
+            )
             return MTPRuntime(
                 backbone=backbone,
                 embed_tokens=embed_tokens,
                 rotary_emb=rotary_emb,
                 layers=list(layers[:num_layers]),
-                run_layer=_run_qwen_next_container_layer,
+                run_layer=run_layer,
                 container=mtp_container,
             )
 
@@ -282,6 +308,59 @@ def _apply_output_head(hidden_states: Tensor, model: nn.Module) -> Tensor:
     if softcap is not None:
         logits = softcap * torch.tanh(logits / softcap)
     return logits
+
+
+def _compute_masked_mtp_loss_sum(
+    hidden_states: Tensor,
+    labels: Tensor,
+    loss_mask: Tensor,
+    model: nn.Module,
+) -> tuple[Tensor, Tensor]:
+    masked_token_count = loss_mask.sum(dtype=torch.long)
+    if masked_token_count.item() == 0:
+        # Maintain a gradient path through hidden_states so that FSDP backward
+        # hooks for the MTP layer fire on every rank, keeping the collective
+        # sequence consistent across ranks and preventing NCCL deadlocks.
+        return hidden_states.flatten()[0] * 0, masked_token_count
+
+    masked_hidden_states = hidden_states[loss_mask]
+    masked_labels = labels[loss_mask]
+
+    lm_head = getattr(model, "lm_head", None)
+    softcap = getattr(getattr(model, "config", None), "final_logit_softcapping", None)
+    if (
+        isinstance(lm_head, nn.Module)
+        and hasattr(lm_head, "weight")
+        and softcap is None
+        and masked_hidden_states.is_cuda
+        and masked_labels.is_cuda
+    ):
+        try:
+            from quack.linear_cross_entropy import chunked_linear_cross_entropy
+        except ImportError:
+            pass
+        else:
+            if masked_hidden_states.shape[0] % 8 != 0:
+                pad_tokens = (-masked_hidden_states.shape[0]) % 8
+                masked_hidden_states = torch.cat(
+                    [masked_hidden_states, masked_hidden_states.new_zeros((pad_tokens, masked_hidden_states.shape[-1]))],
+                    dim=0,
+                )
+                masked_labels = torch.cat([masked_labels, masked_labels.new_full((pad_tokens,), -100)], dim=0)
+            return (
+                chunked_linear_cross_entropy(
+                    masked_hidden_states.contiguous(),
+                    lm_head.weight.detach(),
+                    masked_labels.contiguous(),
+                    chunk_size=4096,
+                    ignore_index=-100,
+                    reduction="sum",
+                ),
+                masked_token_count,
+            )
+
+    logits = _apply_output_head(masked_hidden_states, model)
+    return F.cross_entropy(logits, masked_labels, reduction="sum"), masked_token_count
 
 
 def _build_causal_mask(runtime: MTPRuntime, inputs_embeds: Tensor, position_ids: Tensor) -> Tensor:
@@ -382,6 +461,32 @@ def _run_qwen_next_container_layer(
     return runtime.container.norm(hidden_states)
 
 
+def _run_qwen3_5_moe_container_layer(
+    layer: nn.Module,
+    runtime: MTPRuntime,
+    input_embeds: Tensor,
+    hidden_states: Tensor,
+    position_ids: Tensor,
+    cp_group: dist.ProcessGroup | None,
+    cp_cu_seqlens: Tensor | None,
+) -> Tensor:
+    assert runtime.container is not None
+
+    _update_mtp_cp_state(cp_group, cp_cu_seqlens)
+    position_embeddings = _get_position_embeddings(runtime, hidden_states, position_ids)
+
+    input_embeds = runtime.container.pre_fc_norm_embedding(input_embeds)
+    hidden_states = runtime.container.pre_fc_norm_hidden(hidden_states)
+    hidden_states = runtime.container.fc(torch.cat([input_embeds, hidden_states], dim=-1))
+    hidden_states = layer(
+        hidden_states=hidden_states,
+        position_embeddings=position_embeddings,
+        cu_seqlens=runtime.attention_cu_seqlens,
+        max_seqlen=runtime.attention_max_seqlen,
+    )
+    return runtime.container.norm(hidden_states)
+
+
 def _run_nemotron_container(
     layer: nn.Module,
     runtime: MTPRuntime,
@@ -469,15 +574,11 @@ def compute_mtp_loss(
             mtp_batch.cp_cu_seqlens,
         )
 
-        logits = _apply_output_head(mtp_hidden_states, model)
-        token_loss = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            labels.reshape(-1),
-            reduction="none",
-        ).view_as(labels)
-        masked_loss_sum = token_loss[loss_mask].sum()
+        masked_loss_sum, masked_token_count = _compute_masked_mtp_loss_sum(
+            mtp_hidden_states, labels, loss_mask, model
+        )
         raw_loss_sum = raw_loss_sum + masked_loss_sum
-        raw_token_count = raw_token_count + loss_mask.sum(dtype=torch.long)
+        raw_token_count = raw_token_count + masked_token_count
         scaled_loss_sum = scaled_loss_sum + masked_loss_sum * layer_scale
     if raw_token_count.item() == 0:
         zero = hidden_states.new_zeros(())

@@ -7,9 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.cli.serve import run_api_server_worker_proc
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -285,22 +283,21 @@ async def custom_init_app_state(
     # Setup the regular app state first (in-place)
     await init_app_state(engine_client, state, args, supported_tasks)
 
-    # NOTE: Initialize the custom OpenAIServingChatWithTokens state here
-    # TODO: Here, we repeat some calls done in init_app_state to be able to
-    # correctly set up the OpenAIServingChatWithTokens state, which is a bit
-    # brittle, and could probably be made nicer
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
+    if "generate" not in supported_tasks:
+        state.openai_serving_chat_with_tokens = None
+        return
 
-    resolved_chat_template = load_chat_template(args.chat_template)
-
-    chat_kwargs = dict(
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-        trust_request_chat_template=args.trust_request_chat_template,
+    serving_render = state.openai_serving_render
+    serving_chat = OpenAIServingChatWithTokens(
+        engine_client,
+        state.openai_serving_models,
+        args.response_role,
+        openai_serving_render=serving_render,
+        request_logger=serving_render.request_logger,
+        chat_template=serving_render.chat_template,
+        chat_template_content_format=serving_render.chat_template_content_format,
+        default_chat_template_kwargs=serving_render.default_chat_template_kwargs,
+        trust_request_chat_template=serving_render.trust_request_chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
@@ -309,18 +306,11 @@ async def custom_init_app_state(
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
+        enable_log_deltas=args.enable_log_deltas,
     )
-    if hasattr(args, "log_error_stack"):
-        chat_kwargs["log_error_stack"] = args.log_error_stack
-
-    serving_chat = OpenAIServingChatWithTokens(
-        engine_client,
-        state.openai_serving_models,
-        args.response_role,
-        **chat_kwargs,
-    )
-    state.openai_serving_chat = serving_chat if "generate" in supported_tasks else None
-    state.openai_serving_chat_with_tokens = serving_chat if "generate" in supported_tasks else None
+    serving_chat.warmup()
+    state.openai_serving_chat = serving_chat
+    state.openai_serving_chat_with_tokens = serving_chat
 
 
 def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:

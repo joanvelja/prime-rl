@@ -130,7 +130,7 @@ def setup_optimizer(
             time.sleep(1)
         named_params = multi_run_manager.get_named_parameters_for_run(0)
 
-    optimizer = _create_optimizer(config, named_params, parallel_dims)
+    optimizer = _create_optimizer(config, named_params, parallel_dims, cpu_offload=cpu_offload)
 
     if cpu_offload:
         get_logger().info("Wrapping optimizer with CPUOffloadOptimizer for optimizer state CPU offloading")
@@ -144,6 +144,7 @@ def _create_optimizer(
     named_params: list[tuple[str, nn.Parameter]],
     parallel_dims: ParallelDims,
     lr: float | None = None,
+    cpu_offload: bool = False,
 ) -> Optimizer:
     """Create optimizer. If lr is None, uses config.lr."""
     if lr is None:
@@ -158,11 +159,16 @@ def _create_optimizer(
                 nesterov=config.nesterov,
             )
         case "adamw":
+            adamw_kwargs = {}
+            if cpu_offload:
+                # Avoid large `_foreach_*` temporaries during optimizer.step().
+                adamw_kwargs["foreach"] = False
             return AdamW(
                 params=[p for _, p in named_params],
                 lr=lr,
                 weight_decay=config.weight_decay,
                 betas=(config.betas1, config.betas2),
+                **adamw_kwargs,
             )
         case "muon":
             return _create_muon_optimizer(config, named_params, parallel_dims, lr)

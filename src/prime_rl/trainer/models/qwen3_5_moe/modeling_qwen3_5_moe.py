@@ -542,10 +542,10 @@ def _get_gated_attention(config: Qwen3_5MoeConfig) -> nn.Module:
 
 
 class Qwen3_5MoeDecoderLayer(GradientCheckpointingLayer):
-    def __init__(self, config: Qwen3_5MoeConfig, layer_idx: int):
+    def __init__(self, config: Qwen3_5MoeConfig, layer_idx: int, layer_type: str | None = None):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.layer_type = config.layer_types[layer_idx]
+        self.layer_type = config.layer_types[layer_idx] if layer_type is None else layer_type
 
         # Token mixer: either GatedDeltaNet or gated softmax attention
         if self.layer_type == "linear_attention":
@@ -676,12 +676,18 @@ class Qwen3_5MoePreTrainedModel(PreTrainedModelPrimeRL):
 
     @classmethod
     def convert_layer_to_hf(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        convert_tt_layer_to_hf(state_dict, layer_idx)
+        if layer_idx < 0:
+            convert_tt_to_hf_moe(state_dict)
+        else:
+            convert_tt_layer_to_hf(state_dict, layer_idx)
         return state_dict
 
     @classmethod
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
-        convert_hf_layer_to_tt(state_dict, layer_idx)
+        if layer_idx < 0:
+            convert_hf_to_tt_moe(state_dict)
+        else:
+            convert_hf_layer_to_tt(state_dict, layer_idx)
         return state_dict
 
 
@@ -745,6 +751,25 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
         return MoeModelOutputWithPast(last_hidden_state=hidden_states)
+
+
+class Qwen3_5MoeMultiTokenPredictor(nn.Module):
+    def __init__(self, config: Qwen3_5MoeConfig):
+        super().__init__()
+        self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 0)
+        self.embed_tokens = None
+        if getattr(config, "mtp_use_dedicated_embeddings", False):
+            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+        self.fc = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.layers = nn.ModuleList(
+            [
+                Qwen3_5MoeDecoderLayer(config, layer_idx, layer_type="full_attention")
+                for layer_idx in range(self.num_mtp_layers)
+            ]
+        )
+        self.norm = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_hidden = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_embedding = Qwen3_5MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
 # ---------------------------------------------------------------------------
@@ -854,13 +879,18 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
 
         if self._is_vlm:
             self.model = Qwen3_5MoeVLMModel(config)
-            text_config = config.text_config
+            text_config = self.model.language_model.config
             self._tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
         else:
             self.model = Qwen3_5MoeModel(config)
-            text_config = config
+            text_config = self.model.config
 
         self.vocab_size = text_config.vocab_size
+        self.mtp = (
+            Qwen3_5MoeMultiTokenPredictor(text_config)
+            if getattr(text_config, "mtp_num_hidden_layers", 0) > 0
+            else None
+        )
         self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
         self.post_init()
 
@@ -923,7 +953,10 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
         vlm = _has_vlm_keys(state_dict)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=True)
-        convert_tt_layer_to_hf(state_dict, layer_idx)
+        if layer_idx < 0:
+            convert_tt_to_hf_moe(state_dict)
+        else:
+            convert_tt_layer_to_hf(state_dict, layer_idx)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
@@ -933,7 +966,10 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
         vlm = _has_vlm_keys(state_dict)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=True)
-        convert_hf_layer_to_tt(state_dict, layer_idx)
+        if layer_idx < 0:
+            convert_hf_to_tt_moe(state_dict)
+        else:
+            convert_hf_layer_to_tt(state_dict, layer_idx)
         if vlm:
             _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
@@ -1020,5 +1056,6 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
 __all__ = [
     "Qwen3_5MoeForCausalLM",
     "Qwen3_5MoeModel",
+    "Qwen3_5MoeMultiTokenPredictor",
     "Qwen3_5MoePreTrainedModel",
 ]

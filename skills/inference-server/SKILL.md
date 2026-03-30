@@ -20,6 +20,31 @@ uv run inference --model.name Qwen/Qwen3-0.6B --model.max_model_len 2048 --model
 uv run inference @ path/to/config.toml --server.port 8001 --gpu-memory-utilization 0.5
 ```
 
+## MTP speculative decoding
+
+PrimeRL now has typed inference config for serving a model's built-in MTP head through vLLM speculative decoding.
+
+```toml
+# infer_mtp.toml
+[model]
+name = "Qwen/Qwen3.5-35B-A3B"
+
+[mtp]
+num_speculative_tokens = 1
+```
+
+```bash
+uv run inference @ infer_mtp.toml
+```
+
+This maps to vLLM's `speculative_config` with `method="mtp"`.
+
+Notes:
+
+- This is inference-only. Training-side MTP still uses the trainer's `[model.mtp]` config.
+- Do not set both `[mtp]` and `vllm_extra.speculative_config`; use one source of truth.
+- For RL runs, put the same `[mtp]` block under `[inference]` in the RL config so the spawned inference server uses MTP speculation.
+
 ## SLURM scheduling
 
 The inference entrypoint supports optional SLURM scheduling, following the same patterns as SFT and RL.

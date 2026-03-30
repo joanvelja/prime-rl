@@ -94,6 +94,21 @@ class ModelConfig(BaseModelConfig):
     ] = None
 
 
+class MTPInferenceConfig(BaseConfig):
+    """Serve a model's built-in MTP head with vLLM speculative decoding."""
+
+    num_speculative_tokens: Annotated[
+        int,
+        Field(
+            gt=0,
+            description=(
+                "Number of speculative tokens to propose per decode step using the model's built-in MTP draft head. "
+                "Passed to vLLM via `speculative_config.num_speculative_tokens` with `method='mtp'`."
+            ),
+        ),
+    ]
+
+
 class WeightBroadcastConfig(BaseConfig):
     """Configures weight broadcast settings."""
 
@@ -177,6 +192,16 @@ class InferenceConfig(BaseConfig):
 
     # The model configuration
     model: ModelConfig = Field(default_factory=ModelConfig)
+
+    mtp: Annotated[
+        MTPInferenceConfig | None,
+        Field(
+            description=(
+                "Built-in multi-token prediction (MTP) speculative decoding settings. "
+                "When set, prime-rl configures vLLM to use the served model's existing MTP head as its drafter."
+            ),
+        ),
+    ] = None
 
     # The parallel configuration
     parallel: ParallelConfig = ParallelConfig()
@@ -396,6 +421,12 @@ class InferenceConfig(BaseConfig):
             self.api_server_count = 1  # LoRA requires only one API server
         return self
 
+    @model_validator(mode="after")
+    def validate_mtp_config_source(self):
+        if self.mtp is not None and "speculative_config" in self.vllm_extra:
+            raise ValueError("Use `mtp` or `vllm_extra.speculative_config`, not both.")
+        return self
+
     def to_vllm(self) -> Namespace:
         """Convert InferenceConfig to vLLM-compatible Namespace."""
         namespace = Namespace()
@@ -443,5 +474,11 @@ class InferenceConfig(BaseConfig):
         if hasattr(namespace, "rope_scaling"):
             if namespace.rope_scaling is None:
                 delattr(namespace, "rope_scaling")
+
+        if self.mtp is not None:
+            namespace.speculative_config = {
+                "method": "mtp",
+                **self.mtp.model_dump(exclude_none=True),
+            }
 
         return namespace
