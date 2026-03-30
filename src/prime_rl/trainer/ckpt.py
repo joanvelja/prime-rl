@@ -32,6 +32,11 @@ from prime_rl.trainer.world import get_world
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import get_all_ckpt_steps, get_ckpt_dir, get_step_path, get_weights_dir
 
+DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
+
 
 def _try_rmtree(path: Path, logger) -> None:
     """Remove a directory tree, logging and skipping on failure."""
@@ -306,12 +311,13 @@ class WeightCheckpointManager:
             (step_path / "STABLE").touch()
 
     def get_run_adapter_state_dict(self) -> dict[str, Tensor]:
-        lora_state_dict = {
-            f"base_model.model.{key}": (value.full_tensor() if isinstance(value, DTensor) else value).to(
-                "cpu", non_blocking=False
-            )
-            for key, value in get_multi_run_manager().get_state_dict_for_run(0).items()
-        }
+        assert self.lora_config is not None, "LoRA config is required to get run adapter state dict"
+        save_dtype = DTYPE_MAP[self.lora_config.save_dtype]
+        lora_state_dict = {}
+        for key, value in get_multi_run_manager().get_state_dict_for_run(0).items():
+            tensor = value.full_tensor() if isinstance(value, DTensor) else value
+            tensor = tensor.to(device="cpu", dtype=save_dtype, non_blocking=False)
+            lora_state_dict[f"base_model.model.{key}"] = tensor
 
         if not lora_state_dict:
             raise ValueError("The LoRA state dict is empty. Something went wrong.")

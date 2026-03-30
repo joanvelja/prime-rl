@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
@@ -18,6 +19,11 @@ from prime_rl.trainer.weights import (
 )
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.utils import get_broadcast_dir, get_step_path
+
+_DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
 
 
 class FileSystemWeightBroadcast(WeightBroadcast):
@@ -60,11 +66,12 @@ class FileSystemWeightBroadcast(WeightBroadcast):
                 # For adapter-only, MultiRunManager creates state dict directly for each run
                 # All ranks must participate in DTensor gathering, but only master saves
                 state_dict = self.multi_run_manager.get_state_dict_for_run(idx)
+                save_dtype = _DTYPE_MAP[self.lora_config.save_dtype]
                 for key, value in state_dict.items():
                     if isinstance(value, DTensor):
                         value = value.full_tensor()
                     if self.world.is_master:
-                        state_dict[key] = value.to("cpu", non_blocking=False)
+                        state_dict[key] = value.to(device="cpu", dtype=save_dtype, non_blocking=False)
 
             # TODO: Broadcast ready to update in sync, then we dont need to gather on not ready
             if self.world.is_master:

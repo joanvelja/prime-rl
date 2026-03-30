@@ -95,13 +95,12 @@ class MultiLoRAPERFTE(MultiLoRAModule):
         return adapter_params, adapted_params
 
     def state_dict_for_adapter(self, idx: int) -> dict[str, torch.Tensor]:
-        """Get state dict for a specific adapter in per-expert format.
+        """Get state dict for a specific adapter as 3D tensors.
 
         Returns:
-            Dict with keys like "{expert_id}.lora_A.weight" and "{expert_id}.lora_B.weight".
+            Dict with keys "lora_A.weight" [num_experts, rank, dim]
+            and "lora_B.weight" [num_experts, dim, rank].
         """
-        state_dict = {}
-
         detached_a = self.lora_A[idx].detach()
         detached_b = self.lora_B[idx].detach()
 
@@ -109,11 +108,10 @@ class MultiLoRAPERFTE(MultiLoRAModule):
             detached_a = detached_a.full_tensor()
             detached_b = detached_b.full_tensor()
 
-        for expert_id in range(self.num_experts):
-            state_dict[f"{expert_id}.lora_A.weight"] = detached_a[expert_id].clone()
-            state_dict[f"{expert_id}.lora_B.weight"] = detached_b[expert_id].clone()
-
-        return state_dict
+        return {
+            "lora_A.weight": detached_a.clone(),
+            "lora_B.weight": detached_b.clone(),
+        }
 
     def forward(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         # Base MoE computation (EP handled by @expert_parallel decorator)

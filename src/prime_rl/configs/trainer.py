@@ -140,6 +140,13 @@ class LoRAConfig(BaseConfig):
         "experts",
     ]
 
+    save_dtype: Annotated[
+        Literal["bfloat16", "float32"],
+        Field(
+            description="Dtype to cast adapter weights to when saving.",
+        ),
+    ] = "bfloat16"
+
     modules_to_save: Annotated[
         list[str],
         Field(
