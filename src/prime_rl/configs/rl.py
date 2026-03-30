@@ -12,6 +12,9 @@ from prime_rl.configs.orchestrator import (
     FileSystemWeightBroadcastConfig as OrchestratorFileSystemWeightBroadcastConfig,
 )
 from prime_rl.configs.orchestrator import (
+    InferenceObservabilityConfig,
+)
+from prime_rl.configs.orchestrator import (
     NCCLWeightBroadcastConfig as OrchestratorNCCLWeightBroadcastConfig,
 )
 from prime_rl.configs.orchestrator import (
@@ -809,6 +812,28 @@ class RLConfig(BaseConfig):
             assert self.orchestrator.weight_broadcast.type == "nccl"
             self.orchestrator.weight_broadcast.inference_world_size = total_infer_gpus
 
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_inference_observability(self):
+        if self.inference is None or self.inference.deployment.type != "disaggregated":
+            return self
+        if self.deployment.type != "multi_node":
+            return self
+        if "inference_observability" in self.orchestrator.model_fields_set:
+            return self
+
+        infer_deploy = self.inference.deployment
+        self.orchestrator.inference_observability = InferenceObservabilityConfig(
+            num_infer_replicas=self.deployment.num_infer_replicas,
+            num_prefill_nodes_per_pod=infer_deploy.num_prefill_nodes,
+            num_decode_nodes_per_pod=infer_deploy.num_decode_nodes,
+            num_prefill_replicas_per_pod=getattr(infer_deploy, "num_prefill_replicas", 1),
+            num_decode_replicas_per_pod=getattr(infer_deploy, "num_decode_replicas", 1),
+            router_port=infer_deploy.router_port,
+            prefill_port=infer_deploy.prefill_port,
+            decode_port=infer_deploy.decode_port,
+        )
         return self
 
     @model_validator(mode="after")

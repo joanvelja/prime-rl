@@ -462,6 +462,39 @@ class CheckpointConfig(BaseConfig):
     ] = False
 
 
+class InferenceObservabilityConfig(BaseConfig):
+    """Configures inference metrics collection from the orchestrator."""
+
+    enabled: Annotated[
+        bool,
+        Field(
+            description="Whether to collect inference observability metrics and log them to configured monitors.",
+        ),
+    ] = True
+
+    source: Annotated[
+        Literal["deployment"],
+        Field(
+            description="Topology source for inference observability. Deployment means the RL launcher populates this from deployment settings.",
+        ),
+    ] = "deployment"
+
+    num_infer_replicas: Annotated[int, Field(ge=1, description="Number of inference pods/replicas.")] = 1
+    num_prefill_nodes_per_pod: Annotated[int, Field(ge=1, description="Number of prefill nodes per inference pod.")] = 1
+    num_decode_nodes_per_pod: Annotated[int, Field(ge=1, description="Number of decode nodes per inference pod.")] = 1
+    num_prefill_replicas_per_pod: Annotated[
+        int,
+        Field(ge=1, description="Number of independent prefill sub-replicas within each pod."),
+    ] = 1
+    num_decode_replicas_per_pod: Annotated[
+        int,
+        Field(ge=1, description="Number of independent decode sub-replicas within each pod."),
+    ] = 1
+    router_port: Annotated[int, Field(description="Router port for each inference pod.")] = 8000
+    prefill_port: Annotated[int, Field(description="Prefill backend port.")] = 8100
+    decode_port: Annotated[int, Field(description="Decode backend port.")] = 8200
+
+
 class BufferConfig(BaseConfig):
     """Configures the buffer for the orchestrator."""
 
@@ -765,6 +798,8 @@ class OrchestratorConfig(BaseConfig):
 
     # The prime monitor configuration
     prime_monitor: PrimeMonitorConfig | None = None
+
+    inference_observability: InferenceObservabilityConfig | None = None
 
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None

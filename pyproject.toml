@@ -27,6 +27,7 @@ dependencies = [
     "aiolimiter>=1.2.1",
     "tenacity>=8.2.0",
     "openai>=1.106.1",
+    "prometheus-client>=0.22.1",
     "rich>=14.0.0",
     "uvloop>=0.21.0",
     "torchtitan",
