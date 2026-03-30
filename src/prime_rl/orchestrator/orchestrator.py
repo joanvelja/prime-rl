@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
 
-from prime_rl.orchestrator.advantage import compute_advantages
+from prime_rl.orchestrator.advantage import compute_advantages_and_keep_mask
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, get_eval_sampling_args
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
@@ -533,7 +533,7 @@ async def orchestrate(config: OrchestratorConfig):
         # Await train rollouts
         await train_task
         generate_completions_time = scheduler.last_batch_generation_time
-        train_rollouts = train_task.result()
+        train_rollouts, selected_rollout_mask = train_task.result()
 
         # VLM: offload base64 images to disk immediately to free memory
         if is_vlm:
@@ -553,11 +553,12 @@ async def orchestrate(config: OrchestratorConfig):
         num_unique_examples = len(set(example_ids))
         rewards = [r["reward"] for r in train_rollouts]
         completion_lens = [get_completion_len(r) for r in train_rollouts]
-        advantages = compute_advantages(
-            rewards,
-            completion_lens,
-            config.rollouts_per_example,
-            config.advantage,
+        advantages, rollout_keep_mask = compute_advantages_and_keep_mask(
+            rewards=rewards,
+            completion_lengths=completion_lens,
+            samples_per_problem=config.rollouts_per_example,
+            advantage_config=config.advantage,
+            adv_filter=config.buffer.adv_filter,
         )
 
         # Convert rollouts to training samples
@@ -599,7 +600,9 @@ async def orchestrate(config: OrchestratorConfig):
         rollout_samples_per_rollout: list[int] = []
         num_prefill_tokens = 0
         num_decode_tokens = 0
-        for rollout, advantage, samples in zip(train_rollouts, advantages, results):
+        for rollout, advantage, selected_for_training, samples in zip(
+            train_rollouts, advantages, selected_rollout_mask, results
+        ):
             rollout_prefill_tokens = 0
             rollout_decode_tokens = 0
             if samples is not None:
@@ -611,7 +614,8 @@ async def orchestrate(config: OrchestratorConfig):
                     sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
                     rollout_decode_tokens += sample_decode_tokens
                     rollout_prefill_tokens += sample_prefill_tokens
-                    train_examples.append(sample)
+                    if selected_for_training:
+                        train_examples.append(sample)
             else:
                 rollout_samples_per_rollout.append(0)
             rollout_prefill_lens.append(rollout_prefill_tokens)
@@ -619,10 +623,16 @@ async def orchestrate(config: OrchestratorConfig):
             num_prefill_tokens += rollout_prefill_tokens
             num_decode_tokens += rollout_decode_tokens
 
+        num_filtered_rollouts = sum(not keep_rollout for keep_rollout in rollout_keep_mask)
         parallel_preprocess_time = time.perf_counter() - parallel_preprocess_start
         logger.debug(
             f"Converted {len(train_rollouts)} rollouts ({num_unique_examples} unique examples) "
-            f"to {len(train_examples)} training examples"
+            f"to {len(train_examples)} training examples ({sum(selected_rollout_mask)} selected rollouts)"
+            + (
+                ""
+                if config.buffer.adv_filter is None
+                else f" after filtering {num_filtered_rollouts} rollout(s) with advantage <= {config.buffer.adv_filter}"
+            )
         )
 
         # Compute teacher logprobs if teacher model is configured
@@ -659,6 +669,7 @@ async def orchestrate(config: OrchestratorConfig):
                 "example_id": [rollout["example_id"] for rollout in train_rollouts],
                 "task": [rollout["task"] for rollout in train_rollouts],
                 "reward": [rollout["reward"] for rollout in train_rollouts],
+                "passes_adv_filter": rollout_keep_mask,
                 "is_truncated": [rollout["is_truncated"] for rollout in train_rollouts],
                 "stop_condition": [rollout.get("stop_condition") for rollout in train_rollouts],
                 "seq_len": [get_seq_len(rollout) for rollout in train_rollouts],
@@ -755,6 +766,7 @@ async def orchestrate(config: OrchestratorConfig):
             "solve_none/all": solve_none,
             "solve_all/all": solve_all,
             "effective_batch_size/all": effective_batch_size,
+            "filtered_rollouts/all": num_filtered_rollouts / max(num_rollouts, 1),
             **{f"batch/{env}": r for env, r in results_df.task.value_counts(normalize=True).items()},
             # Time metrics
             "time/step": step_time,
@@ -795,6 +807,7 @@ async def orchestrate(config: OrchestratorConfig):
             to_log[f"reward/{env}/mean"] = env_by_example.reward.mean().mean()
             to_log[f"reward/{env}/max"] = env_by_example.reward.mean().max()
             to_log[f"reward/{env}/min"] = env_by_example.reward.mean().min()
+            to_log[f"filtered_rollouts/{env}"] = 1.0 - env_df.passes_adv_filter.mean()
             solve_none, solve_all, effective_batch_size = compute_solve_rates(env_df)
             to_log[f"solve_none/{env}"] = solve_none
             to_log[f"solve_all/{env}"] = solve_all

@@ -159,3 +159,28 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
 def test_selective_activation_checkpointing_requires_custom_impl():
     with pytest.raises(ValidationError, match="Selective activation checkpointing requires model.impl='custom'"):
         TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})
+
+
+def test_online_difficulty_filtering_sets_adv_filter():
+    with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
+        config = OrchestratorConfig.model_validate({"buffer": {"online_difficulty_filtering": True}})
+    assert config.buffer.adv_filter == 0.0
+
+
+def test_verification_disabled_rejects_adv_filter():
+    with pytest.raises(ValidationError, match="buffer.adv_filter"):
+        OrchestratorConfig.model_validate(
+            {
+                "verification": {"enabled": False},
+                "buffer": {"adv_filter": 0.0},
+            }
+        )
+
+
+def test_length_shaping_requires_adv_filter():
+    with pytest.raises(ValidationError, match="buffer.adv_filter"):
+        OrchestratorConfig.model_validate(
+            {
+                "advantage": {"length_shaping_alpha": 0.33},
+            }
+        )

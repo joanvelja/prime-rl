@@ -10,9 +10,10 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.orchestrator.advantage import compute_advantages_and_keep_mask
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.utils import get_sampling_args
-from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
+from prime_rl.orchestrator.vf_utils import get_completion_len, get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import ProgressTracker, get_logger
@@ -139,10 +140,27 @@ class Scheduler:
             return sum(get_seq_len(rollout) for rollout in rollouts)
         return len(rollouts)
 
-    def finalize_batch_rollouts(self, rollouts: list[vf.RolloutOutput]) -> list[vf.RolloutOutput]:
-        if self.batch_size is None:
-            return rollouts
-        return rollouts[: self.batch_size]
+    def select_rollouts(
+        self,
+        rollouts: list[vf.RolloutOutput],
+        remaining_batch_target: int,
+    ) -> tuple[list[bool], int]:
+        """Select rollouts that count toward the current batch target."""
+        _, keep_mask = compute_advantages_and_keep_mask(
+            rewards=[rollout["reward"] for rollout in rollouts],
+            completion_lengths=[get_completion_len(rollout) for rollout in rollouts],
+            samples_per_problem=self.rollouts_per_example,
+            advantage_config=self.config.advantage,
+            adv_filter=self.config.buffer.adv_filter,
+        )
+        selected_mask: list[bool] = []
+        batch_progress = 0
+        for rollout, keep in zip(rollouts, keep_mask):
+            selected = keep and batch_progress < remaining_batch_target
+            selected_mask.append(selected)
+            if selected:
+                batch_progress += self.get_batch_progress_increment([rollout])
+        return selected_mask, batch_progress
 
     def set_sampling_args(self, sampling_args: dict) -> None:
         """Update sampling args for future rollout requests."""
@@ -361,7 +379,7 @@ class Scheduler:
         await env_for_task.rubric.score_group(cast(list[vf.State], completed_rollouts))
         return completed_rollouts
 
-    async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
+    async def generate_batch(self, step: int) -> tuple[list[vf.RolloutOutput], list[bool]]:
         """Continuously generates a batch of rollouts."""
         self.step = step
 
@@ -383,6 +401,7 @@ class Scheduler:
         self.logger.debug("Starting to generate batch rollouts")
 
         batch_rollouts: list[vf.RolloutOutput] = []
+        selected_rollout_mask: list[bool] = []
         batch_progress = 0
         pbar = ProgressTracker(
             total=self.batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
@@ -453,18 +472,21 @@ class Scheduler:
 
                 self.buffer.update(completed_rollouts)
                 accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
+                selected_group_mask, progress_increment = self.select_rollouts(
+                    accepted_rollouts,
+                    remaining_batch_target=self.batch_target - batch_progress,
+                )
 
                 batch_rollouts.extend(accepted_rollouts)
-                progress_increment = self.get_batch_progress_increment(accepted_rollouts)
+                selected_rollout_mask.extend(selected_group_mask)
                 batch_progress += progress_increment
                 pbar.update(progress_increment)
 
         await self._fill_inflight_requests()
 
-        batch_rollouts = self.finalize_batch_rollouts(batch_rollouts)
         pbar.close()
         self.last_batch_generation_time = time.perf_counter() - batch_start_time
-        return batch_rollouts
+        return batch_rollouts, selected_rollout_mask
 
     async def stop(self) -> None:
         await self.cancel_inflight_rollouts()

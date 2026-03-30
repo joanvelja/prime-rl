@@ -108,17 +108,15 @@ def test_buffer_problem_pool_assignment(dummy_env_group, make_rollouts):
 
 
 def test_buffer_online_difficulty_filtering(dummy_env_group, make_rollouts):
-    """With online_difficulty_filtering=True, only partial reward rollouts are kept."""
+    """The legacy online_difficulty_filtering flag now maps to adv_filter=0.0."""
     dataset = dummy_env_group.get_dataset()
-    buffer = Buffer(
-        dataset,
-        dummy_env_group.env_names,
-        BufferConfig(online_difficulty_filtering=True),
-    )
+    with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
+        buffer = Buffer(dataset, dummy_env_group.env_names, BufferConfig(online_difficulty_filtering=True))
     buffer.update(make_rollouts(dataset.select(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
 
-    # Only 3 problems with reward 0.5 -> 6 rollouts kept
-    assert len(buffer.rollout_buffer) == 6
+    assert buffer.config.adv_filter == 0.0
+    # Buffer always keeps all rollouts; filtering now happens when sending to the trainer.
+    assert len(buffer.rollout_buffer) == 10
 
 
 def test_buffer_no_filtering_by_default(dummy_env_group, make_rollouts):
@@ -166,6 +164,14 @@ def test_buffer_env_ratios_validation():
 
     with pytest.raises(ValidationError, match="All env_ratios must be positive"):
         BufferConfig(env_ratios=[0.5, -0.3, 0.2])
+
+
+def test_online_difficulty_filtering_conflicts_with_nonzero_adv_filter():
+    from pydantic import ValidationError
+
+    with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
+        with pytest.raises(ValidationError, match="buffer.online_difficulty_filtering"):
+            BufferConfig(online_difficulty_filtering=True, adv_filter=0.5)
 
 
 def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):

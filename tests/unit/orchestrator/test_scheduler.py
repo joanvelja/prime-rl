@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from prime_rl.configs.orchestrator import DefaultAdvantageConfig
 from prime_rl.orchestrator.scheduler import InflightRolloutInfo, Scheduler
 from prime_rl.utils.async_utils import safe_cancel
 
@@ -30,6 +31,21 @@ def make_scheduler() -> Scheduler:
     scheduler.update_policy_task = None
     scheduler.enable_policy_updates = True
     return scheduler
+
+
+def make_rollout(reward: float, completion_len: int) -> dict:
+    return {
+        "reward": reward,
+        "trajectory": [
+            {
+                "tokens": {
+                    "prompt_ids": [0],
+                    "completion_ids": [1] * completion_len,
+                },
+                "response": None,
+            }
+        ],
+    }
 
 
 def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
@@ -159,3 +175,49 @@ def test_stop_cancels_inflight_policy_update_task():
         assert scheduler.inflight_policy_update_task is None
 
     asyncio.run(run())
+
+
+def test_select_rollouts_ignores_filtered_rollouts():
+    scheduler = make_scheduler()
+    scheduler.rollouts_per_example = 3
+    scheduler.batch_size = 2
+    scheduler.token_batch_size = None
+    scheduler.config = SimpleNamespace(
+        output_dir=Path("/tmp/prime-rl-test"),
+        advantage=DefaultAdvantageConfig(),
+        buffer=SimpleNamespace(adv_filter=0.0),
+    )
+
+    rollouts = [
+        make_rollout(reward=1.0, completion_len=4),
+        make_rollout(reward=0.5, completion_len=4),
+        make_rollout(reward=0.0, completion_len=4),
+    ]
+
+    selected_mask, batch_progress = scheduler.select_rollouts(rollouts, remaining_batch_target=1)
+
+    assert selected_mask == [True, False, False]
+    assert batch_progress == 1
+
+
+def test_select_rollouts_allows_final_overshoot():
+    scheduler = make_scheduler()
+    scheduler.rollouts_per_example = 3
+    scheduler.batch_size = None
+    scheduler.token_batch_size = 6
+    scheduler.config = SimpleNamespace(
+        output_dir=Path("/tmp/prime-rl-test"),
+        advantage=DefaultAdvantageConfig(),
+        buffer=SimpleNamespace(adv_filter=0.0),
+    )
+
+    rollouts = [
+        make_rollout(reward=0.0, completion_len=3),
+        make_rollout(reward=1.0, completion_len=4),
+        make_rollout(reward=0.6, completion_len=5),
+    ]
+
+    selected_mask, batch_progress = scheduler.select_rollouts(rollouts, remaining_batch_target=6)
+
+    assert selected_mask == [False, True, True]
+    assert batch_progress == 11

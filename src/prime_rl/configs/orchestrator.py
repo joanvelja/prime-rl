@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -514,10 +515,20 @@ class BufferConfig(BaseConfig):
         ),
     ] = 0.0
 
+    adv_filter: Annotated[
+        float | None,
+        Field(
+            description=(
+                "Only send rollouts with advantage greater than this threshold to training. "
+                "Rollouts are still kept for orchestrator logging. If None, no advantage-based filtering is applied."
+            ),
+        ),
+    ] = None
+
     online_difficulty_filtering: Annotated[
         bool,
         Field(
-            description="Whether to filter rollouts based on difficulty. If True, rollouts with average reward 0.0 or 1.0 are not added to the buffer.",
+            description="Deprecated alias for setting adv_filter=0.0.",
         ),
     ] = False
 
@@ -539,6 +550,30 @@ class BufferConfig(BaseConfig):
     def validate_env_ratios(self):
         if self.env_ratios is not None:
             assert all(ratio > 0 for ratio in self.env_ratios), "All env_ratios must be positive."
+        return self
+
+    @model_validator(mode="after")
+    def resolve_adv_filter(self):
+        if not self.online_difficulty_filtering:
+            return self
+
+        warnings.warn(
+            "buffer.online_difficulty_filtering is deprecated and will be removed in a future version. "
+            "Use buffer.adv_filter = 0.0 instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+
+        if self.adv_filter is None:
+            self.adv_filter = 0.0
+            return self
+
+        if self.adv_filter != 0.0:
+            raise ValueError(
+                "buffer.online_difficulty_filtering is a deprecated alias for buffer.adv_filter=0.0 and "
+                "cannot be combined with a different buffer.adv_filter value."
+            )
+
         return self
 
 
@@ -979,9 +1014,9 @@ class OrchestratorConfig(BaseConfig):
         if self.verification.enabled:
             return self
 
-        if self.buffer.online_difficulty_filtering:
+        if self.buffer.adv_filter is not None:
             raise ValueError(
-                "verification.enabled cannot be False when buffer.online_difficulty_filtering is True. "
+                "verification.enabled cannot be False when buffer.adv_filter is set. "
                 "These features depend on rewards which are disabled when verification.enabled=False."
             )
         if self.buffer.easy_threshold is not None:
@@ -997,10 +1032,10 @@ class OrchestratorConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def validate_length_shaping_requires_online_difficulty_filtering(self):
+    def validate_length_shaping_requires_adv_filter(self):
         if isinstance(self.advantage, DefaultAdvantageConfig) and self.advantage.length_shaping_alpha is not None:
-            if not self.buffer.online_difficulty_filtering:
-                raise ValueError("Group Relative Reward (GR³) scaling requires online difficulty filtering")
+            if self.buffer.adv_filter is None:
+                raise ValueError("Group Relative Reward (GR³) scaling requires buffer.adv_filter to be set")
         return self
 
     @model_validator(mode="after")
