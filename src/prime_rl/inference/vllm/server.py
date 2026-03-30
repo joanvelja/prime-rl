@@ -1,3 +1,4 @@
+import json
 from argparse import Namespace
 from http import HTTPStatus
 from typing import Any
@@ -349,6 +350,24 @@ def custom_build_app(args: Namespace, supported_tasks: tuple):
     return app
 
 
+def _merge_hf_overrides(existing: Any, new_values: dict[str, Any]) -> dict[str, Any]:
+    if existing in (None, "", {}):
+        return new_values.copy()
+
+    if isinstance(existing, str):
+        existing = json.loads(existing)
+
+    if not isinstance(existing, dict):
+        raise ValueError(f"Expected hf_overrides to be a dict or JSON object string, got {type(existing).__name__}.")
+
+    merged = existing.copy()
+    for key, value in new_values.items():
+        if key in merged and merged[key] != value:
+            raise ValueError(f"Conflicting hf_overrides value for {key!r}: {merged[key]!r} != {value!r}")
+        merged[key] = value
+    return merged
+
+
 # Also monkey patch run_api_server_worker_proc for multi-api-server mode
 # This is needed because worker processes spawned by run_multi_api_server
 # re-import modules and would otherwise use the original run_server_worker
@@ -367,6 +386,8 @@ def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
     namespace = config.to_vllm()
     if vllm_extra:
         for key, value in vllm_extra.items():
+            if key == "hf_overrides":
+                value = _merge_hf_overrides(getattr(namespace, "hf_overrides", None), value)
             setattr(namespace, key, value)
 
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")

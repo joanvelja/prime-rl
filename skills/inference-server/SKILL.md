@@ -9,6 +9,8 @@ description: Start and test the prime-rl inference server. Use when asked to run
 
 Always use the `inference` entry point — never `vllm serve` or `python -m vllm.entrypoints.openai.api_server` directly. The entry point runs `setup_vllm_env()` which configures environment variables (LoRA, multiprocessing) before vLLM is imported.
 
+On shared clusters, prefer node-local vLLM caches. Prime RL now defaults `VLLM_CACHE_ROOT`, `DG_JIT_CACHE_DIR`, and `TRITON_CACHE_DIR` under `/tmp` and sets `VLLM_DEEP_GEMM_WARMUP=skip` to avoid long warmups and shared-home cache failures during SLURM launches.
+
 ```bash
 # With a TOML config
 uv run inference @ path/to/config.toml
@@ -77,6 +79,12 @@ Add `dry_run = true` to generate the sbatch script without submitting:
 ```bash
 uv run inference @ config.toml --dry-run true
 ```
+
+### Cluster startup notes
+
+- If an inference job spends a long time before `/health` comes up, check for DeepGEMM warmup and Triton cache writes in the SLURM logs.
+- If you must override the defaults, keep `VLLM_CACHE_ROOT`, `DG_JIT_CACHE_DIR`, and `TRITON_CACHE_DIR` on node-local storage, not on a flaky shared home directory.
+- For current vLLM builds in this repo, `VLLM_DEEP_GEMM_WARMUP=skip` is the safe default for RL inference startup.
 
 ## Custom endpoints
 

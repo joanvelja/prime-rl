@@ -1,0 +1,54 @@
+max_steps = 100
+seq_len = 32768
+bench = true
+max_async_level = 1
+
+[log]
+level = "debug"
+
+[wandb]
+project = "GLM5-fake"
+name = "glm5-8node-fake"
+
+[model]
+name = "zai-org/GLM-5"
+
+[deployment]
+type = "multi_node"
+num_train_nodes = 8
+num_infer_nodes = 0
+gpus_per_node = 8
+
+[slurm]
+job_name = "glm5-8node-fake"
+partition = "cluster"
+exclude = "ltc-idc3-hgx8-h200-65,ltc-idc3-hgx8-h200-62"
+
+[trainer]
+dist_timeout_seconds = 7200
+
+[trainer.model]
+impl = "custom"
+attn = "flash_attention_2"
+fused_lm_head_token_chunk_size = 2048
+ep = 16
+optim_cpu_offload = true
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.model.compile]
+
+[trainer.model.ac_offloading]
+max_inflight_activations = 1
+
+[trainer.model.debug]
+random_init = true
+
+[trainer.optim]
+type = "adamw"
+lr = 1e-6
+weight_decay = 0.1
+
+
+[orchestrator]

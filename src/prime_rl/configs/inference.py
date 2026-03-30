@@ -396,6 +396,13 @@ class InferenceConfig(BaseConfig):
             self.api_server_count = 1  # LoRA requires only one API server
         return self
 
+    @model_validator(mode="after")
+    def validate_index_cache_support(self):
+        if self.model.index_cache is not None and self.model.index_cache.enabled:
+            if self.model.name != "zai-org/GLM-5-FP8":
+                raise ValueError("model.index_cache is only supported with model.name='zai-org/GLM-5-FP8'.")
+        return self
+
     def to_vllm(self) -> Namespace:
         """Convert InferenceConfig to vLLM-compatible Namespace."""
         namespace = Namespace()
@@ -443,5 +450,8 @@ class InferenceConfig(BaseConfig):
         if hasattr(namespace, "rope_scaling"):
             if namespace.rope_scaling is None:
                 delattr(namespace, "rope_scaling")
+
+        if self.model.index_cache is not None and self.model.index_cache.enabled:
+            namespace.hf_overrides = {"index_topk_freq": self.model.index_cache.freq}
 
         return namespace

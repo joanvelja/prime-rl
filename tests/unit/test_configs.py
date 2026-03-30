@@ -159,3 +159,20 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
 def test_selective_activation_checkpointing_requires_custom_impl():
     with pytest.raises(ValidationError, match="Selective activation checkpointing requires model.impl='custom'"):
         TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})
+
+
+def test_trainer_index_cache_requires_custom_impl():
+    with pytest.raises(ValidationError, match="trainer.model.index_cache requires model.impl='custom' or 'auto'"):
+        TrainerModelConfig.model_validate({"impl": "hf", "index_cache": {"freq": 2}})
+
+
+def test_inference_index_cache_requires_glm5_fp8():
+    with pytest.raises(ValidationError, match="model.index_cache is only supported with model.name='zai-org/GLM-5-FP8'"):
+        InferenceConfig.model_validate({"model": {"name": "zai-org/GLM-5", "index_cache": {"freq": 2}}})
+
+
+def test_inference_index_cache_sets_hf_overrides():
+    config = InferenceConfig.model_validate({"model": {"name": "zai-org/GLM-5-FP8", "index_cache": {"freq": 4}}})
+    namespace = config.to_vllm()
+
+    assert namespace.hf_overrides == {"index_topk_freq": 4}

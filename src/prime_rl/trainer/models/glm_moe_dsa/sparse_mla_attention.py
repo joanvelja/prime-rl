@@ -30,6 +30,8 @@ class SparseMlaAttentionArgs:
     index_n_heads: int
     index_head_dim: int
     index_topk: int
+    skip_topk: bool
+    next_skip_topk: bool
 
 
 class _SparseMLA(torch.autograd.Function):
@@ -127,6 +129,8 @@ class GlmMoeDsaAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, args.hidden_size, bias=args.attention_bias)
         self.indexer = Indexer(args)
         self.scaling = self.qk_head_dim ** (-0.5)
+        self.skip_topk = args.skip_topk
+        self.next_skip_topk = args.next_skip_topk
 
     def _mla_latents(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q_latent = self.q_a_layernorm(self.q_a_proj(hidden_states))
@@ -173,14 +177,20 @@ class GlmMoeDsaAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         ks: torch.Tensor | None = None,
         ke: torch.Tensor | None = None,
+        prev_topk_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         batch_size, total_tokens, _ = hidden_states.shape
 
         q_latent, k_compressed_normed, k_rope = self._mla_latents(hidden_states)
 
-        indices = self.indexer.compute_sparse_indices(
-            hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
-        )
+        if self.skip_topk:
+            if prev_topk_indices is None:
+                raise ValueError("Index cache expected cached sparse indices from a previous full layer.")
+            indices = prev_topk_indices
+        else:
+            indices = self.indexer.compute_sparse_indices(
+                hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
+            )
 
         sparse_q, sparse_kv, w_v = self._mla_up_proj(
             q_latent,
@@ -193,4 +203,5 @@ class GlmMoeDsaAttention(nn.Module):
         out = self._mla_unabsorb(out, w_v)
 
         out = out.reshape(batch_size, total_tokens, -1)
-        return self.o_proj(out), None
+        next_topk_indices = indices if self.next_skip_topk else None
+        return self.o_proj(out), next_topk_indices

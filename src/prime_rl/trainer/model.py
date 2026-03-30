@@ -224,6 +224,12 @@ def get_model(
     if getattr(model_config, "model_type", "").startswith("qwen3_5_moe"):
         _patch_qwen3_5_text_position_ids()
         _patch_qwen3_5_moe_conversion_mapping()
+
+    if config.index_cache is not None and config.index_cache.enabled:
+        if getattr(model_config, "model_type", None) != "glm_moe_dsa":
+            raise ValueError("trainer.model.index_cache requires a GLM-5 / glm_moe_dsa model.")
+        model_config.index_topk_freq = config.index_cache.freq
+
     for subconfig_key in getattr(model_config, "sub_configs", {}):
         subconfig = getattr(model_config, subconfig_key, None)
         if subconfig is not None and hasattr(subconfig, "use_cache"):

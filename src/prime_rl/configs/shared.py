@@ -77,6 +77,25 @@ class SlurmConfig(BaseConfig):
         return self
 
 
+class IndexCacheConfig(BaseConfig):
+    """Configures uniform cross-layer sparse index reuse."""
+
+    freq: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Keep the sparse indexer on every `freq`-th layer and reuse its selected indices on intervening "
+                "layers. `1` disables index cache, `2` keeps every other layer, `4` keeps one quarter."
+            ),
+        ),
+    ] = 1
+
+    @property
+    def enabled(self) -> bool:
+        return self.freq > 1
+
+
 ServerType = Literal["vllm", "openai"]
 
 
@@ -119,6 +138,15 @@ class BaseModelConfig(BaseConfig):
         "VLMConfig | None",
         Field(
             description="VLM configuration. Set this to enable vision-language model support.",
+        ),
+    ] = None
+
+    index_cache: Annotated[
+        IndexCacheConfig | None,
+        Field(
+            description=(
+                "Uniform sparse index cache configuration. Currently intended for GLM-5 / GLM-5-FP8 DSA models."
+            ),
         ),
     ] = None
 

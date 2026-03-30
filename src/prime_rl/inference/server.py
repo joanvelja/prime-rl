@@ -1,4 +1,6 @@
+import getpass
 import os
+import tempfile
 
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
@@ -9,6 +11,18 @@ def setup_vllm_env(config: InferenceConfig):
 
     # spawn is more robust in vLLM nightlies and Qwen3-VL (fork can deadlock with multithreaded processes)
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    cache_root = os.environ.get("VLLM_CACHE_ROOT")
+    if not cache_root:
+        cache_dir = f".vllm_cache_{getpass.getuser()}"
+        if job_id := os.environ.get("SLURM_JOB_ID"):
+            cache_dir = f"{cache_dir}_{job_id}"
+        cache_root = os.path.join(tempfile.gettempdir(), cache_dir)
+        os.environ["VLLM_CACHE_ROOT"] = cache_root
+
+    os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(cache_root, "deep_gemm"))
+    os.environ.setdefault("TRITON_CACHE_DIR", os.path.join(cache_root, "triton"))
+    os.environ.setdefault("VLLM_DEEP_GEMM_WARMUP", "skip")
 
     if config.enable_lora:
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"

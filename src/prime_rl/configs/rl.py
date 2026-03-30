@@ -18,6 +18,7 @@ from prime_rl.configs.orchestrator import (
     OrchestratorConfig,
 )
 from prime_rl.configs.shared import (
+    IndexCacheConfig,
     SlurmConfig,
     VLMConfig,
     WandbConfig,
@@ -131,6 +132,11 @@ class SharedModelConfig(BaseConfig):
     vlm: Annotated[
         "VLMConfig | None",
         Field(description="VLM configuration. Set to enable vision-language model support."),
+    ] = None
+
+    index_cache: Annotated[
+        IndexCacheConfig | None,
+        Field(description="Shared uniform sparse index cache configuration."),
     ] = None
 
 
@@ -543,8 +549,21 @@ class RLConfig(BaseConfig):
                 if self.inference is not None:
                     self.inference.model.vlm = self.model.vlm
 
+            if self.model.index_cache is not None:
+                if "index_cache" not in self.trainer.model.model_fields_set:
+                    self.trainer.model.index_cache = self.model.index_cache
+                if self.inference is not None and "index_cache" not in self.inference.model.model_fields_set:
+                    self.inference.model.index_cache = self.model.index_cache
+
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_index_cache_support(self):
+        if self.inference is not None and self.inference.model.index_cache is not None:
+            if self.inference.model.index_cache.enabled and self.inference.model.name != "zai-org/GLM-5-FP8":
+                raise ValueError("inference.model.index_cache is only supported with inference.model.name='zai-org/GLM-5-FP8'.")
         return self
 
     @model_validator(mode="after")

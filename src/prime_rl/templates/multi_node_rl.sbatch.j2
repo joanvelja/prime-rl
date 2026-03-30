@@ -67,6 +67,9 @@ rm -rf $OUTPUT_DIR/rollouts
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
+export VLLM_CACHE_ROOT=/tmp/.vllm_cache_$(whoami)_${SLURM_JOB_ID}
+export DG_JIT_CACHE_DIR=$VLLM_CACHE_ROOT/deep_gemm
+export TRITON_CACHE_DIR=$VLLM_CACHE_ROOT/triton
 
 {% if wandb_shared -%}
 export WANDB_SHARED_MODE=1
@@ -174,6 +177,10 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
     export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
     INFER_NODE_RANK=$SLURM_PROCID
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    export VLLM_DEEP_GEMM_WARMUP=${VLLM_DEEP_GEMM_WARMUP:-skip}
+{%- if use_deep_gemm %}
+    export VLLM_USE_DEEP_GEMM=1
+{%- endif %}
     LOCAL_IP=$(hostname -I | awk "{print \$1}")
 
     REPLICA_IDX=$((INFER_NODE_RANK / NODES_PER_INFER_REPLICA))
@@ -186,9 +193,6 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
 {% if is_disaggregated -%}
     # PD disaggregated: NIXL KV transfer + role-based inference
     read -ra HOSTNAMES <<< "$HOSTNAMES_STR"
-{%- if use_deep_gemm %}
-    export VLLM_USE_DEEP_GEMM=1
-{%- endif %}
 
     export GLOO_SOCKET_IFNAME=bond0
     export VLLM_ENGINE_READY_TIMEOUT_S=4200
@@ -286,9 +290,9 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         INFER_DP_START_RANK=$((RANK_IN_REPLICA * INFERENCE_DP_LOCAL))
 
         if [ "$RANK_IN_REPLICA" -eq 0 ]; then
-            VLLM_EXTRA="{\"data_parallel_address\": \"$LOCAL_IP\"}"
+            VLLM_EXTRA="{\"data_parallel_address\": \"$LOCAL_IP\", \"data_parallel_hybrid_lb\": true}"
         else
-            VLLM_EXTRA="{\"data_parallel_address\": \"$REPLICA_HEAD_HOST\", \"data_parallel_start_rank\": $INFER_DP_START_RANK}"
+            VLLM_EXTRA="{\"data_parallel_address\": \"$REPLICA_HEAD_HOST\", \"data_parallel_start_rank\": $INFER_DP_START_RANK, \"data_parallel_hybrid_lb\": true}"
         fi
 
         uv run inference \

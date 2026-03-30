@@ -347,6 +347,12 @@ class ModelConfig(BaseModelConfig):
             raise ValueError("Flash attention 4 is only supported with the custom implementation")
         return self
 
+    @model_validator(mode="after")
+    def index_cache_requires_custom_impl(self):
+        if self.index_cache is not None and self.index_cache.enabled and self.impl == "hf":
+            raise ValueError("trainer.model.index_cache requires model.impl='custom' or 'auto'")
+        return self
+
 
 class TokenizerConfig(BaseConfig):
     """Configuration for the tokenizer."""
