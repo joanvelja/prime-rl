@@ -27,7 +27,11 @@ export GPUS_PER_NODE={{ gpus_per_node }}
 {% if disaggregated -%}
 export NUM_PREFILL_NODES={{ num_prefill_nodes }}
 export NUM_DECODE_NODES={{ num_decode_nodes }}
+export NUM_PREFILL_REPLICAS={{ num_prefill_replicas }}
+export NUM_DECODE_REPLICAS={{ num_decode_replicas }}
 export NODES_PER_REPLICA=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+export NODES_PER_PREFILL_REPLICA=$((NUM_PREFILL_NODES / NUM_PREFILL_REPLICAS))
+export NODES_PER_DECODE_REPLICA=$((NUM_DECODE_NODES / NUM_DECODE_REPLICAS))
 export PREFILL_PORT={{ prefill_port }}
 export DECODE_PORT={{ decode_port }}
 export ROUTER_PORT={{ router_port }}
@@ -142,19 +146,24 @@ srun bash -c '
     KV_CFG='"'"'{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"num_threads":1}}'"'"'
     DECODE_COMPILE_CFG='"'"'{"cudagraph_mode":"FULL_DECODE_ONLY"}'"'"'
 
-    # Determine replica and role
+    # Determine outer replica (P/D pair) and role
     REPLICA_IDX=$((INFER_NODE_RANK / NODES_PER_REPLICA))
     RANK_IN_REPLICA=$((INFER_NODE_RANK % NODES_PER_REPLICA))
+    REPLICA_BASE=$((REPLICA_IDX * NODES_PER_REPLICA))
 
     if [ "$RANK_IN_REPLICA" -lt "$NUM_PREFILL_NODES" ]; then
         # ── Prefill node ──
         ROLE="prefill"
-        ROLE_RANK=$RANK_IN_REPLICA
-        EP=$((NUM_PREFILL_NODES * GPUS_PER_NODE))
+        SUB_REPLICA=$((RANK_IN_REPLICA / NODES_PER_PREFILL_REPLICA))
+        ROLE_RANK=$((RANK_IN_REPLICA % NODES_PER_PREFILL_REPLICA))
+        EP=$((NODES_PER_PREFILL_REPLICA * GPUS_PER_NODE))
         PORT=$PREFILL_PORT
         START_RANK=$((ROLE_RANK * GPUS_PER_NODE))
-        HEAD_HOST="${HOSTNAMES[$((REPLICA_IDX * NODES_PER_REPLICA))]}"
+        HEAD_HOST="${HOSTNAMES[$((REPLICA_BASE + SUB_REPLICA * NODES_PER_PREFILL_REPLICA))]}"
 
+{% for key, value in prefill_env_overrides.items() %}
+        export {{ key }}="{{ value }}"
+{% endfor %}
         ROLE_EXTRA="\"all2all_backend\": \"deepep_high_throughput\""
 
         if [ "$ROLE_RANK" -eq 0 ]; then
@@ -166,12 +175,17 @@ srun bash -c '
         # ── Decode node ──
         export UCX_NET_DEVICES=mlx5_0:1
         ROLE="decode"
-        ROLE_RANK=$((RANK_IN_REPLICA - NUM_PREFILL_NODES))
-        EP=$((NUM_DECODE_NODES * GPUS_PER_NODE))
+        RANK_IN_DECODE=$((RANK_IN_REPLICA - NUM_PREFILL_NODES))
+        SUB_REPLICA=$((RANK_IN_DECODE / NODES_PER_DECODE_REPLICA))
+        ROLE_RANK=$((RANK_IN_DECODE % NODES_PER_DECODE_REPLICA))
+        EP=$((NODES_PER_DECODE_REPLICA * GPUS_PER_NODE))
         PORT=$DECODE_PORT
         START_RANK=$((ROLE_RANK * GPUS_PER_NODE))
-        HEAD_HOST="${HOSTNAMES[$((REPLICA_IDX * NODES_PER_REPLICA + NUM_PREFILL_NODES))]}"
+        HEAD_HOST="${HOSTNAMES[$((REPLICA_BASE + NUM_PREFILL_NODES + SUB_REPLICA * NODES_PER_DECODE_REPLICA))]}"
 
+{% for key, value in decode_env_overrides.items() %}
+        export {{ key }}="{{ value }}"
+{% endfor %}
         ROLE_EXTRA="\"all2all_backend\": \"deepep_low_latency\", \"compilation_config\": $DECODE_COMPILE_CFG"
 
         if [ "$ROLE_RANK" -eq 0 ]; then
@@ -181,7 +195,7 @@ srun bash -c '
         fi
     fi
 
-    echo "NODE_RANK=$INFER_NODE_RANK ROLE=$ROLE REPLICA=$REPLICA_IDX ROLE_RANK=$ROLE_RANK EP=$EP PORT=$PORT LOCAL_IP=$LOCAL_IP" \
+    echo "NODE_RANK=$INFER_NODE_RANK ROLE=$ROLE REPLICA=$REPLICA_IDX SUB_REPLICA=$SUB_REPLICA ROLE_RANK=$ROLE_RANK EP=$EP PORT=$PORT LOCAL_IP=$LOCAL_IP" \
         | tee $OUTPUT_DIR/slurm/latest_infer_node_rank_${INFER_NODE_RANK}.log \
               $OUTPUT_DIR/slurm/job_${SLURM_JOB_ID}_infer_node_rank_${INFER_NODE_RANK}.log
 
