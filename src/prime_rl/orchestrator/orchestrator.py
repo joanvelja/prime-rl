@@ -77,16 +77,6 @@ from prime_rl.utils.utils import (
 )
 
 
-def _select_rollouts_for_sample_logging(train_rollouts: list[vf.RolloutOutput]) -> list[vf.RolloutOutput]:
-    """Return the full rollout batch for monitor sample logging.
-
-    Monitor-level configs such as ``prime_monitor.log_extras.sample_ratio`` are
-    responsible for any sampling. Hard-capping the batch here prevents the
-    platform from ever showing all rollouts for a step.
-    """
-    return train_rollouts
-
-
 @clean_exit
 async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
@@ -833,10 +823,7 @@ async def orchestrate(config: OrchestratorConfig):
         monitor.log(to_log, step=progress.step)
 
         # Log samples to monitor(s) if enabled.
-        monitor.log_samples(
-            _select_rollouts_for_sample_logging(train_rollouts),
-            step=progress.step,
-        )
+        monitor.log_samples(train_rollouts, step=progress.step)
 
         # Log distributions (rewards, advantages) if enabled
         monitor.log_distributions(

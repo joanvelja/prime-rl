@@ -19,8 +19,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from prime_rl.configs.shared import PrimeMonitorConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.monitor.base import Monitor
-from prime_rl.utils.monitor.sampling import sample_rollouts_for_logging
+from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
 
 
 def _json(val: Any) -> str:
@@ -257,7 +256,7 @@ class PrimeMonitor(Monitor):
         ):
             return
 
-        rollouts = sample_rollouts_for_logging(
+        rollouts = sample_items_for_logging(
             rollouts,
             self.config.log_extras.sample_ratio,
         )
