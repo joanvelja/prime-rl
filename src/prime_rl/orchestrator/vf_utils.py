@@ -207,6 +207,10 @@ async def generate(
     finally:
         pbar.close()
 
+    failed_groups = sum(1 for g in group_outputs_list if g is None)
+    if failed_groups:
+        get_logger().warning(f"{failed_groups}/{len(group_outputs_list)} groups failed")
+
     return [output for group_outputs in group_outputs_list if group_outputs is not None for output in group_outputs]
 
 
@@ -229,7 +233,7 @@ async def evaluate(
 
     """
     inputs = env._get_eval_inputs(num_examples, rollouts_per_example)
-    outputs = await generate(
+    return await generate(
         env=env,
         clients=clients,
         get_client=get_client,
@@ -244,7 +248,6 @@ async def evaluate(
         max_retries=max_retries,
         state_columns=state_columns,
     )
-    return outputs
 
 
 # TODO: remove once usage is tracked by verifiers
