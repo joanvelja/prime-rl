@@ -242,7 +242,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
         vllm-router \
-            --policy round_robin \
+            --policy consistent_hash \
             --vllm-pd-disaggregation \
             $REPLICA_ROUTER_ARGS \
             --host 0.0.0.0 \
@@ -270,7 +270,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
         vllm-router \
-            --policy round_robin \
+            --policy consistent_hash \
             --worker-urls $REPLICA_ROUTER_ARGS \
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
