@@ -109,6 +109,18 @@ class CPUOffloadOptimizer:
         return self.optimizer
 
 
+def reset_optimizer_state(optimizer: Optimizer | CPUOffloadOptimizer) -> None:
+    """Clear all optimizer state (momentum, variance buffers) to free memory.
+
+    The optimizer will lazily re-initialize fresh state on the next step.
+    """
+    if isinstance(optimizer, CPUOffloadOptimizer):
+        optimizer.optimizer.state.clear()
+        optimizer._initialized = False
+    else:
+        optimizer.state.clear()
+
+
 def setup_optimizer(
     config: OptimizerConfig,
     named_params: list[tuple[str, nn.Parameter]],

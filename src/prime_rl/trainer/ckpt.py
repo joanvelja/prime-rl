@@ -116,9 +116,10 @@ class AppState(Stateful):
 class CheckpointManager:
     """Utility class to save and load trainer checkpoints to resume SFT and RL training."""
 
-    def __init__(self, output_dir: Path, config: CheckpointConfig):
+    def __init__(self, output_dir: Path, config: CheckpointConfig, save_optimizer: bool = True):
         self.config = config
-        self.skip_optimizer = config.skip_optimizer
+        self.skip_optimizer = config.skip_optimizer or not save_optimizer
+        self.save_optimizer = save_optimizer
         self.ckpt_dir = get_ckpt_dir(output_dir)
         self.logger = get_logger()
         self.world = get_world()
@@ -153,7 +154,7 @@ class CheckpointManager:
         start_time = time.perf_counter()
 
         # Create checkpoint state
-        state_dict = {"app": AppState(model, optimizers, scheduler, progress)}
+        state_dict = {"app": AppState(model, optimizers if self.save_optimizer else [], scheduler, progress)}
 
         # Checkpoint the local dataloader
         if dataloader is not None:
@@ -455,12 +456,15 @@ class WeightCheckpointManager:
 
 
 def setup_ckpt_managers(
-    output_dir: Path, ckpt_config: CheckpointConfig | None, lora_config: LoRAConfig | None = None
+    output_dir: Path,
+    ckpt_config: CheckpointConfig | None,
+    lora_config: LoRAConfig | None = None,
+    save_optimizer: bool = True,
 ) -> tuple[CheckpointManager | None, WeightCheckpointManager | None]:
     if ckpt_config is None:
         return None, None
     ckpt_output_dir = ckpt_config.output_dir or output_dir
-    ckpt_manager = CheckpointManager(ckpt_output_dir, ckpt_config)
+    ckpt_manager = CheckpointManager(ckpt_output_dir, ckpt_config, save_optimizer=save_optimizer)
     if ckpt_config.weights and not ckpt_config.skip_gather_master_weights:
         weight_ckpt_manager = WeightCheckpointManager(
             ckpt_output_dir,

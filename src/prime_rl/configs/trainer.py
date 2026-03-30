@@ -418,6 +418,22 @@ class BaseOptimizerConfig(BaseModel):
     lr: Annotated[float, Field(ge=0)] = 1e-6
     weight_decay: Annotated[float, Field(ge=0)] = 0.01
     max_norm: Annotated[float, Field(ge=0, description="Maximum gradient norm to clip.")] = 1.0
+    save_state: Annotated[
+        bool,
+        Field(
+            description="Whether to save optimizer state (e.g. momentum, variance) in checkpoints. "
+            "When False, checkpoints are smaller and faster to write, but the optimizer re-initializes from scratch on resume.",
+        ),
+    ] = True
+    reset_interval: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description="Reset optimizer state (momentum, variance) every N steps. "
+            "Frees GPU memory and keeps the optimizer on-policy by discarding stale momentum. "
+            "The optimizer lazily re-initializes fresh state on the next step.",
+        ),
+    ] = None
 
 
 class SGDConfig(BaseOptimizerConfig):
