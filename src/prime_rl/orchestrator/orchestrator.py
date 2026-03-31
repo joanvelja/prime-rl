@@ -82,7 +82,6 @@ async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
     logger = setup_logger(
         config.log.level,
-        log_file=config.output_dir / "logs" / "orchestrator.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
     intercept_vf_logging(logger="verifiers.serve", level=config.log.vf_level)  # show logs from env clients

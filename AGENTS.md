@@ -44,5 +44,10 @@ Write tests as plain functions with pytest fixtures. Don't use class-based tests
 
 ## Git
 
-Branch prefixes: `feat/`, `fix/`, `chore/`
+- **Branch prefixes**: use the following prefixes for branches: `feat/`, `fix/`, `chore/`
+
+## GitHub
+
+- **Draft PRs**: always create PRs as drafts (`gh pr create --draft`) to avoid triggering CI unnecessarily.
+- **Pull requests**: do not include a "test plan" section in PR descriptions unless you actually ran tests to verify the changes or the user explicitly asked for one.
 
