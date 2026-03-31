@@ -143,11 +143,14 @@ async def orchestrate(config: OrchestratorConfig):
     tokenizer = AutoTokenizer.from_pretrained(config.model.name, trust_remote_code=config.model.trust_remote_code)
 
     processor = None
+    image_token_id = None
     if is_vlm:
         logger.info(f"Loading VLM processor for {config.model.name}")
         processor = AutoProcessor.from_pretrained(
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
+        image_pad_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        image_token_id = image_pad_id if isinstance(image_pad_id, int) else None
 
     # Setup monitor
     logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
@@ -587,13 +590,19 @@ async def orchestrate(config: OrchestratorConfig):
                 num_total_samples += len(samples)
                 rollout_samples_per_rollout.append(len(samples))
                 for sample in samples:
-                    # Multimodal samples that exceed seq_len cannot be truncated
-                    # (truncation would break pixel_values/token alignment). Skip them here
-                    # so they never get serialized and transported to the trainer.
-                    sample_len = len(sample.prompt_ids) + len(sample.completion_ids)
-                    if sample_len > config.seq_len and sample.pixel_values is not None:
-                        num_skipped_vlm_truncation += 1
-                        continue
+                    # Multimodal samples where image tokens were truncated cannot be trained:
+                    # the pixel_values expect a specific number of image_pad tokens and any
+                    # mismatch crashes the vision encoder. This happens when vLLM truncates
+                    # the prompt to fit max_model_len. Skip these before sending to the trainer.
+                    if sample.pixel_values is not None and sample.image_grid_thw and image_token_id is not None:
+                        expected_image_tokens = sum(
+                            t * ((h + 1) // 2) * ((w + 1) // 2) for t, h, w in sample.image_grid_thw
+                        )
+                        all_ids = sample.prompt_ids + sample.completion_ids
+                        actual_image_tokens = sum(1 for tid in all_ids if tid == image_token_id)
+                        if actual_image_tokens != expected_image_tokens:
+                            num_skipped_vlm_truncation += 1
+                            continue
 
                     sample.advantage = advantage
                     sample.reward = rollout["reward"]
@@ -613,8 +622,15 @@ async def orchestrate(config: OrchestratorConfig):
         if num_skipped > 0:
             reasons = []
             if num_skipped_vlm_truncation > 0:
-                reasons.append(f"{num_skipped_vlm_truncation} multimodal exceeding seq_len")
+                reasons.append(f"{num_skipped_vlm_truncation} multimodal with truncated image tokens")
             logger.warning(f"Skipped {num_skipped}/{num_total_samples} samples ({', '.join(reasons)})")
+
+        if not train_examples:
+            raise ValueError(
+                f"All {num_total_samples} training samples were skipped "
+                f"({', '.join(reasons)}). Increase seq_len (currently {config.seq_len}) "
+                f"to fit multimodal samples."
+            )
 
         parallel_preprocess_time = time.perf_counter() - parallel_preprocess_start
         logger.debug(
