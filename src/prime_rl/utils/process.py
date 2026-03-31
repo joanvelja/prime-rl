@@ -1,6 +1,12 @@
+import contextlib
+import os
+import signal
 import subprocess
 from subprocess import Popen
 from threading import Event, Thread
+
+import psutil
+from loguru import logger
 
 
 def cleanup_threads(threads: list[Thread]):
@@ -9,15 +15,37 @@ def cleanup_threads(threads: list[Thread]):
         thread.join(timeout=5)
 
 
+def cleanup_process(pid: int, sig: int = signal.SIGTERM):
+    """Kill a process and all its descendants.
+
+    Walks the process tree via ``psutil`` so that grandchildren spawned by
+    intermediate wrappers (e.g. ``uv``, ``torchrun``) are reliably reached
+    regardless of process-group boundaries.
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    children = parent.children(recursive=True)
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, sig)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, sig)
+
+
 def cleanup_processes(processes: list[Popen]):
-    """Cleanup a list of subprocesses"""
+    """Cleanup a list of subprocesses by killing their entire process trees."""
     for process in processes:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        if process.poll() is not None:
+            continue
+        cleanup_process(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            cleanup_process(process.pid, signal.SIGKILL)
+            process.wait()
+        logger.debug(f"Cleaned up process {process.pid}")
 
 
 def monitor_process(process: Popen, stop_event: Event, error_queue: list, process_name: str):

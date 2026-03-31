@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -167,6 +168,14 @@ def rl_local(config: RLConfig):
     monitor_threads: list[Thread] = []
     error_queue: list[Exception] = []
     stop_events: dict[str, Event] = {}
+
+    def sigterm_handler(signum, frame):
+        logger.warning("Received SIGTERM, terminating all processes...")
+        cleanup_threads(monitor_threads)
+        cleanup_processes(processes)
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, sigterm_handler)
 
     try:
         # Optionally, start inference process
