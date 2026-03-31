@@ -14,6 +14,35 @@ The output directory is set in the config (`output_dir`). To find it:
 
 ## RL
 
+### Check GPU allocation
+
+#### Single-node
+
+GPUs are assigned in order: inference first, then trainer, then teacher (if any).
+
+```
+GPU 0..N-1     → inference (vLLM)
+GPU N..M-1     → trainer (torchrun)
+GPU M..K-1     → teacher inference (optional)
+```
+
+The exact split is controlled by `deployment.num_infer_gpus`, `deployment.num_train_gpus`, and `deployment.num_teacher_gpus`. The orchestrator runs as a separate process (no GPU). Check the resolved config at `{output_dir}/configs/rl.toml` for the actual values.
+
+#### Multi-node (SLURM)
+
+```bash
+squeue -u $USER -o "%.18i %.9P %.30j %.8T %.10M %.6D %R"
+```
+
+Nodes from the SLURM allocation are split in order: inference nodes first, then trainer nodes.
+
+```
+Nodes 0..I-1   → inference (vLLM, first node of each replica also runs vllm-router)
+Nodes I..I+T-1 → trainer (torchrun, rank 0 node also runs the orchestrator)
+```
+
+The node assignment is visible in the generated sbatch script at `{output_dir}/rl.sbatch` and in the SLURM logs under `{output_dir}/slurm/`.
+
 ### Check logs
 
 #### Local runs
@@ -47,33 +76,6 @@ The output directory is set in the config (`output_dir`). To find it:
 ```
 
 Env server logs are still under `{output_dir}/logs/envs/`.
-
-#### SLURM: check node allocation
-
-```bash
-squeue -u $USER -o "%.18i %.9P %.30j %.8T %.10M %.6D %R"
-```
-
-In a multi-node RL run, nodes are split between trainer and inference:
-- **Trainer nodes**: run torchrun (rank 0 also runs the orchestrator)
-- **Inference nodes**: run vLLM (first node of each replica also runs vllm-router)
-
-The node assignment is visible in the SLURM logs and the generated sbatch script at `{output_dir}/rl.sbatch`.
-
-#### Quick health check
-
-```bash
-# Tail the most important logs
-tail -F {output_dir}/logs/trainer/rank_0.log        # training progress
-tail -F {output_dir}/logs/orchestrator.log           # rollout generation
-tail -F {output_dir}/logs/inference.stdout           # inference server health
-
-# Check for errors across all logs
-grep -r "ERROR\|Exception\|Traceback" {output_dir}/logs/ --include="*.log"
-
-# Check inference server health
-curl http://{infer_host}:{port}/health
-```
 
 ### Check performance
 
@@ -111,16 +113,8 @@ High `wait_for_ckpt` means the trainer is the bottleneck. The orchestrator logs 
 
 #### Env servers
 
-Check `{output_dir}/logs/envs/train/{env_name}/env_worker_{id}.log`.
+Check `{output_dir}/logs/envs/train/{env_name}/env_server.log` and `{output_dir}/logs/envs/train/{env_name}/env_worker_{id}.log`.
 
 Key things to look for:
-- **Event loop lag**: workers log lag stats periodically. A warning is emitted when median > 0.5s or p90 > 1.0s or max > 5.0s — this means the worker is overloaded.
-- **Active task distribution**: check if tasks are evenly distributed across workers per-env and across envs. Uneven distribution suggests some workers/envs are slower.
-
-## Key files
-
-- `src/prime_rl/entrypoints/rl.py` — local and SLURM launch logic, log path setup
-- `src/prime_rl/templates/multi_node_rl.sbatch.j2` — multi-node SLURM template with node roles
-- `src/prime_rl/orchestrator/scheduler.py` — async scheduling, wait_for_ckpt logging
-- `src/prime_rl/trainer/rl/train.py` — training loop, wait_for_batch logging
-- `src/prime_rl/orchestrator/env_server/event_loop_lag.py` — event loop lag monitoring
+- **Event loop lag**: server logs aggregate lag stats (min/mean/median/p90/p99/max) of itself and all workers periodically. check that neither is overloaded
+- **Active task distribution**: check if tasks are distributed as expected across workers per-env and across envs. uneven distribution suggests some workers/envs are slower. heavily skewed distribution can indicate that a env is bottlenecking the trainer or has stopped being responsive.
