@@ -306,6 +306,7 @@ async def custom_init_app_state(
     state.openai_serving_chat = serving_chat
     state.openai_serving_chat_with_tokens = serving_chat
 
+
 def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
     """
     Modifies run_api_server_worker_proc:
