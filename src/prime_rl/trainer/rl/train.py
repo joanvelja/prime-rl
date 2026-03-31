@@ -72,8 +72,6 @@ def train(config: TrainerConfig):
         json_logging=config.log.json_logging,
     )
     logger.info(f"Starting RL trainer in {world} in {config.output_dir}")
-    if world.is_master:
-        logger.info(f"Showing rank 0 logs only. All rank logs: {config.output_dir / 'logs' / 'trainer' / 'torchrun'}")
 
     # Print warning if running in benchmark mode
     if config.bench is not None:

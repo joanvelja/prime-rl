@@ -16,7 +16,6 @@ def format_log_message(
     orchestrator: bool = False,
     inference: bool = False,
     job_log: bool = False,
-    env_log_dir: Path | None = None,
     train_env_names: list[str] | None = None,
     eval_env_names: list[str] | None = None,
     num_train_nodes: int = 1,
@@ -43,7 +42,8 @@ def format_log_message(
         log_lines.append(f"{i1}{'Inference:':<{col}}tail -F {log_dir}/inference.log")
         if num_infer_nodes > 1:
             log_lines.append(f"{i2}{'All nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
-    if env_log_dir and train_env_names:
+    if train_env_names:
+        env_log_dir = log_dir / "envs"
         log_lines.append(f"{i1}{'Envs:':<{col}}tail -F {env_log_dir}/*/*/*.log")
         log_lines.append(f"{i2}{'Train:':<{col - 1}}tail -F {env_log_dir}/train/*/*.log")
         for name in train_env_names:

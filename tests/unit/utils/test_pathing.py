@@ -18,7 +18,6 @@ def test_dir_with_only_logs_passes(tmp_path):
     output_dir = tmp_path / "has_logs"
     output_dir.mkdir()
     (output_dir / "logs").mkdir()
-    (output_dir / "logs").mkdir(parents=True)
     (output_dir / "logs" / "trainer.log").touch()
     validate_output_dir(output_dir, resuming=False, clean=False)
 

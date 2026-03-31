@@ -470,7 +470,6 @@ def rl_slurm(config: RLConfig):
         write_config(config, config_dir, exclude={"slurm", "dry_run", "clean_output_dir"})
         logger.info(f"Wrote config to {config_dir / RL_TOML}")
 
-        env_log_dir = log_dir / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
@@ -479,7 +478,6 @@ def rl_slurm(config: RLConfig):
             trainer=True,
             orchestrator=True,
             inference=True,
-            env_log_dir=env_log_dir,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
         )
@@ -487,7 +485,6 @@ def rl_slurm(config: RLConfig):
         write_subconfigs(config, config_dir)
         logger.info(f"Wrote subconfigs to {config_dir}")
 
-        env_log_dir = log_dir / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
@@ -497,7 +494,6 @@ def rl_slurm(config: RLConfig):
             trainer=True,
             orchestrator=has_infer,
             inference=has_infer,
-            env_log_dir=env_log_dir,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
             num_train_nodes=config.deployment.num_train_nodes,
