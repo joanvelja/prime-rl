@@ -87,7 +87,7 @@ Log paths are consistent across deployment types — `logs/trainer.log` and `log
 
 #### Trainer
 
-Check `{output_dir}/logs/trainer.log`.
+Check `{output_dir}/logs/trainer.log` (rank 0, node 0). For multi-node, per-node logs are at `logs/trainer/node_*.log`. Per-rank logs from all ranks are under `logs/trainer/torchrun/`.
 
 Key metrics per step:
 - `time/step` — total step time
