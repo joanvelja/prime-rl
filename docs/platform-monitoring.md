@@ -30,7 +30,7 @@ run_name = "my-experiment"
 You can also override from the CLI:
 
 ```bash
-uv run rl @ config.toml --orchestrator.prime.run_name "my-experiment"
+uv run rl @ config.toml --orchestrator.prime.run-name "my-experiment"
 ```
 
 ## Troubleshooting
