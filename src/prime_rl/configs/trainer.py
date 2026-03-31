@@ -737,9 +737,9 @@ class TrainerConfig(BaseConfig):
     gc: Annotated[
         GCConfig | None,
         Field(
-            description="Garbage collection config. Disables automatic GC and runs deterministic collections every N steps to avoid stragglers. If None, uses Python's default GC behavior.",
+            description="Garbage collection config. Disables automatic GC and runs deterministic collections every N steps to avoid stragglers. Set to null to use Python's default GC behavior.",
         ),
-    ] = None
+    ] = GCConfig()
 
     trace_path: Annotated[Path | None, Field(description="Path to write pytorch profiler trace to.")] = None
 
