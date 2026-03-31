@@ -619,17 +619,17 @@ async def orchestrate(config: OrchestratorConfig):
             num_decode_tokens += rollout_decode_tokens
 
         num_skipped = num_total_samples - len(train_examples)
+        reasons = []
+        if num_skipped_vlm_truncation > 0:
+            reasons.append(f"{num_skipped_vlm_truncation} multimodal with truncated image tokens")
         if num_skipped > 0:
-            reasons = []
-            if num_skipped_vlm_truncation > 0:
-                reasons.append(f"{num_skipped_vlm_truncation} multimodal with truncated image tokens")
             logger.warning(f"Skipped {num_skipped}/{num_total_samples} samples ({', '.join(reasons)})")
 
         if not train_examples:
+            detail = f" ({', '.join(reasons)})" if reasons else ""
             raise ValueError(
-                f"All {num_total_samples} training samples were skipped "
-                f"({', '.join(reasons)}). Increase seq_len (currently {config.seq_len}) "
-                f"to fit multimodal samples."
+                f"All {num_total_samples} training samples were skipped{detail}. "
+                f"Increase seq_len (currently {config.seq_len}) to fit multimodal samples."
             )
 
         parallel_preprocess_time = time.perf_counter() - parallel_preprocess_start
