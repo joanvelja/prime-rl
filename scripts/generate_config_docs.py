@@ -17,12 +17,6 @@ DEFAULT_SCHEMA = DOCS_DIR / "rl-config-schema.json"
 DEFAULT_OUTPUT = DOCS_DIR / "rl-config-reference.mdx"
 
 
-def resolve_ref(ref: str, defs: dict) -> dict:
-    """Resolve a $ref pointer like '#/$defs/TrainerConfig' to its definition."""
-    name = ref.rsplit("/", 1)[-1]
-    return defs.get(name, {})
-
-
 def type_display(prop: dict, defs: dict) -> str:
     """Convert a JSON schema property into a human-readable type string."""
     if "$ref" in prop:

@@ -7,7 +7,6 @@
                 "index",
                 "entrypoints",
                 "configs",
-                "rl-config-reference",
                 "environments",
                 "async",
                 "logging",
