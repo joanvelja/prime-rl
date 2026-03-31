@@ -7,7 +7,7 @@ import tomli_w
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
-from prime_rl.utils.pathing import get_config_dir, get_log_dir
+from prime_rl.utils.pathing import format_log_message, get_config_dir, get_log_dir
 
 INFERENCE_TOML = "inference.toml"
 INFERENCE_SBATCH = "inference.sbatch"
@@ -89,16 +89,7 @@ def inference_slurm(config: InferenceConfig):
 
     log_dir = get_log_dir(config.output_dir)
     num_nodes = getattr(config.deployment, "num_nodes", 1)
-    col = 18
-    i1 = " " * 2
-    i2 = " " * 3
-    log_lines = [
-        f"{i1}{'Job:':<{col}}tail -F {config.output_dir}/job_*.log",
-        f"{i1}{'Inference:':<{col}}tail -F {log_dir}/inference.log",
-    ]
-    if num_nodes > 1:
-        log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
-    log_message = "Logs:\n" + "\n".join(log_lines)
+    log_message = format_log_message(log_dir=log_dir, inference=True, job_log=True, num_infer_nodes=num_nodes)
 
     if config.dry_run:
         logger.success(f"Dry run complete. To submit manually:\n\n  sbatch {script_path}\n\n{log_message}")
