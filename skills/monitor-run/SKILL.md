@@ -9,8 +9,8 @@ description: How to monitor ongoing training runs — find output directories, c
 
 The output directory is set in the config (`output_dir`). To find it:
 
-- **Local run**: check the resolved config at `{output_dir}/configs/rl.toml` or `sft.toml`
-- **SLURM run**: check `squeue -u $USER` to find the job, then look at the sbatch script or the config dir
+- **Local run**: check the resolved configs at `{output_dir}/configs/`
+- **SLURM run**: check `squeue -u $USER` to find the job, then look at `{output_dir}/configs/`
 
 ## RL
 
@@ -26,7 +26,7 @@ GPU N..M-1     → trainer (torchrun)
 GPU M..K-1     → teacher inference (optional)
 ```
 
-The exact split is controlled by `deployment.num_infer_gpus`, `deployment.num_train_gpus`, and `deployment.num_teacher_gpus`. The orchestrator runs as a separate process (no GPU). Check the resolved config at `{output_dir}/configs/rl.toml` for the actual values.
+The exact split is controlled by `deployment.num_infer_gpus`, `deployment.num_train_gpus`, and `deployment.num_teacher_gpus`. The orchestrator runs as a separate process (no GPU). Check the resolved configs at `{output_dir}/configs/` for the actual values.
 
 #### Multi-node (SLURM)
 
