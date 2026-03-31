@@ -389,9 +389,7 @@ def train(config: SFTConfig):
         nan_loss_count = nan_loss_count.item()
 
         logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm
-        )
+        grad_norm = clip_grad_norm_(model.parameters(), max_norm=config.optim.max_norm)
         if grad_norm.device.type == "cpu":
             grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
