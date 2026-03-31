@@ -210,7 +210,7 @@ def train(config: TrainerConfig):
             config.rollout_transport,
         )
 
-    gc_handler = GarbageCollection(config.gc.freq) if config.gc else None
+    gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
 
     logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True

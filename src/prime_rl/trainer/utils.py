@@ -33,27 +33,26 @@ class GarbageCollection:
 
     In multi-GPU training, Python's automatic GC can trigger unpredictably on one rank
     while others wait at a synchronization point, stalling the entire step. This class
-    disables automatic GC and runs deterministic collections every `freq` steps so all
-    ranks collect simultaneously.
+    disables automatic GC and runs deterministic collections every `interval` steps so
+    all ranks collect simultaneously.
 
     Based on the approach from torchtitan (https://arxiv.org/abs/2505.05713).
     """
 
-    def __init__(self, freq: int = 50):
-        assert freq > 0, "gc_freq must be a positive integer"
-        self.freq = freq
+    def __init__(self, interval: int = 50):
+        assert interval > 0, "gc interval must be a positive integer"
+        self.interval = interval
         gc.disable()
-        self.collect("Initial GC collection")
+        self._collect()
 
     def run(self, step: int):
-        if step > 0 and step % self.freq == 0:
-            self.collect("Periodic GC collection")
+        if step > 0 and step % self.interval == 0:
+            self._collect()
 
-    @staticmethod
-    def collect(reason: str, generation: int = 1):
+    def _collect(self, generation: int = 1):
         begin = time.monotonic()
         gc.collect(generation)
-        get_logger().info(f"[GC] {reason} took {time.monotonic() - begin:.2f} seconds")
+        get_logger().info(f"[GC] collection took {time.monotonic() - begin:.2f}s")
 
 
 def _to_local_tensor(tensor: Tensor | DTensor) -> Tensor:

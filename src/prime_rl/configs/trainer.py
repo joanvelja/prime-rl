@@ -32,11 +32,11 @@ class GCConfig(BaseConfig):
     ranks collect simultaneously, preventing one rank from stalling others.
     """
 
-    freq: Annotated[
+    interval: Annotated[
         int,
         Field(
             ge=1,
-            description="Run garbage collection every `freq` training steps.",
+            description="Run garbage collection every `interval` training steps.",
         ),
     ] = 50
 
