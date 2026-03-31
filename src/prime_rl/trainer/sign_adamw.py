@@ -5,6 +5,20 @@ from torch.optim import Optimizer
 
 
 class SignAdamW(Optimizer):
+    """Sign-based AdamW optimizer with minimal memory footprint.
+
+    This optimizer uses the sign of gradients instead of storing momentum and variance,
+    making it equivalent to AdamW with beta1=0 and beta2=0 (resetting optimizer state each step).
+
+    Mathematical equivalence:
+        AdamW: W = W - lr * m_t / sqrt(v_t + eps)
+        With beta1=0, beta2=0: m_t = g_t, v_t = g_t^2
+        Simplified: W = W - lr * g_t / sqrt(g_t^2 + eps)
+        Ignoring eps: W = W - lr * sign(g_t)
+
+    This is the same approach used in GLM-5 training for memory efficiency.
+    """
+
     def __init__(
         self,
         params,
