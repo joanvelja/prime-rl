@@ -183,9 +183,11 @@ class WandbMonitor(Monitor):
             return
 
         for rollout in rollouts:
-            completion = rollout.get("completion", "")
+            completion = rollout.get("completion")
             if not completion:
                 continue
+            if isinstance(completion, list):
+                completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
             sample = {
                 "step": step,
                 "env": env_name,
