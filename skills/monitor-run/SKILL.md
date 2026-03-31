@@ -14,7 +14,7 @@ The output directory is set in the config (`output_dir`). To find it:
 
 ## RL
 
-### Log files
+### Check logs
 
 #### Local runs
 
@@ -43,12 +43,12 @@ The output directory is set in the config (`output_dir`). To find it:
 ├── latest_orchestrator.log               # orchestrator
 ├── latest_infer_node_rank_{N}.log        # inference nodes
 ├── latest_router_replica_{N}.log         # vllm-router (if multi-node inference)
-└── job_{SLURM_JOB_ID}_*.log             # permanent copies
+└── job_{SLURM_JOB_ID}_*.log              # permanent copies
 ```
 
 Env server logs are still under `{output_dir}/logs/envs/`.
 
-### SLURM: check node allocation
+#### SLURM: check node allocation
 
 ```bash
 squeue -u $USER -o "%.18i %.9P %.30j %.8T %.10M %.6D %R"
@@ -60,7 +60,24 @@ In a multi-node RL run, nodes are split between trainer and inference:
 
 The node assignment is visible in the SLURM logs and the generated sbatch script at `{output_dir}/rl.sbatch`.
 
-### Performance: trainer
+#### Quick health check
+
+```bash
+# Tail the most important logs
+tail -F {output_dir}/logs/trainer/rank_0.log        # training progress
+tail -F {output_dir}/logs/orchestrator.log           # rollout generation
+tail -F {output_dir}/logs/inference.stdout           # inference server health
+
+# Check for errors across all logs
+grep -r "ERROR\|Exception\|Traceback" {output_dir}/logs/ --include="*.log"
+
+# Check inference server health
+curl http://{infer_host}:{port}/health
+```
+
+### Check performance
+
+#### Trainer
 
 Check `{output_dir}/logs/trainer/rank_0.log` or the SLURM trainer log.
 
@@ -73,7 +90,7 @@ Key metrics per step:
 
 High `wait_for_batch` means the orchestrator is the bottleneck (slow rollouts, slow envs, or too few inference replicas).
 
-### Performance: orchestrator
+#### Orchestrator
 
 Check `{output_dir}/logs/orchestrator.log` or the SLURM orchestrator log.
 
@@ -92,28 +109,13 @@ High `wait_for_ckpt` means the trainer is the bottleneck. The orchestrator logs 
 "Orchestrator resumed: checkpoint ... ready (after ...s)"
 ```
 
-### Performance: env servers
+#### Env servers
 
 Check `{output_dir}/logs/envs/train/{env_name}/env_worker_{id}.log`.
 
 Key things to look for:
 - **Event loop lag**: workers log lag stats periodically. A warning is emitted when median > 0.5s or p90 > 1.0s or max > 5.0s — this means the worker is overloaded.
 - **Active task distribution**: check if tasks are evenly distributed across workers per-env and across envs. Uneven distribution suggests some workers/envs are slower.
-
-### Quick health check
-
-```bash
-# Tail the most important logs
-tail -F {output_dir}/logs/trainer/rank_0.log        # training progress
-tail -F {output_dir}/logs/orchestrator.log           # rollout generation
-tail -F {output_dir}/logs/inference.stdout           # inference server health
-
-# Check for errors across all logs
-grep -r "ERROR\|Exception\|Traceback" {output_dir}/logs/ --include="*.log"
-
-# Check inference server health
-curl http://{infer_host}:{port}/health
-```
 
 ## Key files
 
