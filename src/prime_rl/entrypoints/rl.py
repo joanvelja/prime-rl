@@ -499,7 +499,7 @@ def rl_slurm(config: RLConfig):
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
             num_train_nodes=config.deployment.num_train_nodes,
-            num_infer_nodes=config.deployment.num_infer_nodes if has_infer else 0,
+            num_infer_nodes=config.deployment.total_infer_nodes if has_infer else 0,
         )
 
     script_path = config.output_dir / RL_SBATCH
