@@ -37,10 +37,6 @@ def _count_tokens_per_expert(selected_experts_indices: torch.Tensor, num_experts
     ).to(dtype=torch.int32)
 
 
-def _to_local_expert_tensors(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    return tuple(cast(DTensor, tensor).to_local() for tensor in tensors)
-
-
 # can be used as dense FFN layer or shared experts in MoE layers
 class FeedForward(nn.Module):
     """
@@ -183,7 +179,9 @@ class DeepEPGroupedExperts(GroupedExperts):
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        w1, w2, w3 = _to_local_expert_tensors(self.w1, self.w2, self.w3)
+        w1 = cast(DTensor, self.w1).to_local()
+        w2 = cast(DTensor, self.w2).to_local()
+        w3 = cast(DTensor, self.w3).to_local()
         return self._run_experts_impl(w1, w2, w3, x, num_tokens_per_expert)
 
 
@@ -702,7 +700,9 @@ class DeepEPNonGatedGroupedExperts(NonGatedGroupedExperts):
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        w1, w2, w3 = _to_local_expert_tensors(self.w1, self.w2, self.w3)
+        w1 = cast(DTensor, self.w1).to_local()
+        w2 = cast(DTensor, self.w2).to_local()
+        w3 = cast(DTensor, self.w3).to_local()
         return self._run_experts_impl(w1, w2, w3, x, num_tokens_per_expert)
 
 

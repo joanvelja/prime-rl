@@ -32,10 +32,6 @@ def _run_lora_grouped_mm(
     return lora_out
 
 
-def _to_local_tensors(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    return tuple(cast(DTensor, tensor).to_local() for tensor in tensors)
-
-
 class MultiLoRAGroupedExperts(MultiLoRAModule):
     """
     GroupedExperts + multi-LoRA with grouped GEMM.
@@ -259,24 +255,12 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
         # With EP, LoRA weights are DTensors sharded across expert-parallel ranks.
         # Gather them before per-expert indexing.
         if isinstance(detached_w1_lora_a, DTensor):
-            (
-                detached_w1_lora_a,
-                detached_w1_lora_b,
-                detached_w2_lora_a,
-                detached_w2_lora_b,
-                detached_w3_lora_a,
-                detached_w3_lora_b,
-            ) = (
-                tensor.full_tensor()
-                for tensor in (
-                    detached_w1_lora_a,
-                    detached_w1_lora_b,
-                    detached_w2_lora_a,
-                    detached_w2_lora_b,
-                    detached_w3_lora_a,
-                    detached_w3_lora_b,
-                )
-            )
+            detached_w1_lora_a = cast(DTensor, detached_w1_lora_a).full_tensor()
+            detached_w1_lora_b = cast(DTensor, detached_w1_lora_b).full_tensor()
+            detached_w2_lora_a = cast(DTensor, detached_w2_lora_a).full_tensor()
+            detached_w2_lora_b = cast(DTensor, detached_w2_lora_b).full_tensor()
+            detached_w3_lora_a = cast(DTensor, detached_w3_lora_a).full_tensor()
+            detached_w3_lora_b = cast(DTensor, detached_w3_lora_b).full_tensor()
 
         # The clone is necessary to avoid views that cause giant memory spikes
         # TODO: There's probably a better way to do this
@@ -315,19 +299,15 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
 
         # DeepEP sharded experts receive tokens already dispatched in expert order.
         if self.use_deepep_expert_parallel:
-            base_w1, base_w2, base_w3, w1_lora_a, w1_lora_b, w2_lora_a, w2_lora_b, w3_lora_a, w3_lora_b = (
-                _to_local_tensors(
-                    base_w1,
-                    base_w2,
-                    base_w3,
-                    w1_lora_a,
-                    w1_lora_b,
-                    w2_lora_a,
-                    w2_lora_b,
-                    w3_lora_a,
-                    w3_lora_b,
-                )
-            )
+            base_w1 = cast(DTensor, base_w1).to_local()
+            base_w2 = cast(DTensor, base_w2).to_local()
+            base_w3 = cast(DTensor, base_w3).to_local()
+            w1_lora_a = cast(DTensor, w1_lora_a).to_local()
+            w1_lora_b = cast(DTensor, w1_lora_b).to_local()
+            w2_lora_a = cast(DTensor, w2_lora_a).to_local()
+            w2_lora_b = cast(DTensor, w2_lora_b).to_local()
+            w3_lora_a = cast(DTensor, w3_lora_a).to_local()
+            w3_lora_b = cast(DTensor, w3_lora_b).to_local()
 
         # Compute offsets for grouped_mm
         offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
