@@ -2,15 +2,6 @@
 
 prime-rl uses [loguru](https://loguru.readthedocs.io/en/stable/) for logging with a global logger pattern. All logs are captured at the deployment level (stdout/stderr redirection for local, `tee` for SLURM) under `{output_dir}/logs/`. For RL training, we recommend streaming logs into tmux panes (as set up by `tmux.sh`).
 
-## tmux helper (`scripts/tmux.sh`)
-
-`scripts/tmux.sh` sets up a tmux session for RL runs with **four panes**:
-
-- **Trainer**: run `uv run rl ...` here
-- **Orchestrator**: follows `{output_dir}/logs/orchestrator.log`
-- **Envs**: follows `{output_dir}/logs/envs/*/*/*.log`
-- **Inference**: follows `{output_dir}/logs/inference.log`
-
 ## Logger Architecture
 
 ### `setup_logger` and `get_logger`
@@ -86,3 +77,12 @@ Logs are captured at the deployment level — the entrypoint redirects subproces
 Environment logs live under `logs/envs/train/{env_name}/` and `logs/envs/eval/{env_name}/`. Per-worker logs (`env_worker_{id}.log`) are only written if `log.env_worker_logs` is enabled. Env log verbosity is controlled by `orchestrator.log.vf_level`.
 
 Only rank 0 output is shown in `trainer.log`. Per-rank logs from all ranks are available under `logs/trainer/torchrun/{rdzv_id}/attempt_0/{rank}/{stdout,stderr}.log`, written by torchrun's `--log-dir`.
+
+## tmux helper (`scripts/tmux.sh`)
+
+`scripts/tmux.sh` sets up a tmux session for RL runs with **four panes**:
+
+- **Trainer**: run `uv run rl ...` here
+- **Orchestrator**: follows `{output_dir}/logs/orchestrator.log`
+- **Envs**: follows `{output_dir}/logs/envs/*/*/*.log`
+- **Inference**: follows `{output_dir}/logs/inference.log`
