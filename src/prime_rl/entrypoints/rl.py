@@ -171,7 +171,7 @@ def rl_local(config: RLConfig):
     try:
         # Optionally, start inference process
         if config.inference:
-            inference_cmd = ["uv", "run", "inference", "@", (config_dir / INFERENCE_TOML).as_posix()]
+            inference_cmd = ["inference", "@", (config_dir / INFERENCE_TOML).as_posix()]
             logger.info(f"Starting inference on GPU(s) {' '.join(map(str, infer_gpu_ids))}")
             logger.debug(f"Inference start command: {' '.join(inference_cmd)}")
             # If we don't log stdout, the server hangs
@@ -216,7 +216,7 @@ def rl_local(config: RLConfig):
                     "or omit teacher_inference and configure orchestrator.teacher_model to use an existing server."
                 )
 
-            teacher_inference_cmd = ["uv", "run", "inference", "@", (config_dir / TEACHER_INFERENCE_TOML).as_posix()]
+            teacher_inference_cmd = ["inference", "@", (config_dir / TEACHER_INFERENCE_TOML).as_posix()]
             logger.info(f"Starting teacher inference process on GPU(s) {' '.join(map(str, teacher_gpu_ids))}")
             logger.debug(f"Teacher inference start command: {' '.join(teacher_inference_cmd)}")
             with open(log_dir / "teacher_inference.log", "w") as log_file:
@@ -251,8 +251,6 @@ def rl_local(config: RLConfig):
 
         # Start orchestrator process
         orchestrator_cmd = [
-            "uv",
-            "run",
             "orchestrator",
             "@",
             (config_dir / ORCHESTRATOR_TOML).as_posix(),
@@ -288,11 +286,6 @@ def rl_local(config: RLConfig):
 
         # Start training process
         trainer_cmd = [
-            "uv",
-            "run",
-            "env",
-            "PYTHONUNBUFFERED=1",
-            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
             "torchrun",
             f"--rdzv-endpoint=localhost:{get_free_port()}",
             f"--rdzv-id={uuid.uuid4().hex}",
@@ -317,6 +310,7 @@ def rl_local(config: RLConfig):
                     **wandb_shared_env,
                     "WANDB_SHARED_LABEL": "trainer",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, trainer_gpu_ids)),
+                    "PYTHONUNBUFFERED": "1",
                     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                     "LOGURU_FORCE_COLORS": "1",
                     "WANDB_PROGRAM": "uv run rl",

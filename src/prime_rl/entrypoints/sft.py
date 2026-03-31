@@ -114,11 +114,6 @@ def sft_local(config: SFTConfig):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     trainer_cmd = [
-        "uv",
-        "run",
-        "env",
-        "PYTHONUNBUFFERED=1",
-        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
         "torchrun",
         f"--rdzv-endpoint=localhost:{get_free_port()}",
         f"--rdzv-id={uuid.uuid4().hex}",
@@ -146,6 +141,7 @@ def sft_local(config: SFTConfig):
                 trainer_cmd,
                 env={
                     **os.environ,
+                    "PYTHONUNBUFFERED": "1",
                     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                 },
                 stdout=log_file,
