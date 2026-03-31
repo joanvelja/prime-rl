@@ -271,13 +271,6 @@ class LogConfig(BaseConfig):
         Field(description="Logging level for the verifiers package. Will determine the logging verbosity and format."),
     ] = "info"
 
-    env_worker_logs: Annotated[
-        bool,
-        Field(
-            description="Whether env workers log to files. If True, workers write to logs/env_workers/{env_name}.log.",
-        ),
-    ] = False
-
     log_data: Annotated[
         bool,
         Field(
