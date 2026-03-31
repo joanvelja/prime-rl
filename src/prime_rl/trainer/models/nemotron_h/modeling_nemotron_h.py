@@ -19,7 +19,7 @@ from transformers.utils import auto_docstring, logging
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.models.layers.attn import ATTN_IMPL2CLASS, AttentionConfig
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
-from prime_rl.trainer.models.layers.moe import LatentMoE, NemotronHRouter, NonGatedGroupedExperts
+from prime_rl.trainer.models.layers.moe import NemotronHRouter, NonGatedGroupedExperts, build_latent_moe_from_config
 from prime_rl.trainer.models.layers.rms_norm import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
 from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import (
@@ -142,7 +142,8 @@ class NemotronHMoELayer(GradientCheckpointingLayer):
     def __init__(self, config: NemotronHConfig):
         super().__init__()
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
-        self.mlp = LatentMoE(
+        self.mlp = build_latent_moe_from_config(
+            config,
             dim=config.hidden_size,
             latent_dim=config.moe_latent_size,
             moe_intermediate_size=config.moe_intermediate_size,

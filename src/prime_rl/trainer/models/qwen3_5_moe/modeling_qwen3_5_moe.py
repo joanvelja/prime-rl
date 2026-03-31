@@ -16,7 +16,7 @@ from transformers.utils import TransformersKwargs, logging
 
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
-from prime_rl.trainer.models.layers.moe import FeedForward, MoE, MoEArgs
+from prime_rl.trainer.models.layers.moe import FeedForward, MoEArgs, build_moe_from_config
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig, apply_rotary_pos_emb
 
 from .configuration_qwen3_5_moe import Qwen3_5MoeConfig
@@ -565,7 +565,12 @@ class Qwen3_5MoeDecoderLayer(GradientCheckpointingLayer):
             use_grouped_mm=config.use_grouped_mm,
             load_balance_coeff=config.load_balance_coeff,
         )
-        self.mlp = MoE(moe_args, dim=config.hidden_size, hidden_dim=config.moe_intermediate_size)
+        self.mlp = build_moe_from_config(
+            config,
+            moe_args,
+            dim=config.hidden_size,
+            hidden_dim=config.moe_intermediate_size,
+        )
 
         # Separate gated shared expert
         self.shared_expert = FeedForward(dim=config.hidden_size, hidden_dim=config.shared_expert_intermediate_size)

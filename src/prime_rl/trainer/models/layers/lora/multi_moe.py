@@ -1,4 +1,5 @@
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -6,7 +7,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from prime_rl.trainer.models.layers.lora.base import MultiLoRAModule, get_lora_num_tokens, get_multilora_scaling
-from prime_rl.trainer.models.layers.moe import GroupedExperts
+from prime_rl.trainer.models.layers.moe import DeepEPGroupedExperts, GroupedExperts
 
 
 def _run_lora_grouped_mm(
@@ -31,40 +32,8 @@ def _run_lora_grouped_mm(
     return lora_out
 
 
-def _run_lora_for_loop(
-    x: torch.Tensor,
-    lora_A: torch.Tensor,
-    lora_B: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    """Apply LoRA via for-loop over experts (fallback for non-Hopper GPUs).
-
-    Args:
-        x: Input tensor [total_tokens, in_features]
-        lora_A: Low-rank A matrices [num_experts, rank, in_features]
-        lora_B: Low-rank B matrices [num_experts, out_features, rank]
-        num_tokens_per_expert: Token counts per expert [num_experts]
-
-    Returns:
-        LoRA output [total_tokens, out_features]
-    """
-    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
-    lora_out_splits = []
-
-    start = 0
-    for expert_idx, num_tokens in enumerate(num_tokens_per_expert_list):
-        if num_tokens == 0:
-            continue
-        end = start + num_tokens
-
-        # Apply LoRA for this expert: B @ A @ x
-        _a_out = torch.matmul(x[start:end], lora_A[expert_idx].transpose(-2, -1))
-        lora_out = torch.matmul(_a_out, lora_B[expert_idx].transpose(-2, -1))
-        lora_out_splits.append(lora_out)
-
-        start = end
-
-    return torch.cat(lora_out_splits, dim=0)
+def _to_local_tensors(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return tuple(cast(DTensor, tensor).to_local() for tensor in tensors)
 
 
 class MultiLoRAGroupedExperts(MultiLoRAModule):
@@ -100,6 +69,7 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
         self.alpha = alpha
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.use_grouped_mm = use_grouped_mm
+        self.use_deepep_expert_parallel = isinstance(base_layer, DeepEPGroupedExperts)
 
         self._lora_num_tokens = get_lora_num_tokens()
         self._scaling_factors = get_multilora_scaling()
@@ -289,12 +259,24 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
         # With EP, LoRA weights are DTensors sharded across expert-parallel ranks.
         # Gather them before per-expert indexing.
         if isinstance(detached_w1_lora_a, DTensor):
-            detached_w1_lora_a = detached_w1_lora_a.full_tensor()
-            detached_w1_lora_b = detached_w1_lora_b.full_tensor()
-            detached_w2_lora_a = detached_w2_lora_a.full_tensor()
-            detached_w2_lora_b = detached_w2_lora_b.full_tensor()
-            detached_w3_lora_a = detached_w3_lora_a.full_tensor()
-            detached_w3_lora_b = detached_w3_lora_b.full_tensor()
+            (
+                detached_w1_lora_a,
+                detached_w1_lora_b,
+                detached_w2_lora_a,
+                detached_w2_lora_b,
+                detached_w3_lora_a,
+                detached_w3_lora_b,
+            ) = (
+                tensor.full_tensor()
+                for tensor in (
+                    detached_w1_lora_a,
+                    detached_w1_lora_b,
+                    detached_w2_lora_a,
+                    detached_w2_lora_b,
+                    detached_w3_lora_a,
+                    detached_w3_lora_b,
+                )
+            )
 
         # The clone is necessary to avoid views that cause giant memory spikes
         # TODO: There's probably a better way to do this
@@ -331,39 +313,21 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
         base_w2 = self.base_layer.w2  # [num_experts, dim, hidden_dim]
         base_w3 = self.base_layer.w3  # [num_experts, hidden_dim, dim]
 
-        # EP handling: convert DTensors to local shards.
-        # Standard EP also needs token permutation; DeepEP tokens are already dispatched.
-        permuted_indices = None
-        if isinstance(base_w1, DTensor):
-            base_w1 = base_w1.to_local()
-            base_w2 = base_w2.to_local()
-            base_w3 = base_w3.to_local()
-            w1_lora_a = w1_lora_a.to_local()
-            w1_lora_b = w1_lora_b.to_local()
-            w2_lora_a = w2_lora_a.to_local()
-            w2_lora_b = w2_lora_b.to_local()
-            w3_lora_a = w3_lora_a.to_local()
-            w3_lora_b = w3_lora_b.to_local()
-
-            if getattr(self.base_layer, "ep_comm_backend", "torch") != "deepep":
-                from torchtitan.distributed.expert_parallel import TOKEN_GROUP_ALIGN_SIZE_M
-                from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
-
-                experts_per_ep_rank = base_w1.shape[0]
-                num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
-
-                with torch.no_grad():
-                    permuted_indices, num_tokens_per_expert, _ = generate_permute_indices(
-                        num_tokens_per_expert,
-                        experts_per_ep_rank,
-                        num_ep_ranks,
-                        x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
-                        TOKEN_GROUP_ALIGN_SIZE_M,
-                    )
-
-                x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
-                input_shape = x.shape
-                x = x[permuted_indices, :]
+        # DeepEP sharded experts receive tokens already dispatched in expert order.
+        if self.use_deepep_expert_parallel:
+            base_w1, base_w2, base_w3, w1_lora_a, w1_lora_b, w2_lora_a, w2_lora_b, w3_lora_a, w3_lora_b = (
+                _to_local_tensors(
+                    base_w1,
+                    base_w2,
+                    base_w3,
+                    w1_lora_a,
+                    w1_lora_b,
+                    w2_lora_a,
+                    w2_lora_b,
+                    w3_lora_a,
+                    w3_lora_b,
+                )
+            )
 
         # Compute offsets for grouped_mm
         offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
@@ -406,17 +370,6 @@ class MultiLoRAGroupedExperts(MultiLoRAModule):
                 base_w3,
                 scaling,
             )
-
-        # EP handling: unpermute output back to dispatched token order
-        if permuted_indices is not None:
-            # For-loop may produce fewer rows than permuted input (no padding rows),
-            # pad to match before unpermuting
-            if out.shape[0] < len(permuted_indices):
-                num_padding = len(permuted_indices) - out.shape[0]
-                out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-            out_unpermuted = out.new_zeros(input_shape)
-            out_unpermuted[permuted_indices, :] = out
-            out = out_unpermuted[:-1]
 
         return out
 

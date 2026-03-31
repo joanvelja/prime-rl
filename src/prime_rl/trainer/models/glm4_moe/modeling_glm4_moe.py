@@ -36,7 +36,7 @@ from prime_rl.trainer.models.glm4_moe.converting_glm4_moe import (
 from prime_rl.trainer.models.layers.attn import ATTN_IMPL2CLASS, AttentionConfig
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
 from prime_rl.trainer.models.layers.mlp import MLP, MLPConfig
-from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
+from prime_rl.trainer.models.layers.moe import MoEArgs, build_moe_from_config
 from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
 
@@ -76,7 +76,12 @@ class Glm4MoeDecoderLayer(GradientCheckpointingLayer):
         )
 
         if layer_idx >= config.first_k_dense_replace:
-            self.mlp = MoE(moe_args, dim=config.hidden_size, hidden_dim=config.moe_intermediate_size)
+            self.mlp = build_moe_from_config(
+                config,
+                moe_args,
+                dim=config.hidden_size,
+                hidden_dim=config.moe_intermediate_size,
+            )
         else:
             self.mlp = MLP(mlp_config)
 
