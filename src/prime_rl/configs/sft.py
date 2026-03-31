@@ -14,6 +14,7 @@ from prime_rl.configs.trainer import (
     BenchConfig,
     CheckpointConfig,
     ConstantSchedulerConfig,
+    GCConfig,
     ModelConfig,
     OptimizerConfig,
     SchedulerConfig,
@@ -180,6 +181,9 @@ class SFTConfig(BaseConfig):
 
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
+
+    # The garbage collection configuration
+    gc: GCConfig = GCConfig()
 
     # The logging configuration
     log: LogConfig = LogConfig()

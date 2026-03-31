@@ -473,6 +473,25 @@ class WeightCheckpointConfig(BaseConfig):
     ] = False
 
 
+class GCConfig(BaseConfig):
+    """Configures Python garbage collection to avoid stragglers during training."""
+
+    freq: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Frequency (in steps) at which to perform garbage collection. Default is 50 steps.",
+        ),
+    ] = 50
+
+    debug: Annotated[
+        bool,
+        Field(
+            description="When enabled, performs GC every step and warns about tensor reference cycles on rank 0. Useful for debugging memory leaks.",
+        ),
+    ] = False
+
+
 class CheckpointConfig(BaseConfig):
     """Configures checkpointing the full model, optimizer and training state for resuming training."""
 
@@ -669,6 +688,9 @@ class TrainerConfig(BaseConfig):
 
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
+
+    # The garbage collection configuration
+    gc: GCConfig = GCConfig()
 
     weight_broadcast: WeightBroadcastConfig = FileSystemWeightBroadcastConfig()
 

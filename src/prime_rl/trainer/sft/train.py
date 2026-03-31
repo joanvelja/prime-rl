@@ -39,6 +39,7 @@ from prime_rl.trainer.utils import (
     print_sample,
     setup_torch_distributed,
     print_benchmark,
+    GarbageCollection,
 )
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.heartbeat import Heartbeat
@@ -108,6 +109,10 @@ def train(config: SFTConfig):
     # Set up checkpoint manager
     logger.info(f"Initializing checkpoint managers ({config.ckpt})")
     ckpt_manager, weight_ckpt_manager = setup_ckpt_managers(config.output_dir, config.ckpt, config.model.lora)
+
+    # Set up garbage collection
+    logger.info(f"Initializing garbage collection (freq={config.gc.freq}, debug={config.gc.debug})")
+    gc_handler = GarbageCollection(gc_freq=config.gc.freq, debug=config.gc.debug)
 
     checkpoint_step = None
     if config.ckpt and config.ckpt.resume_step is not None and ckpt_manager is not None:
@@ -399,6 +404,9 @@ def train(config: SFTConfig):
         logger.debug("Optimizer step")
         optimizer.step()
         optimizer.zero_grad()
+
+        # Run garbage collection
+        gc_handler.run(progress.step)
 
         # Update learning rate scheduler
         current_lr = optimizer.param_groups[0]["lr"]

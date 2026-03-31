@@ -388,3 +388,42 @@ def maybe_clean(path: Path, step: int, async_level: int, interval_to_keep: int |
     if not keep:
         logger.debug(f"Removing path {candidate_path_to_delete}")
         shutil.rmtree(candidate_path_to_delete, ignore_errors=True)
+
+
+import gc
+
+
+class GarbageCollection:
+    """Manages Python garbage collection to avoid stragglers during training.
+
+    Disables automatic GC and performs manual collection at specified intervals.
+    This prevents GC from running unpredictably during training steps, which
+    can cause stragglers in distributed training.
+
+    Based on torchtitan's GarbageCollection implementation:
+    https://github.com/pytorch/torchtitan
+    """
+
+    def __init__(self, gc_freq: int = 50, debug: bool = False):
+        assert gc_freq > 0, "gc_freq must be a positive integer"
+        self.gc_freq = gc_freq
+        self.debug = debug
+        self.logger = get_logger()
+        gc.disable()
+        self.collect("Initial GC collection")
+        if debug:
+            from torch.utils.viz._cycles import warn_tensor_cycles
+
+            if get_world().rank == 0:
+                warn_tensor_cycles()
+
+    def run(self, step_count: int):
+        if self.debug:
+            self.collect("Force GC to perform collection to obtain debug information", generation=2)
+        elif step_count > 1 and step_count % self.gc_freq == 0:
+            self.collect("Performing periodic GC collection")
+
+    def collect(self, reason: str, generation: int = 1):
+        begin = time.monotonic()
+        gc.collect(generation)
+        self.logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)

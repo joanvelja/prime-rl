@@ -1,4 +1,5 @@
 import bisect
+import gc
 import shutil
 import time
 import warnings
@@ -164,6 +165,9 @@ class CheckpointManager:
         # Save sharded state
         dcp_save(state_dict, checkpoint_id=path)
 
+        # Perform GC after checkpoint save to free memory
+        gc.collect(1)
+
         self.logger.debug(f"Training checkpoint saved in {time.perf_counter() - start_time:.2f} seconds")
 
     def load_from_path(
@@ -183,6 +187,9 @@ class CheckpointManager:
         app_state = AppState(model, optimizers if not self.skip_optimizer else [], scheduler, progress)
         state_dict = {"app": app_state}
         dcp_load(state_dict=state_dict, checkpoint_id=path)
+
+        # Perform GC after checkpoint load to free memory
+        gc.collect(1)
 
         # Load the dataloader
         if dataloader is not None:

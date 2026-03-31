@@ -49,6 +49,7 @@ from prime_rl.trainer.utils import (
     setup_torch_distributed,
     print_benchmark,
     get_response_lengths,
+    GarbageCollection,
 )
 from prime_rl.trainer.world import get_world
 from prime_rl.trainer.runs import setup_multi_run_manager, Progress, get_multi_run_manager
@@ -130,6 +131,10 @@ def train(config: TrainerConfig):
         # Multi-run uses per-run checkpointing via MultiCheckpointManager
         ckpt_manager, weight_ckpt_manager = setup_multi_checkpoint_manager(config.output_dir)
         logger.info("Initialized multi-run checkpoint manager")
+
+    # Set up garbage collection
+    logger.info(f"Initializing garbage collection (freq={config.gc.freq}, debug={config.gc.debug})")
+    gc_handler = GarbageCollection(gc_freq=config.gc.freq, debug=config.gc.debug)
 
     # Initialize the model and tokenizer
     logger.info(f"Initializing model ({config.model})")
@@ -472,6 +477,9 @@ def train(config: TrainerConfig):
         # Update the model parameters
         optimizer.step()
         optimizer.zero_grad()
+
+        # Run garbage collection
+        gc_handler.run(progress.step)
 
         # Update learning rate scheduler
         scheduler.step()
