@@ -21,7 +21,7 @@ uv run rl @ path/to/rl.toml
 - Multi-node RL requires a shared filesystem and exactly one orchestrator per run.
 
 ## Sampling
-1. Touch `orchestrator.sampling.temperature` only when entropy is not around `0.2-0.5` which is a good range to be in
+1. Touch `orchestrator.sampling.temperature` only when entropy is not around `0.2-0.5` which is a good range to be in.
 2. `orchestrator.oversampling_factor` is the main throughput knob if the trainer is starving.
 
 ## Optimization
