@@ -42,7 +42,9 @@ You are responsible for maintaining the skills folder. When a workflow fails and
 
 Write tests as plain functions with pytest fixtures. Don't use class-based tests.
 
-## Git
+## Git & GitHub
 
 Branch prefixes: `feat/`, `fix/`, `chore/`
+
+**Pull requests**: do not include a "Test plan" section in PR descriptions unless you actually ran tests to verify the changes or the user explicitly asked for one.
 
