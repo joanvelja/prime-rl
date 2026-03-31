@@ -8,7 +8,7 @@ from prime_rl.configs.shared import (
     ClientConfig,
     FileSystemTransportConfig,
     HeartbeatConfig,
-    OrchestratorLogConfig,
+    LogConfig,
     PrimeMonitorConfig,
     TransportConfig,
     WandbWithExtrasConfig,
@@ -758,7 +758,7 @@ class OrchestratorConfig(BaseConfig):
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]
 
     # The logging configuration
-    log: OrchestratorLogConfig = OrchestratorLogConfig()
+    log: LogConfig = LogConfig()
 
     # The wandb configuration
     wandb: WandbWithExtrasConfig | None = None
