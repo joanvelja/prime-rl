@@ -23,13 +23,6 @@ uv run sft @ path/to/sft.toml
 uv run rl @ path/to/rl.toml
 ```
 
-4. Run `--dry-run` before long jobs or SLURM submissions:
-
-```bash
-uv run sft @ path/to/sft.toml --dry-run
-uv run rl @ path/to/rl.toml --dry-run
-```
-
 ## First-Run Protocol
 1. Install the environment and verify the Python package if needed:
 
@@ -51,31 +44,24 @@ uv run vf-eval my-env -m Qwen/Qwen3-0.6B -b http://localhost:8000/v1 -n 20
 ## Choose The Training Path
 - Prefer SFT first when the base model does not understand the response format, tool schema, or conversational structure.
 - Prefer direct RL when the base model already behaves structurally correctly and mainly needs reward-driven improvement.
-- Prefer LoRA when VRAM is tight, when training on one or a few envs, and when the batch size is small
+- Prefer LoRA when hardware or turnaround time makes full-model training impractical.
 
-
-## RL Rules Of Thumb
-1. Keep `orchestrator.batch_size` divisible by `orchestrator.rollouts_per_example`.
-2. Keep `orchestrator.max_concurrent` and `orchestrator.max_inflight_rollouts` at least `rollouts_per_example`.
-3. Simple smoke-test starting point: `rollouts_per_example = 8`, `batch_size = 128`, `oversampling_factor = 2.0`.
-4. Common stable starting point: `rollouts_per_example = 16`, `batch_size = 512`, `oversampling_factor = 2.0`.
-5. Reduce `orchestrator.sampling.max_tokens` before touching more exotic knobs when rollouts are too slow or memory-heavy. Mainly prefer this if the truncation rate is low.
-6. A good initial `orchestrator.sampling.temperature` is around `0.7-1.0`. Change this depending on the entropy, a good heuristic is to keep entropy around `0.3-0.5`. Increase `orchestrator.sampling.temperature` to increase entropy and vice versa.
-7. Keep `max_async_level` low on first runs. Use `0` for fully synchronous debugging or `1` for the usual async path. `nccl` weight broadcast requires `max_async_level = 1`.
-8. Turn on difficulty filtering only after rewards are meaningful enough to separate easy and hard cases.
-
-## SFT Rules Of Thumb
-1. Use datasets in `messages` or prompt-completion format.
-2. If `messages` is present, it takes precedence over `prompt` and `completion`.
-3. Start from the closest example `sft.toml` and first change only model, dataset, batch size, sequence length, and output directory.
+## Keep Deltas Small
+1. Change model, environment IDs or args, `output_dir`, and `max_steps` first.
+2. Only change RL-specific knobs when the closest example is clearly not enough for the environment or hardware.
+3. Only change SFT-specific knobs when the base model clearly needs format or tool-use warmup.
+4. Read `train-rl` before changing RL batching, sampling, or optimization settings.
+5. Read `train-sft` before changing SFT dataset, memory, or deployment settings.
 
 ## Failure Triage
 - Flat reward or no learning: inspect baseline samples first. The problem is often environment format or reward quality, not just trainer hyperparameters.
-- Trainer OOM: reduce sequence length or batch pressure, then enable activation checkpointing, activation offloading, CPU optimizer offload, or LoRA.
+- Trainer OOM: reduce sequence length and follow `train-rl`, `train-sft`, or `docs/memory_usage.md` instead of guessing.
 - High `time/wait_for_batch`: inference or environment is the bottleneck.
 - High `time/wait_for_ckpt`: trainer is the bottleneck.
 
 ## Related Skills
+- Read `train-rl` for RL-specific tuning.
+- Read `train-sft` for SFT-specific tuning.
 - Read `entrypoints` for command coverage.
 - Read `config` for TOML composition and CLI overrides.
 - Read `monitor-run` when diagnosing live runs.
