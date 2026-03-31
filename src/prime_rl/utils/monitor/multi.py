@@ -54,6 +54,13 @@ class MultiMonitor(Monitor):
             except Exception as e:
                 self.logger.warning(f"Failed to log distributions to {monitor.__class__.__name__}: {e}")
 
+    def log_time_series(self, metrics: dict[str, Any], timestamp: float) -> None:
+        for monitor in self.monitors:
+            try:
+                monitor.log_time_series(metrics=metrics, timestamp=timestamp)
+            except Exception as e:
+                self.logger.warning(f"Failed to log time series to {monitor.__class__.__name__}: {e}")
+
     def close(self) -> None:
         for monitor in self.monitors:
             try:

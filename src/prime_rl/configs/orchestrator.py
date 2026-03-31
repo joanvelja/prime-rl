@@ -493,6 +493,10 @@ class InferenceObservabilityConfig(BaseConfig):
     router_port: Annotated[int, Field(description="Router port for each inference pod.")] = 8000
     prefill_port: Annotated[int, Field(description="Prefill backend port.")] = 8100
     decode_port: Annotated[int, Field(description="Decode backend port.")] = 8200
+    poll_interval_seconds: Annotated[
+        float,
+        Field(ge=1.0, description="Wall-clock interval between inference observability scrapes."),
+    ] = 10.0
 
 
 class BufferConfig(BaseConfig):

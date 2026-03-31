@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from prime_rl.configs.orchestrator import InferenceObservabilityConfig
 from prime_rl.configs.shared import ClientConfig
+from prime_rl.utils.logger import get_logger
+from prime_rl.utils.monitor.base import Monitor
 
 
 COUNTER_KEYS = {
@@ -610,3 +613,45 @@ class InferenceMetricsCollector:
             f"{prefix}/max": max(filtered),
             f"{prefix}/min": min(filtered),
         }
+
+
+class InferenceMetricsExporter:
+    def __init__(self, config: InferenceObservabilityConfig, client_config: ClientConfig, monitor: Monitor):
+        self.config = config
+        self.client_config = client_config
+        self.monitor = monitor
+        self.logger = get_logger()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="inference-metrics-exporter", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=max(self.config.poll_interval_seconds * 2, 5.0))
+        self._thread = None
+
+    def _run(self) -> None:
+        asyncio.run(self._run_async())
+
+    async def _run_async(self) -> None:
+        collector = InferenceMetricsCollector(self.config, self.client_config)
+        try:
+            while not self._stop_event.is_set():
+                started_at = time.time()
+                try:
+                    metrics = await collector.collect()
+                    self.monitor.log_time_series(metrics, timestamp=started_at)
+                except Exception as exc:
+                    self.logger.warning(f"Failed to export inference observability metrics: {exc}")
+                sleep_time = max(self.config.poll_interval_seconds - (time.time() - started_at), 0.0)
+                if self._stop_event.wait(sleep_time):
+                    break
+        finally:
+            await collector.stop()

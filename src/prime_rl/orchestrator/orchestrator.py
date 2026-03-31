@@ -39,7 +39,7 @@ from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.eval_utils import evaluate_env
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
-from prime_rl.orchestrator.inference_observability import InferenceMetricsCollector
+from prime_rl.orchestrator.inference_observability import InferenceMetricsExporter
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
@@ -355,10 +355,11 @@ async def orchestrate(config: OrchestratorConfig):
 
     logger.success("Inference pool ready")
 
-    inference_metrics_collector = None
+    inference_metrics_exporter = None
     if config.inference_observability is not None and config.inference_observability.enabled:
         logger.info(f"Initializing inference observability ({config.inference_observability})")
-        inference_metrics_collector = InferenceMetricsCollector(config.inference_observability, config.client)
+        inference_metrics_exporter = InferenceMetricsExporter(config.inference_observability, config.client, monitor)
+        inference_metrics_exporter.start()
 
     # Check health of teacher inference server if configured
     if config.teacher_model and teacher_inference_pool:
@@ -779,9 +780,6 @@ async def orchestrate(config: OrchestratorConfig):
             # W&B axis
             "step": progress.step,
         }
-        if inference_metrics_collector is not None:
-            to_log.update(await inference_metrics_collector.collect())
-
         # Per-env metrics
         per_env_columns = [
             "seq_len",
@@ -905,10 +903,11 @@ async def orchestrate(config: OrchestratorConfig):
     # Stop scheduler
     await scheduler.stop()
 
+    if inference_metrics_exporter is not None:
+        inference_metrics_exporter.stop()
+
     # Stop inference pool
     await inference_pool.stop()
-    if inference_metrics_collector is not None:
-        await inference_metrics_collector.stop()
 
     if teacher_inference_pool is not None:
         await teacher_inference_pool.stop()

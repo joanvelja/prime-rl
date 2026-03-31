@@ -243,6 +243,9 @@ class PrimeMonitor(Monitor):
             },
         )
 
+    def log_time_series(self, metrics: dict[str, Any], timestamp: float) -> None:
+        self.history.append(metrics)
+
     def log_samples(self, rollouts: list[vf.RolloutOutput], step: int) -> None:
         """Logs rollouts to Prime Intellect API using presigned URLs for direct R2 upload."""
         if not self.is_master:

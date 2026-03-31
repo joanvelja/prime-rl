@@ -31,6 +31,7 @@ class WandbMonitor(Monitor):
         self.logger = get_logger()
         self.history: list[dict[str, Any]] = []
         self.output_dir = output_dir
+        self.start_time = time.time()
 
         rank = int(os.environ.get("RANK", os.environ.get("DP_RANK", "0")))
         self.enabled = self.config is not None
@@ -90,6 +91,8 @@ class WandbMonitor(Monitor):
         self.wandb = init_wandb(max_retries)
 
         wandb.define_metric("*", step_metric="step")
+        wandb.define_metric("inference/wall_time_seconds")
+        wandb.define_metric("inference/*", step_metric="inference/wall_time_seconds")
 
         # Optionally, initialize sample logging attributes
         if config is not None and isinstance(config, WandbWithExtrasConfig) and config.log_extras:
@@ -117,6 +120,20 @@ class WandbMonitor(Monitor):
         if not self.enabled:
             return
         wandb.log({**metrics, "step": step})
+
+    def log_time_series(self, metrics: dict[str, Any], timestamp: float) -> None:
+        self.history.append(metrics)
+        if not self.is_master:
+            return
+        if not self.enabled:
+            return
+        wandb.log(
+            {
+                **metrics,
+                "inference/wall_time_seconds": timestamp - self.start_time,
+                "inference/unix_time_seconds": timestamp,
+            }
+        )
 
     def log_samples(self, rollouts: list[vf.RolloutOutput], step: int) -> None:
         """Logs rollouts to W&B table."""

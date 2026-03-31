@@ -31,6 +31,10 @@ class Monitor(ABC):
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         pass
 
+    @abstractmethod
+    def log_time_series(self, metrics: dict[str, Any], timestamp: float) -> None:
+        pass
+
     def close(self) -> None:
         """Close any resources held by the monitor. Override in subclasses that need cleanup."""
         pass
@@ -56,3 +60,6 @@ class NoOpMonitor(Monitor):
 
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         pass
+
+    def log_time_series(self, metrics: dict[str, Any], timestamp: float) -> None:
+        self.history.append(metrics)
