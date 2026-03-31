@@ -1,16 +1,12 @@
 import copy
 
 from prime_rl.transport.types import MicroBatch, TrainingSample
-from prime_rl.utils.logger import get_logger
 
 
-def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch | None:
+def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch:
     """
     Prepare a problem for sequence packing training.
     Tokenize and prepare tensors.
-
-    Returns None if the sample must be skipped (e.g. multimodal sample that
-    exceeds seq_len — truncation would corrupt the pixel_values/token alignment).
     """
     input_ids = training_example.prompt_ids + training_example.completion_ids
     loss_mask = training_example.prompt_mask + training_example.completion_mask
@@ -27,14 +23,6 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     # computed via prefill in the orchestrator when a teacher model is configured
     teacher_logprobs = training_example.teacher_logprobs
     routed_experts = training_example.routed_experts
-
-    if len(input_ids) > seq_len:
-        # Multimodal samples cannot be truncated: the number of image_pad tokens
-        # in input_ids must match the pixel_values, and truncation would break
-        # that alignment. Skip the sample instead of producing garbage.
-        if training_example.pixel_values is not None:
-            get_logger().debug(f"Skipping multimodal sample that exceeds seq_len ({len(input_ids)} > {seq_len})")
-            return None
 
     if len(input_ids) > seq_len:
         input_ids = input_ids[:seq_len]
@@ -209,21 +197,7 @@ def prepare_batch(
     a text-only batch, the all-gather will hang. We separate micro batches by modality
     and distribute them so that at each step index, all ranks see the same modality.
     """
-    all_samples = [
-        (idx, sample)
-        for idx, rollout in zip(idxs, rollouts)
-        if (sample := prepare_sample(rollout, seq_len)) is not None
-    ]
-
-    num_skipped = len(rollouts) - len(all_samples)
-    if num_skipped > 0:
-        get_logger().warning(f"Skipped {num_skipped}/{len(rollouts)} samples (multimodal exceeding seq_len)")
-
-    if not all_samples:
-        raise ValueError(
-            f"All {len(rollouts)} samples were skipped (multimodal image/token mismatch). "
-            f"Increase seq_len to fit your VLM samples."
-        )
+    all_samples = [(idx, prepare_sample(rollout, seq_len)) for idx, rollout in zip(idxs, rollouts)]
 
     micro_batches = packed_samples_into_micro_bs(all_samples, seq_len, num_loras)
     micro_batches = [pad_micro_batch(micro_batch, pad_to_multiple_of) for micro_batch in micro_batches]
