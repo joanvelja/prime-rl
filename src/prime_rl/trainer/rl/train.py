@@ -462,9 +462,7 @@ def train(config: TrainerConfig):
 
         # Optionally, clip the gradients
 
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
+        grad_norm = clip_grad_norm_(model.parameters(), max_norm=config.optim.max_norm)
         if grad_norm.device.type == "cpu":
             grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
