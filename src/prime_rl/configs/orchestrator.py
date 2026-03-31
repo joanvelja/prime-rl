@@ -917,9 +917,9 @@ class OrchestratorConfig(BaseConfig):
     @classmethod
     def warn_deprecated_prime_monitor(cls, data):
         if isinstance(data, dict) and "prime_monitor" in data:
-            import sys
+            from prime_rl.utils.logger import get_logger
 
-            print("WARNING: 'prime_monitor' is deprecated, use 'prime' instead", file=sys.stderr)
+            get_logger().warning("'prime_monitor' is deprecated, use 'prime' instead")
         return data
 
     @model_validator(mode="after")
