@@ -374,9 +374,43 @@ class Qwen3_5MoeGatedAttentionBase(nn.Module):
         self.q_norm = Qwen3_5MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3_5MoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
+    def output_proj(
+        self,
+        attn_output: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        input_shape = gate.shape[:-1]
+        if attn_output.dim() == 4:
+            attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.contiguous().view(*input_shape, -1)
+        attn_output = attn_output * torch.sigmoid(gate)
+        return self.o_proj(attn_output)
+
 
 class Qwen3_5MoeGatedSDPAAttention(Qwen3_5MoeGatedAttentionBase):
     """Gated softmax attention using PyTorch's scaled_dot_product_attention."""
+
+    def attn_projections(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states, gate = torch.chunk(
+            self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+        )
+        gate = gate.reshape(*input_shape, -1)
+
+        query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        return query_states, key_states, value_states, gate
 
     def _attention_core(
         self,
@@ -401,28 +435,9 @@ class Qwen3_5MoeGatedSDPAAttention(Qwen3_5MoeGatedAttentionBase):
         cu_seqlens: torch.LongTensor | None = None,
         max_seqlen: int | None = None,
     ) -> tuple[torch.Tensor, None]:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        # Split Q into query + gate
-        query_states, gate = torch.chunk(
-            self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
-        )
-        gate = gate.reshape(*input_shape, -1)
-
-        query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
+        query_states, key_states, value_states, gate = self.attn_projections(hidden_states, position_embeddings)
         attn_output = self._attention_core(query_states, key_states, value_states)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(*input_shape, -1)
-        attn_output = attn_output * torch.sigmoid(gate)
-        attn_output = self.o_proj(attn_output)
-        return attn_output, None
+        return self.output_proj(attn_output, gate), None
 
 
 class Qwen3_5MoeGatedFlashAttention(Qwen3_5MoeGatedAttentionBase):
@@ -462,17 +477,14 @@ class Qwen3_5MoeGatedFlashAttention(Qwen3_5MoeGatedAttentionBase):
     ) -> torch.Tensor:
         return self._compute_attention(query_states[0], key_states[0], value_states[0], cu_seqlens, max_seqlen)
 
-    def forward(
+    def attn_projections(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        cu_seqlens: torch.LongTensor | None = None,
-        max_seqlen: int | None = None,
-    ) -> tuple[torch.Tensor, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        # Split Q into query + gate
         query_states, gate = torch.chunk(
             self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
         )
@@ -482,7 +494,6 @@ class Qwen3_5MoeGatedFlashAttention(Qwen3_5MoeGatedAttentionBase):
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
-        # Apply RoPE (need transpose for apply_rotary_pos_emb format)
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         cos, sin = position_embeddings
@@ -490,6 +501,16 @@ class Qwen3_5MoeGatedFlashAttention(Qwen3_5MoeGatedAttentionBase):
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
 
+        return query_states, key_states, value_states, gate
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        cu_seqlens: torch.LongTensor | None = None,
+        max_seqlen: int | None = None,
+    ) -> tuple[torch.Tensor, None]:
+        query_states, key_states, value_states, gate = self.attn_projections(hidden_states, position_embeddings)
         attn_output = self._attention_core(
             query_states,
             key_states,
@@ -497,10 +518,7 @@ class Qwen3_5MoeGatedFlashAttention(Qwen3_5MoeGatedAttentionBase):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        attn_output = attn_output.contiguous().view(*input_shape, -1)
-        attn_output = attn_output * torch.sigmoid(gate)
-        attn_output = self.o_proj(attn_output)
-        return attn_output, None
+        return self.output_proj(attn_output, gate), None
 
 
 QWEN35MOE_ATTN_IMPL2CLASS = {

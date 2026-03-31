@@ -128,13 +128,13 @@ class GlmMoeDsaAttention(nn.Module):
         self.indexer = Indexer(args)
         self.scaling = self.qk_head_dim ** (-0.5)
 
-    def _mla_latents(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def attn_projections(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q_latent = self.q_a_layernorm(self.q_a_proj(hidden_states))
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
         k_compressed, k_rope = compressed_kv.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         return q_latent, self.kv_a_layernorm(k_compressed), k_rope
 
-    def _mla_up_proj(
+    def mla_up_proj(
         self,
         q_latent: torch.Tensor,
         k_compressed_normed: torch.Tensor,
@@ -167,6 +167,12 @@ class GlmMoeDsaAttention(nn.Module):
     def _mla_unabsorb(self, out: torch.Tensor, w_v: torch.Tensor) -> torch.Tensor:
         return torch.einsum("bshk,hdk->bshd", out, w_v)
 
+    def output_proj(self, attn_output: torch.Tensor, w_v: torch.Tensor) -> torch.Tensor:
+        attn_output = self._mla_unabsorb(attn_output, w_v)
+        batch_size, total_tokens = attn_output.shape[:2]
+        attn_output = attn_output.reshape(batch_size, total_tokens, -1)
+        return self.o_proj(attn_output)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -174,15 +180,13 @@ class GlmMoeDsaAttention(nn.Module):
         ks: torch.Tensor | None = None,
         ke: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        batch_size, total_tokens, _ = hidden_states.shape
-
-        q_latent, k_compressed_normed, k_rope = self._mla_latents(hidden_states)
+        q_latent, k_compressed_normed, k_rope = self.attn_projections(hidden_states)
 
         indices = self.indexer.compute_sparse_indices(
             hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
         )
 
-        sparse_q, sparse_kv, w_v = self._mla_up_proj(
+        sparse_q, sparse_kv, w_v = self.mla_up_proj(
             q_latent,
             k_compressed_normed,
             k_rope,
@@ -190,7 +194,4 @@ class GlmMoeDsaAttention(nn.Module):
         )
 
         out = _SparseMLA.apply(sparse_q, sparse_kv, indices, self.scaling)
-        out = self._mla_unabsorb(out, w_v)
-
-        out = out.reshape(batch_size, total_tokens, -1)
-        return self.o_proj(out), None
+        return self.output_proj(out, w_v), None

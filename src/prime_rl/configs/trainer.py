@@ -25,6 +25,22 @@ AttnImplementation: TypeAlias = Literal["sdpa", "flash_attention_2", "flash_atte
 _ATTN_ALIASES = {"flash_attention_4": "fa4"}
 
 
+class GCConfig(BaseConfig):
+    """Configures deterministic garbage collection to avoid stragglers in distributed training.
+
+    Disables Python's automatic GC and runs manual collections every `freq` steps so all
+    ranks collect simultaneously, preventing one rank from stalling others.
+    """
+
+    interval: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Run garbage collection every `interval` training steps.",
+        ),
+    ] = 50
+
+
 class ActivationCheckpointConfig(BaseConfig):
     """Configures activation checkpointing."""
 
@@ -46,12 +62,13 @@ class ActivationCheckpointConfig(BaseConfig):
     targets: Annotated[
         list[str],
         Field(
-            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints QKV projections, QK norms, RoPE, and output projection — everything in the attention layer except the kernel. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints routed expert compute in MoE layers (including LatentMoE). `mamba` checkpoints the Mamba mixer forward in NemotronH Mamba layers. `linear_attn` checkpoints the GatedDeltaNet forward in Qwen3.5-MoE linear attention layers.",
+            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints projection-side attention work outside the kernel, including input/output projections, attention-local norms, RoPE, gating, and model-specific MLA projection helpers where exposed. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints routed expert compute in MoE layers (including LatentMoE). `linear_attn` checkpoints supported token mixers outside the standard softmax-attention path, including NemotronH Mamba layers, Qwen3.5-MoE GatedDeltaNet layers, and AFMoE sliding-window attention layers.",
         ),
     ] = ["norm"]
 
     @model_validator(mode="after")
     def validate_selective_targets(self):
+        self.targets = list(dict.fromkeys(self.targets))
         if self.mode == "selective" and not self.targets:
             raise ValueError("Selective activation checkpointing requires at least one target.")
         return self
@@ -717,6 +734,13 @@ class TrainerConfig(BaseConfig):
             description="Whether to run in benchmark mode. It will automatically set the maximum number of steps to run to 4 and use fake data.",
         ),
     ] = None
+
+    gc: Annotated[
+        GCConfig | None,
+        Field(
+            description="Garbage collection config. Disables automatic GC and runs deterministic collections every N steps to avoid stragglers. Set to null to use Python's default GC behavior.",
+        ),
+    ] = GCConfig()
 
     trace_path: Annotated[Path | None, Field(description="Path to write pytorch profiler trace to.")] = None
 

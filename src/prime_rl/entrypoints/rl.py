@@ -419,6 +419,8 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             num_infer_replicas=config.deployment.num_infer_replicas,
             num_prefill_nodes=infer_deploy.num_prefill_nodes,
             num_decode_nodes=infer_deploy.num_decode_nodes,
+            num_prefill_replicas=infer_deploy.num_prefill_replicas,
+            num_decode_replicas=infer_deploy.num_decode_replicas,
             gpus_per_node=config.deployment.gpus_per_node,
             router_port=infer_deploy.router_port,
             prefill_port=infer_deploy.prefill_port,
@@ -426,6 +428,8 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             inference_tp=config.inference.parallel.tp,
             inference_data_parallel_rpc_port=config.inference.data_parallel_rpc_port,
             use_deep_gemm=config.inference.use_deep_gemm,
+            prefill_env_overrides=infer_deploy.prefill_env_overrides,
+            decode_env_overrides=infer_deploy.decode_env_overrides,
             use_nccl_broadcast=config.weight_broadcast is not None and config.weight_broadcast.type == "nccl",
             wandb_shared=config.wandb is not None and config.wandb.shared,
         )
