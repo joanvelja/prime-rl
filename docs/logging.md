@@ -72,7 +72,7 @@ Logs are captured at the deployment level — the entrypoint redirects subproces
     └── ...
 ```
 
-Environment logs live under `logs/envs/train/{env_name}/` and `logs/envs/eval/{env_name}/`. Per-worker logs (`env_worker_{id}.log`) are only written if `log.env_worker_logs` is enabled. Env log verbosity is controlled by `orchestrator.log.vf_level`.
+Environment logs live under `logs/envs/train/{env_name}/` and `logs/envs/eval/{env_name}/`. Env log verbosity is controlled by `orchestrator.log.vf_level`.
 
 Only rank 0 output is shown in `trainer.log`. Per-rank logs from all ranks are available under `logs/trainer/torchrun/{rdzv_id}/attempt_0/{rank}/{stdout,stderr}.log`, written by torchrun's `--log-dir`.
 
