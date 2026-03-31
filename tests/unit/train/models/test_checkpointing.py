@@ -73,6 +73,4 @@ def test_routed_experts_checkpointing_patches_local_and_global_helpers():
 
     set_selective_activation_checkpointing(layer, ["routed_experts"])
 
-    assert getattr(layer.mlp, _PATCHED_METHODS_ATTR) == frozenset(
-        {"_run_local_routed_experts", "_run_routed_experts"}
-    )
+    assert getattr(layer.mlp, _PATCHED_METHODS_ATTR) == frozenset({"_run_local_routed_experts", "_run_routed_experts"})
