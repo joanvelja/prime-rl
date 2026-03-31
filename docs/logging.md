@@ -90,29 +90,6 @@ Logs are captured at the deployment level — the entrypoint redirects subproces
     └── ...
 ```
 
-## Per-Environment Logging
+Environment logs live under `logs/envs/train/{env_name}/` and `logs/envs/eval/{env_name}/`. Per-worker logs (`env_worker_{id}.log`) are only written if `log.env_worker_logs` is enabled. Env log verbosity is controlled by `orchestrator.log.vf_level`.
 
-Environments are run via `vf.EnvServer` in separate processes. By default, each environment logs to `{output_dir}/logs/envs/train/{env_name}/env_server.log` (and `env_worker_{id}.log` if `log.env_worker_logs` is enabled). The log verbosity can be controlled with `orchestrator.log.vf_level`.
-
-```toml
-[orchestrator.log]
-level = "debug"           # Log level for prime-rl logger
-vf_level = "info"         # Log level for verifiers library
-```
-
-```
-{output_dir}/logs/envs/
-├── train/{env_name}/
-│   ├── env_server.log
-│   └── env_worker_{id}.log    # only if log.env_worker_logs = true
-└── eval/{env_name}/
-    └── ...
-```
-
-## Torchrun Per-Rank Logs
-
-For training, only rank 0 output is shown in the main `trainer.log`. All per-rank logs are available via torchrun's `--log-dir` under `logs/trainer/torchrun/`:
-
-```
-logs/trainer/torchrun/{rdzv_id}/attempt_0/{rank}/{stdout,stderr}.log
-```
+Only rank 0 output is shown in `trainer.log`. Per-rank logs from all ranks are available under `logs/trainer/torchrun/{rdzv_id}/attempt_0/{rank}/{stdout,stderr}.log`, written by torchrun's `--log-dir`.
