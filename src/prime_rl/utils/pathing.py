@@ -33,16 +33,16 @@ def format_log_message(
     if job_log:
         log_lines.append(f"{i1}{'Job:':<{col}}tail -F {log_dir.parent}/job_*.log")
     if trainer:
-        log_lines.append(f"{i1}{'Trainer:':<{col}}tail -F {log_dir}/trainer.log")
+        log_lines.append(f"{i1}{'Trainer (rank 0):':<{col}}tail -F {log_dir}/trainer.log")
         if num_train_nodes > 1:
-            log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/trainer/node_*.log")
-        log_lines.append(f"{i2}{'Per-rank:':<{col - 1}}{log_dir}/trainer/torchrun/")
+            log_lines.append(f"{i2}{'All nodes:':<{col - 1}}tail -F {log_dir}/trainer/node_*.log")
+        log_lines.append(f"{i2}{'All ranks:':<{col - 1}}tail -F {log_dir}/trainer/torchrun/**/stdout.log")
     if orchestrator:
         log_lines.append(f"{i1}{'Orchestrator:':<{col}}tail -F {log_dir}/orchestrator.log")
     if inference:
         log_lines.append(f"{i1}{'Inference:':<{col}}tail -F {log_dir}/inference.log")
         if num_infer_nodes > 1:
-            log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
+            log_lines.append(f"{i2}{'All nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
     if env_log_dir and train_env_names:
         log_lines.append(f"{i1}{'Envs:':<{col}}tail -F {env_log_dir}/*/*/*.log")
         log_lines.append(f"{i2}{'Train:':<{col - 1}}tail -F {env_log_dir}/train/*/*.log")

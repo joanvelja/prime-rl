@@ -93,4 +93,5 @@ srun bash -c '
         --local-ranks-filter=0 \
         -m prime_rl.trainer.sft.train \
         @ $CONFIG_PATH \
-        2>&1 | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log'
+        2>&1 | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log
+'
