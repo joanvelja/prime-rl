@@ -133,8 +133,8 @@ def train(config: TrainerConfig):
         logger.info("Initialized multi-run checkpoint manager")
 
     # Set up garbage collection
-    logger.info(f"Initializing garbage collection (freq={config.gc.freq}, debug={config.gc.debug})")
-    gc_handler = GarbageCollection(gc_freq=config.gc.freq, debug=config.gc.debug)
+    logger.info(f"Initializing garbage collection (freq={config.gc.freq})")
+    gc_handler = GarbageCollection(gc_freq=config.gc.freq)
 
     # Initialize the model and tokenizer
     logger.info(f"Initializing model ({config.model})")

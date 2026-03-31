@@ -111,8 +111,8 @@ def train(config: SFTConfig):
     ckpt_manager, weight_ckpt_manager = setup_ckpt_managers(config.output_dir, config.ckpt, config.model.lora)
 
     # Set up garbage collection
-    logger.info(f"Initializing garbage collection (freq={config.gc.freq}, debug={config.gc.debug})")
-    gc_handler = GarbageCollection(gc_freq=config.gc.freq, debug=config.gc.debug)
+    logger.info(f"Initializing garbage collection (freq={config.gc.freq})")
+    gc_handler = GarbageCollection(gc_freq=config.gc.freq)
 
     checkpoint_step = None
     if config.ckpt and config.ckpt.resume_step is not None and ckpt_manager is not None:

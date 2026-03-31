@@ -404,23 +404,15 @@ class GarbageCollection:
     https://github.com/pytorch/torchtitan
     """
 
-    def __init__(self, gc_freq: int = 50, debug: bool = False):
+    def __init__(self, gc_freq: int = 50):
         assert gc_freq > 0, "gc_freq must be a positive integer"
         self.gc_freq = gc_freq
-        self.debug = debug
         self.logger = get_logger()
         gc.disable()
         self.collect("Initial GC collection")
-        if debug:
-            from torch.utils.viz._cycles import warn_tensor_cycles
-
-            if get_world().rank == 0:
-                warn_tensor_cycles()
 
     def run(self, step_count: int):
-        if self.debug:
-            self.collect("Force GC to perform collection to obtain debug information", generation=2)
-        elif step_count > 1 and step_count % self.gc_freq == 0:
+        if step_count > 1 and step_count % self.gc_freq == 0:
             self.collect("Performing periodic GC collection")
 
     def collect(self, reason: str, generation: int = 1):

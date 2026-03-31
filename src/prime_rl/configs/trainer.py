@@ -484,13 +484,6 @@ class GCConfig(BaseConfig):
         ),
     ] = 50
 
-    debug: Annotated[
-        bool,
-        Field(
-            description="When enabled, performs GC every step and warns about tensor reference cycles on rank 0. Useful for debugging memory leaks.",
-        ),
-    ] = False
-
 
 class CheckpointConfig(BaseConfig):
     """Configures checkpointing the full model, optimizer and training state for resuming training."""
