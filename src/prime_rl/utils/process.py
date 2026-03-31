@@ -3,7 +3,6 @@ from subprocess import Popen
 from threading import Event, Thread
 
 import setproctitle
-from loguru import logger
 
 PRIME_RL_PROC_PREFIX = "PRIME-RL"
 
@@ -17,7 +16,6 @@ def set_proc_title(name: str) -> None:
     """
     title = f"{PRIME_RL_PROC_PREFIX}::{name}"
     setproctitle.setproctitle(title)
-    logger.info(f"Process title set to {title!r}")
 
 
 def cleanup_threads(threads: list[Thread]):
