@@ -21,14 +21,12 @@ logger.info("Hello world")
 
 **How it works:**
 
-1. **`setup_logger(log_level)`** - Initializes the global logger exactly once:
+1. **`get_logger()`** - Returns the global logger instance. Always works — if `setup_logger` hasn't been called yet, it initializes a default logger automatically. Safe to call from any module at any time.
+
+2. **`setup_logger(log_level)`** - Configures (or reconfigures) the global logger:
    - Creates an isolated loguru `Logger` instance (not the default `loguru.logger`) to prevent third-party code from hijacking our logs
    - Adds a stdout handler with colorized output (or JSON output if `json_logging=True`)
-   - Raises `RuntimeError` if called twice
-
-2. **`get_logger()`** - Returns the global logger instance:
-   - Raises `RuntimeError` if `setup_logger` hasn't been called yet
-   - Safe to call from any module after initialization
+   - Can be called multiple times — cleans up the previous logger before creating a new one
 
 3. **`reset_logger()`** - Resets the global logger to `None`:
    - Used in subprocesses that inherit parent state (e.g., env workers)
