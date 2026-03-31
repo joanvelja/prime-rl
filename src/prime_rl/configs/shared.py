@@ -102,11 +102,6 @@ class VLMConfig(BaseConfig):
         Field(description="Dotted attribute path to the language model module (e.g. 'model.language_model')."),
     ]
 
-    image_token: Annotated[
-        str,
-        Field(description="The image placeholder token in the tokenizer vocabulary (e.g. '<|image_pad|>')."),
-    ] = "<|image_pad|>"
-
 
 class BaseModelConfig(BaseConfig):
     """Configures the model."""

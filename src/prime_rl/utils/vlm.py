@@ -21,14 +21,20 @@ class VLMModelInfo:
 
     vision_encoder_attr: str
     language_model_attr: str
-    image_token: str = "<|image_pad|>"
+    image_token_id: int
 
 
 # Central registry: model_type -> architecture info.
 VLM_REGISTRY: dict[str, VLMModelInfo] = {
-    "qwen3_vl": VLMModelInfo(vision_encoder_attr="model.visual", language_model_attr="model.language_model"),
-    "qwen3_5": VLMModelInfo(vision_encoder_attr="model.visual", language_model_attr="model.language_model"),
-    "qwen3_5_moe": VLMModelInfo(vision_encoder_attr="model.visual", language_model_attr="model.language_model"),
+    "qwen3_vl": VLMModelInfo(
+        vision_encoder_attr="model.visual", language_model_attr="model.language_model", image_token_id=151655
+    ),
+    "qwen3_5": VLMModelInfo(
+        vision_encoder_attr="model.visual", language_model_attr="model.language_model", image_token_id=151655
+    ),
+    "qwen3_5_moe": VLMModelInfo(
+        vision_encoder_attr="model.visual", language_model_attr="model.language_model", image_token_id=151655
+    ),
 }
 
 # Text-only default
@@ -79,6 +85,12 @@ def get_language_model(model: nn.Module, override: str | None = None) -> nn.Modu
 
     # Text-only models: language model is directly at model.model
     return model.model
+
+
+def get_image_token_id(model_config: PretrainedConfig) -> int | None:
+    """Return the image token ID for VLM models, or None for text-only models."""
+    info = _get_model_info_from_config(model_config)
+    return info.image_token_id if info is not None else None
 
 
 def get_layer_prefix(model_config: PretrainedConfig, override: str | None = None) -> str:
