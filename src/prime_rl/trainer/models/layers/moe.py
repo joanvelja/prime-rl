@@ -369,7 +369,10 @@ def _run_deepep_routed_experts(
     def run_pending_chunk(pending_state):
         hidden_states, num_tokens_per_expert, dispatch_state = finalize_dispatch_tokens(pending_state)
         routed_output = experts(hidden_states, num_tokens_per_expert)
-        return combine_tokens(routed_output, dispatch_state)
+        combined_output = combine_tokens(routed_output, dispatch_state)
+        if finalize_combined_output is not None:
+            return finalize_combined_output(combined_output)
+        return combined_output
 
     pending_state = dispatch_chunk(0, chunk_size)
     routed_outputs: list[torch.Tensor] = []
@@ -384,8 +387,6 @@ def _run_deepep_routed_experts(
     # Overlap the shared branch with the async DeepEP combine.
     parallel_output = compute_parallel_output(x) if compute_parallel_output is not None else None
     sync_combine()
-    if finalize_combined_output is not None:
-        routed_outputs = [finalize_combined_output(routed_output) for routed_output in routed_outputs]
     routed_output = routed_outputs[0] if len(routed_outputs) == 1 else torch.cat(routed_outputs, dim=0)
     if parallel_output is None:
         return routed_output
