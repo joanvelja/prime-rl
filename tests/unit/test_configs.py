@@ -161,24 +161,29 @@ def test_selective_activation_checkpointing_requires_custom_impl():
         TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})
 
 
-def test_online_difficulty_filtering_sets_adv_filter():
+def test_online_difficulty_filtering_sets_min_abs_adv():
     with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
         config = OrchestratorConfig.model_validate({"buffer": {"online_difficulty_filtering": True}})
-    assert config.buffer.adv_filter == 0.0
+    assert config.buffer.min_abs_adv == 0.0
 
 
-def test_verification_disabled_rejects_adv_filter():
-    with pytest.raises(ValidationError, match="buffer.adv_filter"):
+def test_min_abs_adv():
+    config = OrchestratorConfig.model_validate({"buffer": {"min_abs_adv": 0.2}})
+    assert config.buffer.min_abs_adv == 0.2
+
+
+def test_verification_disabled_rejects_min_abs_adv():
+    with pytest.raises(ValidationError, match="buffer.min_abs_adv"):
         OrchestratorConfig.model_validate(
             {
                 "verification": {"enabled": False},
-                "buffer": {"adv_filter": 0.0},
+                "buffer": {"min_abs_adv": 0.0},
             }
         )
 
 
-def test_length_shaping_requires_adv_filter():
-    with pytest.raises(ValidationError, match="buffer.adv_filter"):
+def test_length_shaping_requires_min_abs_adv():
+    with pytest.raises(ValidationError, match="buffer.min_abs_adv"):
         OrchestratorConfig.model_validate(
             {
                 "advantage": {"length_shaping_alpha": 0.33},

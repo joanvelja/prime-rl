@@ -10,7 +10,7 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
-from prime_rl.orchestrator.advantage import compute_advantages_and_keep_mask
+from prime_rl.orchestrator.advantage import compute_advantages, compute_keep_mask
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_completion_len, get_seq_len, run_rollout
@@ -146,13 +146,13 @@ class Scheduler:
         remaining_batch_target: int,
     ) -> tuple[list[bool], int]:
         """Select rollouts that count toward the current batch target."""
-        _, keep_mask = compute_advantages_and_keep_mask(
+        advantages = compute_advantages(
             rewards=[rollout["reward"] for rollout in rollouts],
             completion_lengths=[get_completion_len(rollout) for rollout in rollouts],
             samples_per_problem=self.rollouts_per_example,
             advantage_config=self.config.advantage,
-            adv_filter=self.config.buffer.adv_filter,
         )
+        keep_mask = compute_keep_mask(advantages, self.config.buffer.min_abs_adv)
         selected_mask: list[bool] = []
         batch_progress = 0
         for rollout, keep in zip(rollouts, keep_mask):

@@ -185,7 +185,7 @@ def test_select_rollouts_ignores_filtered_rollouts():
     scheduler.config = SimpleNamespace(
         output_dir=Path("/tmp/prime-rl-test"),
         advantage=DefaultAdvantageConfig(),
-        buffer=SimpleNamespace(adv_filter=0.0),
+        buffer=SimpleNamespace(min_abs_adv=0.0),
     )
 
     rollouts = [
@@ -208,13 +208,13 @@ def test_select_rollouts_allows_final_overshoot():
     scheduler.config = SimpleNamespace(
         output_dir=Path("/tmp/prime-rl-test"),
         advantage=DefaultAdvantageConfig(),
-        buffer=SimpleNamespace(adv_filter=0.0),
+        buffer=SimpleNamespace(min_abs_adv=0.2),
     )
 
     rollouts = [
-        make_rollout(reward=0.0, completion_len=3),
+        make_rollout(reward=0.5, completion_len=3),
         make_rollout(reward=1.0, completion_len=4),
-        make_rollout(reward=0.6, completion_len=5),
+        make_rollout(reward=0.0, completion_len=5),
     ]
 
     selected_mask, batch_progress = scheduler.select_rollouts(rollouts, remaining_batch_target=6)

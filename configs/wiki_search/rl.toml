@@ -34,7 +34,7 @@ oversampling_factor = 2.0
 max_tokens = 512
 
 [orchestrator.buffer]
-online_difficulty_filtering = true
+min_abs_adv = 0.0
 
 [[orchestrator.env]]
 id = "wiki-search"

@@ -99,24 +99,14 @@ def compute_advantages(
     return result.advantages.flatten().tolist()
 
 
-def compute_advantages_and_keep_mask(
-    rewards: list[float],
-    completion_lengths: list[int],
-    samples_per_problem: int,
-    advantage_config: AdvantageConfig | None,
-    adv_filter: float | None,
-) -> tuple[list[float], list[bool]]:
-    """Compute rollout advantages and whether each rollout should be sent to training."""
-    advantages = compute_advantages(
-        rewards=rewards,
-        completion_lengths=completion_lengths,
-        samples_per_problem=samples_per_problem,
-        advantage_config=advantage_config,
-    )
-    keep_mask = [should_keep_rollout(advantage, adv_filter) for advantage in advantages]
-    return advantages, keep_mask
+def compute_keep_mask(
+    advantages: list[float],
+    min_abs_adv: float | None,
+) -> list[bool]:
+    """Compute whether each rollout should be sent to training."""
+    return [should_keep_rollout(advantage, min_abs_adv) for advantage in advantages]
 
 
-def should_keep_rollout(advantage: float, adv_filter: float | None) -> bool:
+def should_keep_rollout(advantage: float, min_abs_adv: float | None) -> bool:
     """Returns whether a rollout should be sent to training."""
-    return adv_filter is None or advantage > adv_filter
+    return min_abs_adv is None or abs(advantage) > min_abs_adv

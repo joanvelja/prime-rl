@@ -108,13 +108,13 @@ def test_buffer_problem_pool_assignment(dummy_env_group, make_rollouts):
 
 
 def test_buffer_online_difficulty_filtering(dummy_env_group, make_rollouts):
-    """The legacy online_difficulty_filtering flag now maps to adv_filter=0.0."""
+    """The legacy online_difficulty_filtering flag now maps to min_abs_adv=0.0."""
     dataset = dummy_env_group.get_dataset()
     with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
         buffer = Buffer(dataset, dummy_env_group.env_names, BufferConfig(online_difficulty_filtering=True))
     buffer.update(make_rollouts(dataset.select(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
 
-    assert buffer.config.adv_filter == 0.0
+    assert buffer.config.min_abs_adv == 0.0
     # Buffer always keeps all rollouts; filtering now happens when sending to the trainer.
     assert len(buffer.rollout_buffer) == 10
 
@@ -127,6 +127,16 @@ def test_buffer_no_filtering_by_default(dummy_env_group, make_rollouts):
 
     # All 5 problems -> 10 rollouts kept
     assert len(buffer.rollout_buffer) == 10
+
+
+def test_buffer_metrics_do_not_report_filtered_rollouts(dummy_env_group, make_rollouts):
+    dataset = dummy_env_group.get_dataset()
+    buffer = Buffer(dataset, dummy_env_group.env_names, BufferConfig(easy_threshold=1.0, hard_threshold=0.0))
+    buffer.update(make_rollouts(dataset.select(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
+
+    metrics = buffer.get_metrics()
+
+    assert not any(key.startswith("filtered_rollouts/") for key in metrics)
 
 
 def test_buffer_save_load_with_conversion(dummy_env_group, make_rollouts, tmp_path):
@@ -166,12 +176,17 @@ def test_buffer_env_ratios_validation():
         BufferConfig(env_ratios=[0.5, -0.3, 0.2])
 
 
-def test_online_difficulty_filtering_conflicts_with_nonzero_adv_filter():
+def test_online_difficulty_filtering_conflicts_with_nonzero_min_abs_adv():
     from pydantic import ValidationError
 
     with pytest.warns(FutureWarning, match="buffer.online_difficulty_filtering"):
         with pytest.raises(ValidationError, match="buffer.online_difficulty_filtering"):
-            BufferConfig(online_difficulty_filtering=True, adv_filter=0.5)
+            BufferConfig(online_difficulty_filtering=True, min_abs_adv=0.5)
+
+
+def test_buffer_min_abs_adv():
+    buffer_config = BufferConfig(min_abs_adv=0.5)
+    assert buffer_config.min_abs_adv == 0.5
 
 
 def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):

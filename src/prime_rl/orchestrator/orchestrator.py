@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
 
-from prime_rl.orchestrator.advantage import compute_advantages_and_keep_mask
+from prime_rl.orchestrator.advantage import compute_advantages, compute_keep_mask
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, get_eval_sampling_args
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
@@ -553,13 +553,13 @@ async def orchestrate(config: OrchestratorConfig):
         num_unique_examples = len(set(example_ids))
         rewards = [r["reward"] for r in train_rollouts]
         completion_lens = [get_completion_len(r) for r in train_rollouts]
-        advantages, rollout_keep_mask = compute_advantages_and_keep_mask(
+        advantages = compute_advantages(
             rewards=rewards,
             completion_lengths=completion_lens,
             samples_per_problem=config.rollouts_per_example,
             advantage_config=config.advantage,
-            adv_filter=config.buffer.adv_filter,
         )
+        rollout_keep_mask = compute_keep_mask(advantages, config.buffer.min_abs_adv)
 
         # Convert rollouts to training samples
         parallel_preprocess_start = time.perf_counter()
@@ -630,8 +630,11 @@ async def orchestrate(config: OrchestratorConfig):
             f"to {len(train_examples)} training examples ({sum(selected_rollout_mask)} selected rollouts)"
             + (
                 ""
-                if config.buffer.adv_filter is None
-                else f" after filtering {num_filtered_rollouts} rollout(s) with advantage <= {config.buffer.adv_filter}"
+                if config.buffer.min_abs_adv is None
+                else (
+                    f" after filtering {num_filtered_rollouts} rollout(s) with "
+                    f"|advantage| <= {config.buffer.min_abs_adv}"
+                )
             )
         )
 
@@ -669,7 +672,7 @@ async def orchestrate(config: OrchestratorConfig):
                 "example_id": [rollout["example_id"] for rollout in train_rollouts],
                 "task": [rollout["task"] for rollout in train_rollouts],
                 "reward": [rollout["reward"] for rollout in train_rollouts],
-                "passes_adv_filter": rollout_keep_mask,
+                "passes_min_abs_adv": rollout_keep_mask,
                 "is_truncated": [rollout["is_truncated"] for rollout in train_rollouts],
                 "stop_condition": [rollout.get("stop_condition") for rollout in train_rollouts],
                 "seq_len": [get_seq_len(rollout) for rollout in train_rollouts],
@@ -807,7 +810,7 @@ async def orchestrate(config: OrchestratorConfig):
             to_log[f"reward/{env}/mean"] = env_by_example.reward.mean().mean()
             to_log[f"reward/{env}/max"] = env_by_example.reward.mean().max()
             to_log[f"reward/{env}/min"] = env_by_example.reward.mean().min()
-            to_log[f"filtered_rollouts/{env}"] = 1.0 - env_df.passes_adv_filter.mean()
+            to_log[f"filtered_rollouts/{env}"] = 1.0 - env_df.passes_min_abs_adv.mean()
             solve_none, solve_all, effective_batch_size = compute_solve_rates(env_df)
             to_log[f"solve_none/{env}"] = solve_none
             to_log[f"solve_all/{env}"] = solve_all

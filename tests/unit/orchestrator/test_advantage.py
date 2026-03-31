@@ -5,7 +5,7 @@ from prime_rl.orchestrator.advantage import (
     AdvantageInputs,
     AdvantageOutputs,
     compute_advantages,
-    compute_advantages_and_keep_mask,
+    compute_keep_mask,
     default_advantage_fn,
     setup_advantage_fn,
     should_keep_rollout,
@@ -60,17 +60,16 @@ def test_compute_advantages_without_config():
     assert result == rewards
 
 
-def test_compute_advantages_and_keep_mask():
-    advantages, keep_mask = compute_advantages_and_keep_mask(
+def test_compute_keep_mask():
+    advantages = compute_advantages(
         rewards=[1.0, 0.5, 0.8],
         completion_lengths=[10, 12, 8],
         samples_per_problem=3,
         advantage_config=DefaultAdvantageConfig(),
-        adv_filter=0.0,
     )
+    keep_mask = compute_keep_mask(advantages, min_abs_adv=0.0)
 
-    assert len(advantages) == 3
-    assert keep_mask == [True, False, True]
+    assert keep_mask == [True, True, True]
 
 
 def test_setup_advantage_fn_with_custom_config():
@@ -91,12 +90,14 @@ def test_setup_advantage_fn_with_custom_config():
     assert torch.allclose(result.advantages, torch.tensor([[2.0, 1.0, 1.6]]))
 
 
-def test_should_keep_rollout_adv_filter():
-    assert should_keep_rollout(0.5, adv_filter=None)
-    assert should_keep_rollout(0.5, adv_filter=0.0)
-    assert not should_keep_rollout(0.0, adv_filter=0.0)
-    assert not should_keep_rollout(-0.1, adv_filter=0.0)
-    assert not should_keep_rollout(0.2, adv_filter=0.2)
+def test_should_keep_rollout_min_abs_adv():
+    assert should_keep_rollout(0.5, min_abs_adv=None)
+    assert should_keep_rollout(0.5, min_abs_adv=0.0)
+    assert not should_keep_rollout(0.0, min_abs_adv=0.0)
+    assert should_keep_rollout(-0.1, min_abs_adv=0.0)
+    assert not should_keep_rollout(0.2, min_abs_adv=0.2)
+    assert not should_keep_rollout(-0.2, min_abs_adv=0.2)
+    assert should_keep_rollout(-0.3, min_abs_adv=0.2)
 
 
 def _dummy_custom_advantage(inputs: AdvantageInputs, scale: float = 1.0) -> AdvantageOutputs:

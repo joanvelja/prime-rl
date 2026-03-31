@@ -75,7 +75,7 @@ args = { pool_size = 512 }
 [orchestrator.buffer]
 env_ratios = [0.3, 0.2, 0.3, 0.2, 0.2]
 easy_threshold = 1.0
-online_difficulty_filtering = true
+min_abs_adv = 0.0
 seed = 42
 
 [orchestrator.eval]

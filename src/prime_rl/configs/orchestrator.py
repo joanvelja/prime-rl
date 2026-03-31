@@ -515,11 +515,11 @@ class BufferConfig(BaseConfig):
         ),
     ] = 0.0
 
-    adv_filter: Annotated[
+    min_abs_adv: Annotated[
         float | None,
         Field(
             description=(
-                "Only send rollouts with advantage greater than this threshold to training. "
+                "Only send rollouts with absolute advantage greater than this threshold to training. "
                 "Rollouts are still kept for orchestrator logging. If None, no advantage-based filtering is applied."
             ),
         ),
@@ -528,7 +528,7 @@ class BufferConfig(BaseConfig):
     online_difficulty_filtering: Annotated[
         bool,
         Field(
-            description="Deprecated alias for setting adv_filter=0.0.",
+            description="Deprecated alias for setting min_abs_adv=0.0.",
         ),
     ] = False
 
@@ -553,25 +553,25 @@ class BufferConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def resolve_adv_filter(self):
+    def resolve_min_abs_adv(self):
         if not self.online_difficulty_filtering:
             return self
 
         warnings.warn(
             "buffer.online_difficulty_filtering is deprecated and will be removed in a future version. "
-            "Use buffer.adv_filter = 0.0 instead.",
+            "Use buffer.min_abs_adv = 0.0 instead.",
             FutureWarning,
             stacklevel=2,
         )
 
-        if self.adv_filter is None:
-            self.adv_filter = 0.0
+        if self.min_abs_adv is None:
+            self.min_abs_adv = 0.0
             return self
 
-        if self.adv_filter != 0.0:
+        if self.min_abs_adv != 0.0:
             raise ValueError(
-                "buffer.online_difficulty_filtering is a deprecated alias for buffer.adv_filter=0.0 and "
-                "cannot be combined with a different buffer.adv_filter value."
+                "buffer.online_difficulty_filtering is a deprecated alias for buffer.min_abs_adv=0.0 and "
+                "cannot be combined with a different buffer.min_abs_adv value."
             )
 
         return self
@@ -1014,9 +1014,9 @@ class OrchestratorConfig(BaseConfig):
         if self.verification.enabled:
             return self
 
-        if self.buffer.adv_filter is not None:
+        if self.buffer.min_abs_adv is not None:
             raise ValueError(
-                "verification.enabled cannot be False when buffer.adv_filter is set. "
+                "verification.enabled cannot be False when buffer.min_abs_adv is set. "
                 "These features depend on rewards which are disabled when verification.enabled=False."
             )
         if self.buffer.easy_threshold is not None:
@@ -1032,10 +1032,10 @@ class OrchestratorConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def validate_length_shaping_requires_adv_filter(self):
+    def validate_length_shaping_requires_min_abs_adv(self):
         if isinstance(self.advantage, DefaultAdvantageConfig) and self.advantage.length_shaping_alpha is not None:
-            if self.buffer.adv_filter is None:
-                raise ValueError("Group Relative Reward (GR³) scaling requires buffer.adv_filter to be set")
+            if self.buffer.min_abs_adv is None:
+                raise ValueError("Group Relative Reward (GR³) scaling requires buffer.min_abs_adv to be set")
         return self
 
     @model_validator(mode="after")
