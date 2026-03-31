@@ -31,6 +31,7 @@ Namespaces are one honking great idea -- let's do more of those!
 
 - **Always use uv**: run code with `uv run` or `uv run <command>`, never raw `python`.
 - **Adding dependencies**: add to `pyproject.toml` and run `uv sync --all-extras` to install and lock them.
+- **Git dependency pins**: when pinning git dependencies in `pyproject.toml`, always use a small (7-char) commit hash for the `rev` field.
 
 ## Skills
 
