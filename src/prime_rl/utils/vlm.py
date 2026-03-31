@@ -21,6 +21,7 @@ class VLMModelInfo:
 
     vision_encoder_attr: str
     language_model_attr: str
+    image_token: str = "<|image_pad|>"
 
 
 # Central registry: model_type -> architecture info.
