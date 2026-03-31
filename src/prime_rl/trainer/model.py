@@ -22,6 +22,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils.import_utils import is_flash_attn_3_available
 
 from prime_rl.configs.trainer import ActivationCheckpointConfig, CompileConfig, ModelConfig, TokenizerConfig
+from prime_rl.trainer.distributed import DeepEPExpertParallel
 from prime_rl.trainer.lora import apply_lora_to_model, freeze_all_except_lora_and_specified, strip_lora_from_state_dict
 from prime_rl.trainer.models import (
     AutoModelForCausalLMPrimeRL,
@@ -167,6 +168,20 @@ def is_tt_moe_model(model: nn.Module) -> bool:
     return hasattr(model.config, "num_experts") or hasattr(model.config, "n_routed_experts")
 
 
+def configure_moe_ep_backend(model: nn.Module, config: ModelConfig) -> None:
+    backend = config.ep_comm_backend
+    if backend == "deepep":
+        from prime_rl.trainer.distributed.deepep import configure_num_sms
+
+        configure_num_sms(config.deepep_num_sms)
+    language_model = get_language_model(model)
+    for transformer_block in language_model.layers:
+        if not isinstance(transformer_block.mlp, (MoE, LatentMoE)):
+            continue
+        transformer_block.mlp.set_ep_comm_backend(backend)
+        transformer_block.mlp.set_deepep_token_chunk_size(config.deepep_token_chunk_size)
+
+
 def get_load_balance_stats(
     model: nn.Module, reset_stats: bool = True, try_to_avoid_padding_experts: bool = True
 ) -> dict[str, Tensor | None]:
@@ -307,8 +322,8 @@ def get_model(
             )
         logger.debug(f"Loaded model {config.name} in {time.perf_counter() - load_model_start_time:.2f} seconds")
 
-    # For VLM training, freeze the vision encoder
-    if is_vlm_training:
+    # For VLM models, optionally freeze the vision encoder
+    if is_vlm_training and config.vlm.freeze_vision_encoder:
         freeze_vision_encoder(model, override_attr=config.vlm.vision_encoder_attr)
 
     assert model.lm_head.weight.dtype == dtype, (
@@ -352,8 +367,9 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         vision_encoder = get_vision_encoder(model, override=config.vlm.vision_encoder_attr)
         if vision_encoder is None:
             raise ValueError(f"VLM model {config.name} has no recognized vision encoder")
+
         fully_shard(vision_encoder, mesh=hsdp_mesh, **fsdp_config)
-        get_logger().info("Applied FSDP to frozen vision encoder")
+        get_logger().info(f"Applied FSDP to vision encoder (frozen={config.vlm.freeze_vision_encoder})")
 
     language_model = get_language_model(model, override=config.vlm.language_model_attr if is_vlm_training else None)
     transformer_layers = language_model.layers
@@ -607,6 +623,7 @@ def reshard_module(model: nn.Module):
 def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
     logger = get_logger()
     language_model = get_language_model(model)
+    target_list = sorted(frozenset(ac_config.targets))
     selective_layers = 0
     full_layers = 0
     fallback_layer_types: set[str] = set()
@@ -618,7 +635,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
 
         if ac_config.mode == "selective" and supports_selective_activation_checkpointing(transformer_block):
             model_supported_targets.update(get_supported_targets(transformer_block))
-            set_selective_activation_checkpointing(transformer_block, ac_config.targets)
+            set_selective_activation_checkpointing(transformer_block, target_list)
             selective_layers += 1
         else:
             if ac_config.mode == "selective":
@@ -629,7 +646,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
         language_model.layers.register_module(layer_name, transformer_block)
 
     if ac_config.mode == "selective":
-        unsupported_targets = frozenset(ac_config.targets) - model_supported_targets
+        unsupported_targets = frozenset(target_list) - model_supported_targets
         if unsupported_targets:
             raise ValueError(
                 f"Selective activation checkpoint targets {sorted(unsupported_targets)} are not supported "
@@ -642,7 +659,7 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
             )
         logger.info(
             "Applied selective activation checkpointing "
-            f"(freq={ac_config.freq}, targets={ac_config.targets}, selective_layers={selective_layers}, "
+            f"(freq={ac_config.freq}, targets={target_list}, selective_layers={selective_layers}, "
             f"full_fallback_layers={full_layers})"
         )
         return
@@ -659,15 +676,19 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     get_logger().info(f"Compiled {len(language_model.layers)} layers (fullgraph={compile_config.fullgraph})")
 
 
-def apply_ep(model: nn.Module, parallel_dims: ParallelDims):
+def apply_ep(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims):
     language_model = get_language_model(model)
     for transformer_block in language_model.layers:
         block_mlp = getattr(transformer_block, "mlp", None)
         if block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
+            if config.ep_comm_backend == "torch":
+                parallelize_plan = ExpertParallel()
+            else:
+                parallelize_plan = DeepEPExpertParallel()
             parallelize_module(
                 block_mlp.experts,
                 device_mesh=parallel_dims.get_mesh("ep"),
-                parallelize_plan=ExpertParallel(),
+                parallelize_plan=parallelize_plan,
             )
 
 
@@ -741,6 +762,7 @@ def setup_model(
 
     # 1. We load to meta device by default
     model = get_model(config, device=torch.device("meta"), dtype=DTYPE_MAP[config.optimization_dtype])
+    configure_moe_ep_backend(model, config)
 
     possible_to_load_to_meta = can_reinit_empty_buffers(model)
 
@@ -753,6 +775,7 @@ def setup_model(
     if not possible_to_load_to_meta:
         logger.warning("Cannot load model to meta device only, loading to CPU instead.")
         model = get_model(config, device=torch.device("cpu"), dtype=DTYPE_MAP[config.optimization_dtype])
+        configure_moe_ep_backend(model, config)
 
     lm_head_chunk_size: int | None = None
     if isinstance(config.fused_lm_head_token_chunk_size, int):
@@ -768,7 +791,7 @@ def setup_model(
         freeze_moe_router(model)
 
     if parallel_dims.ep_enabled:
-        apply_ep(model, parallel_dims)
+        apply_ep(model, config, parallel_dims)
         # EP replaces params with DTensors that default to requires_grad=True,
         # re-freeze base params that LoRA froze earlier.
         if config.lora is not None:

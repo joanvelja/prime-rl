@@ -5,25 +5,16 @@ description: How to install prime-rl and its optional dependencies. Use when set
 
 # Installation
 
-## Basic install
-
+## Basic
 ```bash
-uv sync
+uv sync              # core dependencies only
+uv sync --group dev  # dev tools: pytest, ruff, pre-commit
+uv sync --all-extras # recommended: includes flash-attn, flash-attn-cute, etc.
 ```
 
-This installs all core dependencies defined in `pyproject.toml`.
+## Advanced
 
-## All extras at once
-
-The recommended way to install for most users:
-
-```bash
-uv sync --all-extras
-```
-
-This installs all optional extras (flash-attn, flash-attn-cute, etc.) in one go.
-
-## Mamba-SSM (NemotronH models)
+### Mamba-SSM (NemotronH models)
 
 For NemotronH (hybrid Mamba-Transformer-MoE) models, install `mamba-ssm` for Triton-based SSD kernels that match vLLM's precision:
 
@@ -35,7 +26,7 @@ Requires `nvcc` (CUDA toolkit). Without `mamba-ssm`, NemotronH falls back to HF'
 
 Note: do NOT install `causal-conv1d` unless your GPU architecture matches the compiled CUDA kernels. The code automatically falls back to PyTorch nn.Conv1d when it's absent.
 
-## FP8 inference with deep-gemm
+### FP8 inference with deep-gemm
 
 For certain models like GLM-5-FP8, you need `deep-gemm`. Install it via the `fp8-inference` dependency group:
 
@@ -44,6 +35,29 @@ uv sync --group fp8-inference
 ```
 
 This installs the pre-built `deep-gemm` wheel. No CUDA build step is needed.
+
+## Trainer DeepEP backend
+
+The trainer-side MoE `deepep` backend is optional and requires a local DeepEP build.
+
+Install using the provided script, which auto-detects CUDA toolkit and GPU architecture:
+
+```bash
+bash scripts/install_ep_kernels.sh
+```
+
+The script downloads NVSHMEM, builds DeepEP from source, and places the wheel in `deps/`. It skips if DeepEP is already installed. Options:
+
+- `--workspace DIR` — build directory (default: `./ep_kernels_workspace`)
+- `--deepep-ref REF` — DeepEP commit hash (default: `73b6ea4`)
+- `--nvshmem-ver VER` — NVSHMEM version (default: `3.3.24`)
+- `--configure-drivers` — configure IBGDA drivers for multi-node (requires sudo + reboot)
+
+Verify the install:
+
+```bash
+uv run python -c 'import deep_ep; print(deep_ep.__file__)'
+```
 
 ## Dev dependencies
 

@@ -84,6 +84,7 @@ def test_nemotron_h_mamba_moe_only():
         if isinstance(layer, NemotronHAttentionLayer):
             layer.forward = lambda hidden_states, **kwargs: hidden_states
 
+    torch.manual_seed(42)
     with torch.device("cuda"), default_dtype(torch.float32):
         input_ids = torch.randint(0, 256, (1, 32))
         position_ids = torch.arange(0, 32).unsqueeze(0)
