@@ -578,11 +578,13 @@ async def orchestrate(config: OrchestratorConfig):
         rollout_samples_per_rollout: list[int] = []
         num_prefill_tokens = 0
         num_decode_tokens = 0
-        num_skipped_vlm = 0
+        num_total_samples = 0
+        num_skipped_vlm_truncation = 0
         for rollout, advantage, samples in zip(train_rollouts, advantages, results):
             rollout_prefill_tokens = 0
             rollout_decode_tokens = 0
             if samples is not None:
+                num_total_samples += len(samples)
                 rollout_samples_per_rollout.append(len(samples))
                 for sample in samples:
                     # Multimodal samples that exceed seq_len cannot be truncated
@@ -590,7 +592,7 @@ async def orchestrate(config: OrchestratorConfig):
                     # so they never get serialized and transported to the trainer.
                     sample_len = len(sample.prompt_ids) + len(sample.completion_ids)
                     if sample_len > config.seq_len and sample.pixel_values is not None:
-                        num_skipped_vlm += 1
+                        num_skipped_vlm_truncation += 1
                         continue
 
                     sample.advantage = advantage
@@ -607,8 +609,12 @@ async def orchestrate(config: OrchestratorConfig):
             num_prefill_tokens += rollout_prefill_tokens
             num_decode_tokens += rollout_decode_tokens
 
-        if num_skipped_vlm > 0:
-            logger.warning(f"Skipped {num_skipped_vlm} multimodal samples exceeding seq_len ({config.seq_len})")
+        num_skipped = num_total_samples - len(train_examples)
+        if num_skipped > 0:
+            reasons = []
+            if num_skipped_vlm_truncation > 0:
+                reasons.append(f"{num_skipped_vlm_truncation} multimodal exceeding seq_len")
+            logger.warning(f"Skipped {num_skipped}/{num_total_samples} samples ({', '.join(reasons)})")
 
         parallel_preprocess_time = time.perf_counter() - parallel_preprocess_start
         logger.debug(
