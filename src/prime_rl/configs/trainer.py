@@ -449,9 +449,6 @@ class MuonConfig(BaseOptimizerConfig):
 class SignSGDConfig(BaseOptimizerConfig):
     type: Literal["sign_sgd"] = "sign_sgd"
 
-    betas1: Annotated[float, Field(ge=0)] = 0.9
-    betas2: Annotated[float, Field(ge=0)] = 0.999
-
 
 OptimizerConfig: TypeAlias = Annotated[
     SGDConfig | AdamWConfig | MuonConfig | SignSGDConfig, Field(discriminator="type")

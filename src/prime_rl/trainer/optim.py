@@ -172,7 +172,6 @@ def _create_optimizer(
                 params=[p for _, p in named_params],
                 lr=lr,
                 weight_decay=config.weight_decay,
-                betas=(config.betas1, config.betas2),
             )
 
 
