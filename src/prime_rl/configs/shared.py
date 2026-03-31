@@ -102,6 +102,14 @@ class VLMConfig(BaseConfig):
         Field(description="Dotted attribute path to the language model module (e.g. 'model.language_model')."),
     ]
 
+    image_token_id: Annotated[
+        int | None,
+        Field(
+            description="Token ID of the image placeholder in the vocabulary. "
+            "If None, resolved automatically from the VLM registry."
+        ),
+    ] = None
+
 
 class BaseModelConfig(BaseConfig):
     """Configures the model."""

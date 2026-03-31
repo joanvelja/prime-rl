@@ -149,12 +149,17 @@ async def orchestrate(config: OrchestratorConfig):
         processor = AutoProcessor.from_pretrained(
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
-        from transformers import AutoConfig
+        if config.model.vlm.image_token_id is not None:
+            image_token_id = config.model.vlm.image_token_id
+        else:
+            from transformers import AutoConfig
 
-        from prime_rl.utils.vlm import get_image_token_id
+            from prime_rl.utils.vlm import get_image_token_id
 
-        model_config = AutoConfig.from_pretrained(config.model.name, trust_remote_code=config.model.trust_remote_code)
-        image_token_id = get_image_token_id(model_config)
+            model_config = AutoConfig.from_pretrained(
+                config.model.name, trust_remote_code=config.model.trust_remote_code
+            )
+            image_token_id = get_image_token_id(model_config)
 
     # Setup monitor
     logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
