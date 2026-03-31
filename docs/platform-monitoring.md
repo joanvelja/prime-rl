@@ -1,6 +1,6 @@
 # Platform Monitoring
 
-Use `orchestrator.prime_monitor` to register a run on the Prime Intellect platform and stream training metrics, samples, and distributions.
+Use `orchestrator.prime` to register a run on the Prime Intellect platform and stream training metrics, samples, and distributions.
 
 > **Internal-only for now:** external run registration is currently only enabled for internal / allowlisted teams.
 
@@ -23,14 +23,14 @@ export PRIME_API_KEY=pit_...
 ## Minimal config
 
 ```toml
-[orchestrator.prime_monitor]
+[orchestrator.prime]
 run_name = "my-experiment"
 ```
 
 You can also override from the CLI:
 
 ```bash
-uv run rl @ config.toml --orchestrator.prime_monitor.run_name "my-experiment"
+uv run rl @ config.toml --orchestrator.prime.run_name "my-experiment"
 ```
 
 ## Troubleshooting

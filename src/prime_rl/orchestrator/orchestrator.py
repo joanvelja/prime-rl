@@ -158,7 +158,7 @@ async def orchestrate(config: OrchestratorConfig):
         run_config=config,
     )
     prime_monitor = PrimeMonitor(
-        config=config.prime_monitor,
+        config=config.prime,
         output_dir=config.output_dir,
         tokenizer=tokenizer,
         run_config=config,

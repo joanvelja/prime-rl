@@ -764,7 +764,12 @@ class OrchestratorConfig(BaseConfig):
     wandb: WandbWithExtrasConfig | None = None
 
     # The prime monitor configuration
-    prime_monitor: PrimeMonitorConfig | None = None
+    prime: Annotated[
+        PrimeMonitorConfig | None,
+        Field(
+            validation_alias=AliasChoices("prime", "prime_monitor"),
+        ),
+    ] = None
 
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
@@ -908,6 +913,19 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def warn_deprecated_prime_monitor(cls, data):
+        if isinstance(data, dict) and "prime_monitor" in data:
+            import warnings
+
+            warnings.warn(
+                "'prime_monitor' is deprecated, use 'prime' instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return data
+
     @model_validator(mode="after")
     def validate_unique_filter_types(self):
         types = [f.type for f in self.filters]
@@ -1013,8 +1031,8 @@ class OrchestratorConfig(BaseConfig):
             self.eval = None
             if self.wandb:
                 self.wandb.log_extras = None
-            if self.prime_monitor:
-                self.prime_monitor.log_extras = None
+            if self.prime:
+                self.prime.log_extras = None
 
         return self
 
