@@ -136,8 +136,8 @@ def test_prepare_sample_none_routed_experts():
     assert micro_batch.routed_experts is None
 
 
-def test_prepare_sample_skips_multimodal_exceeding_seq_len():
-    """Multimodal samples that exceed seq_len are skipped (returns None) instead of truncated."""
+def test_prepare_sample_truncates_multimodal_exceeding_seq_len():
+    """Multimodal samples that exceed seq_len are truncated (filtering happens in orchestrator)."""
     sample = TrainingSample(
         prompt_ids=[1, 2, 3],
         prompt_mask=[False, False, False],
@@ -150,9 +150,9 @@ def test_prepare_sample_skips_multimodal_exceeding_seq_len():
         pixel_values_shape=[1, 16],
         image_grid_thw=[[1, 1, 1]],
     )
-    # 5 tokens total, seq_len=3 would require truncation
+    # 5 tokens total, seq_len=3 — truncated like any other sample
     result = prepare_sample(sample, seq_len=3)
-    assert result is None
+    assert len(result.input_ids) == 3
 
 
 def test_prepare_sample_keeps_multimodal_within_seq_len():
@@ -190,27 +190,3 @@ def test_prepare_sample_still_truncates_text_only():
     assert result is not None
     assert len(result.input_ids) == 3
     assert result.pixel_values is None
-
-
-def test_prepare_batch_all_skipped_raises():
-    """When all samples are multimodal and exceed seq_len, prepare_batch raises ValueError."""
-    samples = [
-        TrainingSample(
-            prompt_ids=[1, 2, 3],
-            prompt_mask=[False, False, False],
-            completion_ids=[4, 5],
-            completion_mask=[True, True],
-            completion_logprobs=[-0.1, -0.2],
-            completion_temperatures=[1.0, 1.0],
-            advantage=1.0,
-            pixel_values=b"\x00" * 16,
-            pixel_values_shape=[1, 16],
-            image_grid_thw=[[1, 1, 1]],
-        )
-        for _ in range(4)
-    ]
-    # seq_len=3 < 5 tokens, all skipped
-    import pytest
-
-    with pytest.raises(ValueError, match="All .* samples were skipped"):
-        prepare_batch(samples, seq_len=3, num_train_workers=2, idxs=[0] * 4, num_loras=1)
