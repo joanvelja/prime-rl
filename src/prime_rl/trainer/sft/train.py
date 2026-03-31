@@ -19,7 +19,7 @@ from prime_rl.utils.cp import setup_cp_params, shard_for_cp
 from prime_rl.trainer.runs import Progress, get_multi_run_manager, setup_multi_run_manager
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
 from prime_rl.utils.logger import setup_logger
-from prime_rl.trainer.optim import setup_optimizer, reset_optimizer_state
+from prime_rl.trainer.optim import setup_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler
 from prime_rl.trainer.model import (
     forward,
@@ -401,10 +401,6 @@ def train(config: SFTConfig):
         logger.debug("Optimizer step")
         optimizer.step()
         optimizer.zero_grad()
-
-        # Periodically reset optimizer state to stay on-policy and free memory
-        if config.optim.reset_interval and progress.step > 0 and progress.step % config.optim.reset_interval == 0:
-            reset_optimizer_state(optimizer)
 
         # Update learning rate scheduler
         current_lr = optimizer.param_groups[0]["lr"]

@@ -425,15 +425,6 @@ class BaseOptimizerConfig(BaseModel):
             "When False, checkpoints are smaller and faster to write, but the optimizer re-initializes from scratch on resume.",
         ),
     ] = True
-    reset_interval: Annotated[
-        int | None,
-        Field(
-            ge=1,
-            description="Reset optimizer state (momentum, variance) every N steps. "
-            "Frees GPU memory and keeps the optimizer on-policy by discarding stale momentum. "
-            "The optimizer lazily re-initializes fresh state on the next step.",
-        ),
-    ] = None
 
 
 class SGDConfig(BaseOptimizerConfig):

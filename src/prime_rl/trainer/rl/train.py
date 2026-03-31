@@ -14,7 +14,7 @@ import torch.distributed.nn as dist_nn
 from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.trainer.multi_ckpt import setup_multi_checkpoint_manager
-from prime_rl.trainer.optim import setup_optimizer, setup_multi_optimizer, reset_optimizer_state
+from prime_rl.trainer.optim import setup_optimizer, setup_multi_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
@@ -474,10 +474,6 @@ def train(config: TrainerConfig):
         # Update the model parameters
         optimizer.step()
         optimizer.zero_grad()
-
-        # Periodically reset optimizer state to stay on-policy and free memory
-        if config.optim.reset_interval and progress.step > 0 and progress.step % config.optim.reset_interval == 0:
-            reset_optimizer_state(optimizer)
 
         # Update learning rate scheduler
         scheduler.step()
