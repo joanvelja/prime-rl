@@ -78,10 +78,15 @@ def sft_slurm(config: SFTConfig):
     logger.info(f"Wrote SLURM script to {script_path}")
 
     log_dir = get_log_dir(config.output_dir)
-    if config.deployment.type == "single_node":
-        log_message = f"Logs:\n  Trainer:  tail -F {log_dir}/trainer.log"
-    else:
-        log_message = f"Logs:\n  Trainer:  tail -F {log_dir}/trainer.log"
+    num_nodes = config.deployment.num_nodes if config.deployment.type == "multi_node" else 1
+    col = 18
+    i1 = " " * 2
+    i2 = " " * 3
+    log_lines = [f"{i1}{'Trainer:':<{col}}tail -F {log_dir}/trainer.log"]
+    if num_nodes > 1:
+        log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/trainer/node_*.log")
+    log_lines.append(f"{i2}{'Per-rank:':<{col - 1}}{log_dir}/trainer/torchrun/")
+    log_message = "Logs:\n" + "\n".join(log_lines)
 
     if config.dry_run:
         logger.success(f"Dry run complete. To submit manually:\n\n  sbatch {script_path}\n\n{log_message}")

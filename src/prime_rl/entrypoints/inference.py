@@ -88,9 +88,17 @@ def inference_slurm(config: InferenceConfig):
     logger.info(f"Wrote SLURM script to {script_path}")
 
     log_dir = get_log_dir(config.output_dir)
-    log_message = (
-        f"Logs:\n  Job:        tail -F {config.output_dir}/job_*.log\n  Inference:  tail -F {log_dir}/inference.log\n"
-    )
+    num_nodes = getattr(config.deployment, "num_nodes", 1)
+    col = 18
+    i1 = " " * 2
+    i2 = " " * 3
+    log_lines = [
+        f"{i1}{'Job:':<{col}}tail -F {config.output_dir}/job_*.log",
+        f"{i1}{'Inference:':<{col}}tail -F {log_dir}/inference.log",
+    ]
+    if num_nodes > 1:
+        log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
+    log_message = "Logs:\n" + "\n".join(log_lines)
 
     if config.dry_run:
         logger.success(f"Dry run complete. To submit manually:\n\n  sbatch {script_path}\n\n{log_message}")

@@ -455,12 +455,14 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
 
 
 def format_log_message(
-    trainer_log: str,
-    orchestrator_log: str | None,
-    inference_log: str | None,
-    env_log_dir: Path,
-    train_env_names: list[str],
-    eval_env_names: list[str],
+    log_dir: Path,
+    orchestrator: bool = True,
+    inference: bool = True,
+    env_log_dir: Path | None = None,
+    train_env_names: list[str] | None = None,
+    eval_env_names: list[str] | None = None,
+    num_train_nodes: int = 1,
+    num_infer_nodes: int = 0,
 ) -> str:
     col = 18
     i1 = " " * 2
@@ -468,21 +470,27 @@ def format_log_message(
     i3 = " " * 4
     max_name = col - 4
 
-    log_lines = [f"{i1}{'Trainer:':<{col}}tail -F {trainer_log}"]
-    if orchestrator_log:
-        log_lines.append(f"{i1}{'Orchestrator:':<{col}}tail -F {orchestrator_log}")
-    if inference_log:
-        log_lines.append(f"{i1}{'Inference:':<{col}}tail -F {inference_log}")
-    log_lines.append(f"{i1}{'Envs:':<{col}}tail -F {env_log_dir}/*/*/*.log")
-    log_lines.append(f"{i2}{'Train:':<{col - 1}}tail -F {env_log_dir}/train/*/*.log")
-    for name in train_env_names:
-        short = name if len(name) <= max_name else name[: max_name - 3] + "..."
-        log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/train/{name}/*.log")
-    if eval_env_names:
-        log_lines.append(f"{i2}{'Eval:':<{col - 1}}tail -F {env_log_dir}/eval/*/*.log")
-        for name in eval_env_names:
+    log_lines = [f"{i1}{'Trainer:':<{col}}tail -F {log_dir}/trainer.log"]
+    if num_train_nodes > 1:
+        log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/trainer/node_*.log")
+    log_lines.append(f"{i2}{'Per-rank:':<{col - 1}}{log_dir}/trainer/torchrun/")
+    if orchestrator:
+        log_lines.append(f"{i1}{'Orchestrator:':<{col}}tail -F {log_dir}/orchestrator.log")
+    if inference:
+        log_lines.append(f"{i1}{'Inference:':<{col}}tail -F {log_dir}/inference.log")
+        if num_infer_nodes > 1:
+            log_lines.append(f"{i2}{'Nodes:':<{col - 1}}tail -F {log_dir}/inference/node_*.log")
+    if env_log_dir and train_env_names:
+        log_lines.append(f"{i1}{'Envs:':<{col}}tail -F {env_log_dir}/*/*/*.log")
+        log_lines.append(f"{i2}{'Train:':<{col - 1}}tail -F {env_log_dir}/train/*/*.log")
+        for name in train_env_names:
             short = name if len(name) <= max_name else name[: max_name - 3] + "..."
-            log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/eval/{name}/*.log")
+            log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/train/{name}/*.log")
+        if eval_env_names:
+            log_lines.append(f"{i2}{'Eval:':<{col - 1}}tail -F {env_log_dir}/eval/*/*.log")
+            for name in eval_env_names:
+                short = name if len(name) <= max_name else name[: max_name - 3] + "..."
+                log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/eval/{name}/*.log")
     return "Logs:\n" + "\n".join(log_lines)
 
 
@@ -492,19 +500,18 @@ def rl_slurm(config: RLConfig):
     logger = setup_logger(config.log.level or "info", json_logging=config.log.json_logging)
 
     config_dir = config.output_dir / "configs"
+    log_dir = get_log_dir(config.output_dir)
+
     if config.deployment.type == "single_node":
         write_config(config, config_dir, exclude={"slurm", "dry_run", "clean_output_dir"})
         logger.info(f"Wrote config to {config_dir / RL_TOML}")
 
-        log_dir = get_log_dir(config.output_dir)
-        env_log_dir = get_log_dir(config.output_dir) / "envs"
+        env_log_dir = log_dir / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         log_message = format_log_message(
-            trainer_log=f"{log_dir}/trainer.log",
-            orchestrator_log=f"{log_dir}/orchestrator.log",
-            inference_log=f"{log_dir}/inference.log",
+            log_dir=log_dir,
             env_log_dir=env_log_dir,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
@@ -513,18 +520,20 @@ def rl_slurm(config: RLConfig):
         write_subconfigs(config, config_dir)
         logger.info(f"Wrote subconfigs to {config_dir}")
 
-        env_log_dir = get_log_dir(config.output_dir) / "envs"
+        env_log_dir = log_dir / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         has_infer = config.deployment.num_infer_nodes > 0
         log_message = format_log_message(
-            trainer_log=f"{log_dir}/trainer.log",
-            orchestrator_log=f"{log_dir}/orchestrator.log" if has_infer else None,
-            inference_log=f"{log_dir}/inference.log" if has_infer else None,
+            log_dir=log_dir,
+            orchestrator=has_infer,
+            inference=has_infer,
             env_log_dir=env_log_dir,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
+            num_train_nodes=config.deployment.num_train_nodes,
+            num_infer_nodes=config.deployment.num_infer_nodes if has_infer else 0,
         )
 
     script_path = config.output_dir / RL_SBATCH
