@@ -1,20 +1,22 @@
 ---
-name: monitor-rl-run
-description: How to monitor an ongoing RL training run — find output directories, check logs, diagnose performance, and inspect SLURM jobs. Use when asked to check on a run, debug training issues, or investigate performance.
+name: monitor-run
+description: How to monitor ongoing training runs — find output directories, check logs, diagnose performance, and inspect SLURM jobs. Use when asked to check on a run, debug training issues, or investigate performance.
 ---
 
-# Monitor an RL Run
+# Monitor a Run
 
 ## Find the output directory
 
 The output directory is set in the config (`output_dir`). To find it:
 
-- **Local run**: check the resolved config at `{output_dir}/configs/rl.toml`
+- **Local run**: check the resolved config at `{output_dir}/configs/rl.toml` or `sft.toml`
 - **SLURM run**: check `squeue -u $USER` to find the job, then look at the sbatch script or the config dir
 
-## Log files
+## RL
 
-### Local runs
+### Log files
+
+#### Local runs
 
 ```
 {output_dir}/logs/
@@ -33,7 +35,7 @@ The output directory is set in the config (`output_dir`). To find it:
         └── ...
 ```
 
-### SLURM runs
+#### SLURM runs
 
 ```
 {output_dir}/slurm/
@@ -46,7 +48,7 @@ The output directory is set in the config (`output_dir`). To find it:
 
 Env server logs are still under `{output_dir}/logs/envs/`.
 
-## SLURM: check node allocation
+### SLURM: check node allocation
 
 ```bash
 squeue -u $USER -o "%.18i %.9P %.30j %.8T %.10M %.6D %R"
@@ -58,7 +60,7 @@ In a multi-node RL run, nodes are split between trainer and inference:
 
 The node assignment is visible in the SLURM logs and the generated sbatch script at `{output_dir}/rl.sbatch`.
 
-## Performance: trainer
+### Performance: trainer
 
 Check `{output_dir}/logs/trainer/rank_0.log` or the SLURM trainer log.
 
@@ -71,7 +73,7 @@ Key metrics per step:
 
 High `wait_for_batch` means the orchestrator is the bottleneck (slow rollouts, slow envs, or too few inference replicas).
 
-## Performance: orchestrator
+### Performance: orchestrator
 
 Check `{output_dir}/logs/orchestrator.log` or the SLURM orchestrator log.
 
@@ -90,7 +92,7 @@ High `wait_for_ckpt` means the trainer is the bottleneck. The orchestrator logs 
 "Orchestrator resumed: checkpoint ... ready (after ...s)"
 ```
 
-## Performance: env servers
+### Performance: env servers
 
 Check `{output_dir}/logs/envs/train/{env_name}/env_worker_{id}.log`.
 
@@ -98,7 +100,7 @@ Key things to look for:
 - **Event loop lag**: workers log lag stats periodically. A warning is emitted when median > 0.5s or p90 > 1.0s or max > 5.0s — this means the worker is overloaded.
 - **Active task distribution**: check if tasks are evenly distributed across workers per-env and across envs. Uneven distribution suggests some workers/envs are slower.
 
-## Quick health check
+### Quick health check
 
 ```bash
 # Tail the most important logs
