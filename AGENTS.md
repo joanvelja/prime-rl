@@ -48,5 +48,6 @@ Branch prefixes: `feat/`, `fix/`, `chore/`
 
 ## GitHub
 
+- **Draft PRs**: always create PRs as drafts (`gh pr create --draft`) to avoid triggering CI unnecessarily.
 - **Pull requests**: do not include a "Test plan" section in PR descriptions unless you actually ran tests to verify the changes or the user explicitly asked for one.
 
