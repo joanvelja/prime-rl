@@ -32,7 +32,7 @@ def format_log_message(
     if job_log:
         log_lines.append(f"{i1}{'Job:':<{col}}tail -F {log_dir.parent}/job_*.log")
     if trainer:
-        log_lines.append(f"{i1}{'Trainer (rank 0):':<{col}}tail -F {log_dir}/trainer.log")
+        log_lines.append(f"{i1}{'Trainer:':<{col}}tail -F {log_dir}/trainer.log")
         if num_train_nodes > 1:
             log_lines.append(f"{i2}{'All nodes:':<{col - 1}}tail -F {log_dir}/trainer/node_*.log")
         log_lines.append(f"{i2}{'All ranks:':<{col - 1}}tail -F {log_dir}/trainer/torchrun/*/*/*/*.log")
