@@ -308,7 +308,9 @@ def finalize_dispatch_tokens(pending_state: _PendingDispatchState) -> tuple[torc
     num_tokens_per_expert = pending_state.num_tokens_per_expert.to(hidden_states.device)
 
     if pending_state.score_before_experts and permuted_scores is not None:
-        hidden_states = hidden_states * permuted_scores.to(hidden_states.dtype).reshape(-1, 1)
+        hidden_states = (hidden_states.to(torch.float32) * permuted_scores.to(torch.float32).reshape(-1, 1)).to(
+            hidden_states.dtype
+        )
         permuted_scores_for_state = None
     else:
         permuted_scores_for_state = permuted_scores
@@ -324,7 +326,9 @@ def finalize_dispatch_tokens(pending_state: _PendingDispatchState) -> tuple[torc
 
 def combine_tokens(hidden_states: torch.Tensor, state: _DispatchState) -> torch.Tensor:
     if state.permuted_scores is not None:
-        hidden_states = hidden_states * state.permuted_scores.to(hidden_states.dtype).reshape(-1, 1)
+        hidden_states = (
+            hidden_states.to(torch.float32) * state.permuted_scores.to(torch.float32).reshape(-1, 1)
+        ).to(hidden_states.dtype)
     hidden_states = _unpermute_tokens(hidden_states, state.permuted_indices, state.num_recv_tokens)
     return _DeepEPCombine.apply(hidden_states, state.handle_id)
 
