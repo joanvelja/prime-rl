@@ -16,6 +16,7 @@ from torch.distributed.checkpoint.state_dict_loader import load as dcp_load
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, OffloadPolicy, fully_shard
 from torch.distributed.tensor.parallel import parallelize_module
+from torchtitan.distributed.expert_parallel import ExpertParallel
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, PretrainedConfig
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils.import_utils import is_flash_attn_3_available
@@ -37,7 +38,7 @@ from prime_rl.trainer.models.layers.checkpointing import (
     supports_selective_activation_checkpointing,
 )
 from prime_rl.trainer.models.layers.lm_head import inject_prime_lm_head
-from prime_rl.trainer.models.layers.moe import DeepEPLatentMoE, DeepEPMoE, LatentMoE, MoE
+from prime_rl.trainer.models.layers.moe import LatentMoE, MoE
 from prime_rl.trainer.parallel_dims import ParallelDims
 from prime_rl.trainer.weights import (
     load_state_dict,
@@ -167,38 +168,18 @@ def is_tt_moe_model(model: nn.Module) -> bool:
     return hasattr(model.config, "num_experts") or hasattr(model.config, "n_routed_experts")
 
 
-def _set_runtime_moe_config(
-    model_config: PretrainedConfig,
-    *,
-    use_deepep_moe: bool,
-    deepep_token_chunk_size: int | None,
-    visited: set[int] | None = None,
-) -> None:
-    if visited is None:
-        visited = set()
-    if id(model_config) in visited:
-        return
-    visited.add(id(model_config))
-
-    model_config.use_deepep_moe = use_deepep_moe
-    model_config.deepep_token_chunk_size = deepep_token_chunk_size
-
-    for subconfig_key in getattr(model_config, "sub_configs", {}):
-        subconfig = getattr(model_config, subconfig_key, None)
-        if subconfig is not None:
-            _set_runtime_moe_config(
-                subconfig,
-                use_deepep_moe=use_deepep_moe,
-                deepep_token_chunk_size=deepep_token_chunk_size,
-                visited=visited,
-            )
-
-
-def configure_moe_expert_parallelism(model: nn.Module, config: ModelConfig) -> None:
-    if config.ep > 1:
+def configure_moe_ep_backend(model: nn.Module, config: ModelConfig) -> None:
+    backend = config.ep_comm_backend
+    if backend == "deepep":
         from prime_rl.trainer.distributed.deepep import configure_num_sms
 
         configure_num_sms(config.deepep_num_sms)
+    language_model = get_language_model(model)
+    for transformer_block in language_model.layers:
+        if not isinstance(transformer_block.mlp, (MoE, LatentMoE)):
+            continue
+        transformer_block.mlp.set_ep_comm_backend(backend)
+        transformer_block.mlp.set_deepep_token_chunk_size(config.deepep_token_chunk_size)
 
 
 def get_load_balance_stats(
@@ -263,11 +244,6 @@ def get_model(
         if subconfig is not None and hasattr(subconfig, "use_cache"):
             subconfig.use_cache = False
     model_config.use_grouped_mm = config.moe_use_grouped_mm
-    _set_runtime_moe_config(
-        model_config,
-        use_deepep_moe=config.ep > 1,
-        deepep_token_chunk_size=config.deepep_token_chunk_size,
-    )
 
     # Ensure pad_token_id is set (some models like Qwen3MoE don't have it).
     # In transformers v5, token IDs moved from PretrainedConfig to GenerationConfig.
@@ -702,14 +678,16 @@ def apply_ep(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims)
     language_model = get_language_model(model)
     for transformer_block in language_model.layers:
         block_mlp = getattr(transformer_block, "mlp", None)
-        if block_mlp is not None and isinstance(block_mlp, (DeepEPMoE, DeepEPLatentMoE)):
+        if block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
+            if config.ep_comm_backend == "torch":
+                parallelize_plan = ExpertParallel()
+            else:
+                parallelize_plan = DeepEPExpertParallel()
             parallelize_module(
                 block_mlp.experts,
                 device_mesh=parallel_dims.get_mesh("ep"),
-                parallelize_plan=DeepEPExpertParallel(),
+                parallelize_plan=parallelize_plan,
             )
-        elif block_mlp is not None and isinstance(block_mlp, (MoE, LatentMoE)):
-            raise ValueError("EP requires DeepEP-specific MoE classes to be selected at model construction time.")
 
 
 def _move_buffers_to_cuda(model: nn.Module, config: ModelConfig) -> None:
@@ -782,7 +760,7 @@ def setup_model(
 
     # 1. We load to meta device by default
     model = get_model(config, device=torch.device("meta"), dtype=DTYPE_MAP[config.optimization_dtype])
-    configure_moe_expert_parallelism(model, config)
+    configure_moe_ep_backend(model, config)
 
     possible_to_load_to_meta = can_reinit_empty_buffers(model)
 
@@ -795,7 +773,7 @@ def setup_model(
     if not possible_to_load_to_meta:
         logger.warning("Cannot load model to meta device only, loading to CPU instead.")
         model = get_model(config, device=torch.device("cpu"), dtype=DTYPE_MAP[config.optimization_dtype])
-        configure_moe_expert_parallelism(model, config)
+        configure_moe_ep_backend(model, config)
 
     lm_head_chunk_size: int | None = None
     if isinstance(config.fused_lm_head_token_chunk_size, int):

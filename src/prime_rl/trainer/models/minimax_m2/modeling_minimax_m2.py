@@ -12,7 +12,7 @@ from transformers.utils import TransformersKwargs, auto_docstring, can_return_tu
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.models.layers.attn import ATTN_IMPL2CLASS, AttentionConfig
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
-from prime_rl.trainer.models.layers.moe import MoEArgs, build_moe_from_config
+from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
 from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
 from prime_rl.trainer.models.minimax_m2.configuration_minimax_m2 import MiniMaxM2Config
@@ -55,12 +55,7 @@ class MiniMaxM2DecoderLayer(GradientCheckpointingLayer):
             use_grouped_mm=config.use_grouped_mm,
             load_balance_coeff=1e-3 if config.use_routing_bias else None,
         )
-        self.mlp = build_moe_from_config(
-            config,
-            moe_args,
-            dim=config.hidden_size,
-            hidden_dim=config.intermediate_size,
-        )
+        self.mlp = MoE(moe_args, dim=config.hidden_size, hidden_dim=config.intermediate_size)
 
         self.input_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
         self.post_attention_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))

@@ -17,6 +17,7 @@ from prime_rl.utils.config import BaseConfig
 # -- Shared trainer configs (used by both SFT and RL trainers) --
 
 AttnImplementation: TypeAlias = Literal["sdpa", "flash_attention_2", "flash_attention_3", "fa4"]
+EPCommBackend: TypeAlias = Literal["torch", "deepep"]
 
 # User-facing name -> internal name. Users set `flash_attention_4` in configs,
 # which gets rewritten to `fa4` before pydantic validation.
@@ -222,6 +223,16 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = 1
 
+    ep_comm_backend: Annotated[
+        EPCommBackend,
+        Field(
+            description=(
+                "Communication backend for expert parallelism. "
+                "`torch` uses TorchTitan all-to-all collectives and `deepep` uses DeepEP custom kernels."
+            ),
+        ),
+    ] = "torch"
+
     deepep_num_sms: Annotated[
         int,
         Field(
@@ -230,8 +241,8 @@ class ModelConfig(BaseModelConfig):
                 "Number of SMs to allocate for DeepEP intranode dispatch/combine kernels. "
                 "Also determines internode RDMA channel count (num_channels = num_sms / 2). "
                 "Lower values leave more SMs for compute; higher values speed up dispatch/combine. "
-                "The optimal value depends on the EP degree and hardware. "
-                "Only used when model.ep > 1."
+                "The optimal value depends on the EP degree and hardware."
+                "Only used when ep_comm_backend='deepep'."
             ),
         ),
     ] = 20
@@ -243,7 +254,7 @@ class ModelConfig(BaseModelConfig):
             description=(
                 "Optional token chunk size for DeepEP MoE pipelining. "
                 "When set, DeepEP dispatch for chunk i+1 is launched while experts compute chunk i. "
-                "Only used when model.ep > 1."
+                "Only used when ep_comm_backend='deepep'."
             ),
         ),
     ] = None
@@ -371,6 +382,16 @@ class ModelConfig(BaseModelConfig):
     def flash_attention_4_only_with_custom_impl(self):
         if self.attn == "fa4" and self.impl != "custom":
             raise ValueError("Flash attention 4 is only supported with the custom implementation")
+        return self
+
+    @model_validator(mode="after")
+    def validate_ep_comm_backend(self):
+        if self.ep_comm_backend == "torch":
+            return self
+
+        if self.ep <= 1:
+            raise ValueError(f"model.ep_comm_backend='{self.ep_comm_backend}' requires model.ep > 1.")
+
         return self
 
 

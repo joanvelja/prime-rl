@@ -21,7 +21,7 @@ from transformers.utils import TransformersKwargs
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
 from prime_rl.trainer.models.layers.mlp import MLP, MLPConfig
-from prime_rl.trainer.models.layers.moe import MoEArgs, build_moe_from_config
+from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
 from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import (
     RotaryEmbedding,
@@ -351,12 +351,7 @@ class AfmoeDecoderLayer(GradientCheckpointingLayer):
             load_balance_coeff=getattr(config, "load_balance_coeff", None),
         )
         if self.moe_enabled:
-            self.mlp = build_moe_from_config(
-                config,
-                moe_args,
-                dim=config.hidden_size,
-                hidden_dim=config.moe_intermediate_size,
-            )
+            self.mlp = MoE(moe_args, dim=config.hidden_size, hidden_dim=config.moe_intermediate_size)
         else:
             self.mlp = MLP(mlp_config)
 
