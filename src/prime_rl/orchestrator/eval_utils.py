@@ -9,8 +9,9 @@ import verifiers as vf
 from prime_rl.configs.orchestrator import EvalSamplingConfig
 from prime_rl.orchestrator.vf_utils import evaluate, get_completion_len
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.monitor import get_monitor
+from prime_rl.utils.prime_monitor import PrimeMonitor
 from prime_rl.utils.utils import capitalize
+from prime_rl.utils.wandb_monitor import WandbMonitor
 
 
 def compute_eval_ckpt_step(
@@ -99,6 +100,8 @@ async def evaluate_env(
     ckpt_step: int,
     step: int,
     get_client: Callable[[], Awaitable[vf.ClientConfig]],
+    wandb_monitor: WandbMonitor | None = None,
+    prime_monitor: PrimeMonitor | None = None,
 ):
     logger = get_logger()
     logger.info(f"Evaluating {env_name} ({num_examples=}, {rollouts_per_example=})")
@@ -118,11 +121,13 @@ async def evaluate_env(
 
     if not outputs:
         logger.warning(f"All rollouts failed for {env_name} ({failed_rollouts} failed), skipping metrics")
-        monitor = get_monitor()
-        monitor.log(
-            {f"eval/{env_name}/failed_rollouts": failed_rollouts, "progress/ckpt_step": ckpt_step, "step": step},
-            step=step,
-        )
+        failed_metrics = {
+            f"eval/{env_name}/failed_rollouts": failed_rollouts,
+            "progress/ckpt_step": ckpt_step,
+            "step": step,
+        }
+        wandb_monitor.log(failed_metrics, step=step)
+        prime_monitor.log(failed_metrics, step=step)
         return
 
     rows = []
@@ -181,6 +186,7 @@ async def evaluate_env(
         eval_metrics.update(pd.Series(pass_at_k.mean()).to_dict())
     eval_metrics = {**{f"eval/{env_name}/{k}": v for k, v in eval_metrics.items()}}
     eval_metrics.update({"progress/ckpt_step": ckpt_step, "step": step})
-    monitor = get_monitor()
-    monitor.log(eval_metrics, step=step)
-    monitor.log_eval_samples(outputs, env_name=env_name, step=step)
+    wandb_monitor.log(eval_metrics, step=step)
+    wandb_monitor.log_eval_samples(outputs, env_name=env_name, step=step)
+    prime_monitor.log(eval_metrics, step=step)
+    prime_monitor.log_eval_samples(outputs, env_name=env_name, step=step)

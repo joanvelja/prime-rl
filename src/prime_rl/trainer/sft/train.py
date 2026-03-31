@@ -43,7 +43,7 @@ from prime_rl.trainer.utils import (
 )
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.heartbeat import Heartbeat
-from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.wandb_monitor import WandbMonitor
 from prime_rl.utils.config import cli
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
@@ -70,7 +70,7 @@ def train(config: SFTConfig):
 
     # Setup the monitor
     logger.info(f"Initializing monitor ({config.wandb})")
-    monitor = setup_monitor(config.wandb, output_dir=config.output_dir, run_config=config)
+    wandb_monitor = WandbMonitor(config=config.wandb, output_dir=config.output_dir, run_config=config)
 
     # Setup heartbeat (only on rank 0)
     heart = None
@@ -270,7 +270,7 @@ def train(config: SFTConfig):
             logger.warning(f"Validation at step {step} had no valid tokens")
         else:
             logger.success(f"Validation | Step {step} | Loss: {mean_loss:.4f}")
-        monitor.log({"val/loss": mean_loss, "step": step}, step=step)
+        wandb_monitor.log({"val/loss": mean_loss, "step": step}, step=step)
 
     gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
 
@@ -452,7 +452,7 @@ def train(config: SFTConfig):
                     for subset_or_split, num_tokens in dataset.num_tokens.items()
                 },
             )
-        monitor.log(progress_metrics, step=progress.step)
+        wandb_monitor.log(progress_metrics, step=progress.step)
 
         # Log performance metrics
         perf_metrics = {
@@ -462,7 +462,7 @@ def train(config: SFTConfig):
             "perf/mfu": mfu,
             "step": progress.step,
         }
-        monitor.log(perf_metrics, step=progress.step)
+        wandb_monitor.log(perf_metrics, step=progress.step)
 
         # Log optimizer metrics
         optim_metrics = {
@@ -471,15 +471,14 @@ def train(config: SFTConfig):
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
-        monitor.log(optim_metrics, step=progress.step)
+        wandb_monitor.log(optim_metrics, step=progress.step)
 
         loss_log_metrics = {
             "loss/mean": batch_loss,
             "loss/nan_count": nan_loss_count,
             "step": progress.step,
         }
-        # Log tensor stats
-        monitor.log(loss_log_metrics, step=progress.step)
+        wandb_monitor.log(loss_log_metrics, step=progress.step)
 
         # Log time metrics
         time_metrics = {
@@ -488,15 +487,15 @@ def train(config: SFTConfig):
             "time/forward_backward": forward_backward_time,
             "step": progress.step,
         }
-        monitor.log(time_metrics, step=progress.step)
+        wandb_monitor.log(time_metrics, step=progress.step)
 
         # Log disk metrics
         disk_metrics = get_ckpt_disk_metrics(config.output_dir)
         disk_metrics["step"] = progress.step
-        monitor.log(disk_metrics, step=progress.step)
+        wandb_monitor.log(disk_metrics, step=progress.step)
 
         if is_tt_moe_model(model) and batch_max_vio.item() > 0:
-            monitor.log({"max_vio/mean": batch_max_vio.item(), "step": progress.step}, step=progress.step)
+            wandb_monitor.log({"max_vio/mean": batch_max_vio.item(), "step": progress.step}, step=progress.step)
 
         is_first_step = False
         progress.step += 1
@@ -526,12 +525,12 @@ def train(config: SFTConfig):
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
 
-    logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
+    logger.info(f"Peak memory: {max(to_col_format(wandb_monitor.history)['perf/peak_memory']):.1f} GiB")
     logger.success("SFT trainer finished!")
 
     # Optionally, print benchmark table and export JSON
     if config.bench is not None and world.is_master:
-        history = to_col_format(monitor.history)
+        history = to_col_format(wandb_monitor.history)
         print_benchmark(history)
         if config.bench.output_json:
             export_benchmark_json(history, config.bench.output_json)

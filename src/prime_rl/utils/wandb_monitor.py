@@ -14,10 +14,10 @@ from wandb.errors import CommError
 from prime_rl.configs.shared import WandbConfig, WandbWithExtrasConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
+from prime_rl.utils.sampling import sample_items
 
 
-class WandbMonitor(Monitor):
+class WandbMonitor:
     """Logs to Weights and Biases."""
 
     def __init__(
@@ -137,7 +137,7 @@ class WandbMonitor(Monitor):
             # Do not log samples if not enabled or not log interval step
             return
 
-        rollouts = sample_items_for_logging(
+        rollouts = sample_items(
             rollouts,
             self.config.log_extras.sample_ratio,
         )

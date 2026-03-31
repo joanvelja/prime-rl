@@ -56,7 +56,7 @@ from prime_rl.trainer.runs import setup_multi_run_manager, Progress, get_multi_r
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.metrics_server import HealthServer, MetricsServer, RunStats
-from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.wandb_monitor import WandbMonitor
 from prime_rl.utils.config import cli
 from prime_rl.utils.utils import clean_exit, resolve_latest_ckpt_step, to_col_format
 from ring_flash_attn import substitute_hf_flash_attn
@@ -80,7 +80,7 @@ def train(config: TrainerConfig):
 
     # Setup the monitor
     logger.info(f"Initializing monitor ({config.wandb})")
-    monitor = setup_monitor(config.wandb, output_dir=config.output_dir, run_config=config)
+    wandb_monitor = WandbMonitor(config=config.wandb, output_dir=config.output_dir, run_config=config)
 
     # Setup heartbeat (only on rank 0)
     heart = None
@@ -523,7 +523,7 @@ def train(config: TrainerConfig):
             "perf/peak_memory": peak_memory,
             "step": progress.step,
         }
-        monitor.log(perf_metrics, step=progress.step)
+        wandb_monitor.log(perf_metrics, step=progress.step)
 
         # Log optimizer metrics
         optim_metrics = {
@@ -532,7 +532,7 @@ def train(config: TrainerConfig):
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
-        monitor.log(optim_metrics, step=progress.step)
+        wandb_monitor.log(optim_metrics, step=progress.step)
 
         # Compute derived metrics
         entropy_mean = tensor_stats.get("entropy/mean", 0.0)
@@ -542,7 +542,7 @@ def train(config: TrainerConfig):
 
         # Log tensor stats
         tensor_stats["step"] = progress.step
-        monitor.log(tensor_stats, step=progress.step)
+        wandb_monitor.log(tensor_stats, step=progress.step)
 
         # Log time metrics
         time_metrics = {
@@ -554,12 +554,12 @@ def train(config: TrainerConfig):
             "time/forward_backward": forward_backward_time,
             "step": progress.step,
         }
-        monitor.log(time_metrics, step=progress.step)
+        wandb_monitor.log(time_metrics, step=progress.step)
 
         # Log disk metrics
         disk_metrics = get_ckpt_disk_metrics(config.output_dir)
         disk_metrics["step"] = progress.step
-        monitor.log(disk_metrics, step=progress.step)
+        wandb_monitor.log(disk_metrics, step=progress.step)
 
         # Update Prometheus metrics if configured
         if metrics_server is not None:
@@ -628,7 +628,7 @@ def train(config: TrainerConfig):
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
 
-    logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
+    logger.info(f"Peak memory: {max(to_col_format(wandb_monitor.history)['perf/peak_memory']):.1f} GiB")
     logger.success("RL trainer finished!")
 
     # Stop metrics/health server if configured
@@ -639,7 +639,7 @@ def train(config: TrainerConfig):
 
     # Optionally, print benchmark table and export JSON
     if config.bench is not None and world.is_master:
-        history = to_col_format(monitor.history)
+        history = to_col_format(wandb_monitor.history)
         print_benchmark(history)
         if config.bench.output_json:
             export_benchmark_json(history, config.bench.output_json)

@@ -65,7 +65,7 @@ from prime_rl.utils.client import (
 from prime_rl.utils.config import cli
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import setup_logger
-from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.prime_monitor import PrimeMonitor
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     clean_exit,
@@ -75,6 +75,7 @@ from prime_rl.utils.utils import (
     strip_env_version,
     to_col_format,
 )
+from prime_rl.utils.wandb_monitor import WandbMonitor
 
 
 @clean_exit
@@ -149,11 +150,15 @@ async def orchestrate(config: OrchestratorConfig):
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
 
-    # Setup monitor
-    logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
-    monitor = setup_monitor(
-        wandb_config=config.wandb,
-        prime_config=config.prime_monitor,
+    # Setup monitors
+    wandb_monitor = WandbMonitor(
+        config=config.wandb,
+        output_dir=config.output_dir,
+        tokenizer=tokenizer,
+        run_config=config,
+    )
+    prime_monitor = PrimeMonitor(
+        config=config.prime_monitor,
         output_dir=config.output_dir,
         tokenizer=tokenizer,
         run_config=config,
@@ -493,6 +498,8 @@ async def orchestrate(config: OrchestratorConfig):
                         max_retries=eval_env_config.max_retries,
                         ckpt_step=ckpt_step,
                         step=progress.step,
+                        wandb_monitor=wandb_monitor,
+                        prime_monitor=prime_monitor,
                     )
                     for eval_env, eval_env_name, eval_env_config in zip(eval_envs, eval_env_names, config.eval.env)
                 ]
@@ -819,18 +826,17 @@ async def orchestrate(config: OrchestratorConfig):
                 to_log[f"val/reward/{env}/max"] = env_by_example.reward.mean().max()
                 to_log[f"val/reward/{env}/min"] = env_by_example.reward.mean().min()
 
-        # Log metrics to monitor(s)
-        monitor.log(to_log, step=progress.step)
-
-        # Log samples to monitor(s) if enabled.
-        monitor.log_samples(train_rollouts, step=progress.step)
-
-        # Log distributions (rewards, advantages) if enabled
-        monitor.log_distributions(
-            distributions={
-                "rewards": rewards,
-                "advantages": advantages,
-            },
+        # Log metrics to monitors
+        wandb_monitor.log(to_log, step=progress.step)
+        wandb_monitor.log_samples(train_rollouts, step=progress.step)
+        wandb_monitor.log_distributions(
+            distributions={"rewards": rewards, "advantages": advantages},
+            step=progress.step,
+        )
+        prime_monitor.log(to_log, step=progress.step)
+        prime_monitor.log_samples(train_rollouts, step=progress.step)
+        prime_monitor.log_distributions(
+            distributions={"rewards": rewards, "advantages": advantages},
             step=progress.step,
         )
 
@@ -877,9 +883,11 @@ async def orchestrate(config: OrchestratorConfig):
             ]
         )
 
-    # Log final (immutable) samples and distributions to monitor(s)
-    monitor.log_final_samples()
-    monitor.save_final_summary()
+    # Log final (immutable) samples and distributions to monitors
+    wandb_monitor.log_final_samples()
+    wandb_monitor.save_final_summary()
+    prime_monitor.log_final_samples()
+    prime_monitor.save_final_summary()
 
     # Write final checkpoint
     if ckpt_manager is not None:
@@ -912,7 +920,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Optionally, print benchmark table
     if config.bench:
-        print_benchmark(to_col_format(monitor.history))
+        print_benchmark(to_col_format(wandb_monitor.history))
 
 
 def main():

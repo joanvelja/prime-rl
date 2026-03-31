@@ -3,7 +3,7 @@ import json
 
 import pyarrow.parquet as pq
 
-from prime_rl.utils.monitor.prime import PrimeMonitor
+from prime_rl.utils.prime_monitor import PrimeMonitor
 
 
 def _build_rollout(*, example_id: int, reward: float, task: str) -> dict:

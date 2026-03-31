@@ -19,7 +19,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from prime_rl.configs.shared import PrimeMonitorConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
+from prime_rl.utils.sampling import sample_items
 
 
 def _json(val: Any) -> str:
@@ -55,7 +55,7 @@ _SAMPLE_SCHEMA = pa.schema(
 )
 
 
-class PrimeMonitor(Monitor):
+class PrimeMonitor:
     """Logs to Prime Intellect API."""
 
     def __init__(
@@ -67,7 +67,6 @@ class PrimeMonitor(Monitor):
     ):
         self.config = config
         self.logger = get_logger()
-        self.history: list[dict[str, Any]] = []
         self.output_dir = output_dir
         self._registered = False
         self._finalized = False
@@ -229,7 +228,6 @@ class PrimeMonitor(Monitor):
         self.logger.info(f"Platform run {self.run_id} marked as {status_label}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        self.history.append(metrics)
         if not self.is_master:
             return
         if not self.enabled:
@@ -256,7 +254,7 @@ class PrimeMonitor(Monitor):
         ):
             return
 
-        rollouts = sample_items_for_logging(
+        rollouts = sample_items(
             rollouts,
             self.config.log_extras.sample_ratio,
         )
@@ -501,7 +499,7 @@ class PrimeMonitor(Monitor):
             "finalize",
             {
                 "run_id": self.run_id,
-                "summary": self.history[-1] if self.history else {},
+                "summary": {},
             },
         )
         if os.getpid() == self._owner_pid:
