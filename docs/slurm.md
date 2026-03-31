@@ -286,6 +286,9 @@ tail -F {output_dir}/logs/inference.log
 # Multi-node: per-node logs
 tail -F {output_dir}/logs/trainer/node_*.log
 tail -F {output_dir}/logs/inference/node_*.log
+
+# Multi-node inference: per-replica router logs
+tail -F {output_dir}/logs/inference/router_*.log
 ```
 
 For convenience, a tmux launcher sets up a session with all log streams:
