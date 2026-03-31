@@ -98,6 +98,7 @@ All prime-rl and verifiers processes set custom process titles using `setproctit
 | RL trainer (via torchrun) | `PRIME-RL::Trainer` |
 | SFT trainer (via torchrun) | `PRIME-RL::SFTTrainer` |
 | Env server (`uv run env-server`) | `PRIME-RL::EnvServer` |
+| vLLM engine core (spawned by inference) | `VLLM::EngineCore` |
 | Env server (spawned by orchestrator) | `Verifiers::EnvServer` |
 | Env worker N | `Verifiers::EnvWorker{N}` |
 
@@ -107,8 +108,14 @@ All prime-rl and verifiers processes set custom process titles using `setproctit
 # Find all prime-rl / verifiers processes
 ps -eo pid,comm,args | grep -E "PRIME-RL|Verifiers"
 
-# Show the full tree from the launcher PID
-pstree -ap <launcher_pid>
+# Show the full tree from the launcher PID (filter threads with grep -v)
+pstree -ap <launcher_pid> | grep -v '{.*}'
+
+# Find vLLM processes specifically (engine core, router)
+ps -eo pid,comm,args | grep -E "VLLM::"
+
+# Find vLLM processes on GPUs
+nvidia-smi --query-compute-apps=pid,name,gpu_uuid --format=csv,noheader
 ```
 
 A typical single-node RL run process tree:
