@@ -53,7 +53,7 @@ class GarbageCollection:
     def collect(reason: str, generation: int = 1):
         begin = time.monotonic()
         gc.collect(generation)
-        get_logger().info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
+        get_logger().info(f"[GC] {reason} took {time.monotonic() - begin:.2f} seconds")
 
 
 def _to_local_tensor(tensor: Tensor | DTensor) -> Tensor:
