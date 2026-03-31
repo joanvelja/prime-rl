@@ -92,7 +92,7 @@ Logs are captured at the deployment level — the entrypoint redirects subproces
 
 ## Per-Environment Logging
 
-Environments are run via `vf.EnvServer` in separate processes. By default, each environment logs to a file in its run directory under `{output_dir}/run_default/train/{env_name}.log` and `{output_dir}/run_default/eval/{env_name}.log`. The log verbosity can be controlled with `orchestrator.log.vf_level`.
+Environments are run via `vf.EnvServer` in separate processes. By default, each environment logs to `{output_dir}/logs/envs/train/{env_name}/env_server.log` (and `env_worker_{id}.log` if `log.env_worker_logs` is enabled). The log verbosity can be controlled with `orchestrator.log.vf_level`.
 
 ```toml
 [orchestrator.log]
@@ -101,16 +101,12 @@ vf_level = "info"         # Log level for verifiers library
 ```
 
 ```
-output_dir/
-└── run_default/
-    └── train/
-        ├── {env_name_1}.log
-        ├── {env_name_2}.log
-        └── ...
-    └── eval/
-        ├── {env_name_1}.log
-        ├── {env_name_2}.log
-        └── ...
+{output_dir}/logs/envs/
+├── train/{env_name}/
+│   ├── env_server.log
+│   └── env_worker_{id}.log    # only if log.env_worker_logs = true
+└── eval/{env_name}/
+    └── ...
 ```
 
 ## Torchrun Per-Rank Logs
