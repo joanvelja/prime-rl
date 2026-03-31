@@ -72,7 +72,7 @@ else
 
   # Logs: Orchestrator
   tmux send-keys -t "$SESSION_NAME:RL.1" \
-    "echo \"Following orchestrator.stdout (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/logs/orchestrator.stdout\" 2>/dev/null" \
+    "echo \"Following orchestrator.log (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/logs/orchestrator.log\" 2>/dev/null" \
     C-m
 
   # Logs: Envs (all env server and worker logs)
@@ -82,7 +82,7 @@ else
 
   # Logs: Inference
   tmux send-keys -t "$SESSION_NAME:RL.3" \
-    "echo \"Following inference.stdout (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/logs/inference.stdout\" 2>/dev/null" \
+    "echo \"Following inference.log (tail -F; waits for rotate/create)...\"; tail -F \"${OUTPUT_DIR}/logs/inference.log\" 2>/dev/null" \
     C-m
 
   # Window 2: Monitor

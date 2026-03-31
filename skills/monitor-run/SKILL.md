@@ -41,21 +41,21 @@ Nodes 0..I-1   → inference (vLLM, first node of each replica also runs vllm-ro
 Nodes I..I+T-1 → trainer (torchrun, rank 0 node also runs the orchestrator)
 ```
 
-The node assignment is visible in the generated sbatch script at `{output_dir}/rl.sbatch` and in the SLURM logs under `{output_dir}/slurm/`.
+The node assignment is visible in the generated sbatch script at `{output_dir}/rl.sbatch`.
 
 ### Check logs
+
+Log paths are consistent across deployment types — `logs/trainer.log` and `logs/inference.log` always exist (real files for local, symlinks for multi-node SLURM).
 
 #### Local runs
 
 ```
 {output_dir}/logs/
-├── rl.log                    # main launcher log
-├── inference.stdout          # vLLM inference server
-├── orchestrator.stdout       # orchestrator process
-├── trainer.stdout            # torchrun wrapper output
+├── trainer.log                  # trainer stdout (rank 0 only)
+├── orchestrator.log             # orchestrator stdout
+├── inference.log                # vLLM inference server stdout
 ├── trainer/
-│   ├── rank_0.log            # per-rank trainer logs (rank 0 is most useful)
-│   └── ...
+│   └── torchrun/                # per-rank stdout/stderr (all ranks)
 └── envs/
     ├── train/{env_name}/
     │   ├── env_server.log
@@ -67,21 +67,34 @@ The node assignment is visible in the generated sbatch script at `{output_dir}/r
 #### SLURM runs
 
 ```
-{output_dir}/slurm/
-├── latest_train_node_rank_{N}.log        # trainer nodes
-├── latest_orchestrator.log               # orchestrator
-├── latest_infer_node_rank_{N}.log        # inference nodes
-├── latest_router_replica_{N}.log         # vllm-router (if multi-node inference)
-└── job_{SLURM_JOB_ID}_*.log              # permanent copies
+{output_dir}/logs/
+├── trainer.log                  -> trainer/node_0.log (symlink)
+├── inference.log                -> inference/node_0.log (symlink)
+├── orchestrator.log
+├── trainer/
+│   ├── node_0.log
+│   ├── node_1.log
+│   └── torchrun/               # per-rank stdout/stderr (all ranks)
+├── inference/
+│   ├── node_0.log
+│   ├── node_1.log
+│   └── router_0.log            # vllm-router per replica
+├── slurm/
+│   └── job_{id}/               # historical per-job copies
+│       ├── trainer/
+│       │   └── node_{N}.log
+│       ├── inference/
+│       │   └── node_{N}.log
+│       └── orchestrator.log
+└── envs/
+    └── ...
 ```
-
-Env server logs are still under `{output_dir}/logs/envs/`.
 
 ### Check performance
 
 #### Trainer
 
-Check `{output_dir}/logs/trainer/rank_0.log` or the SLURM trainer log.
+Check `{output_dir}/logs/trainer.log`.
 
 Key metrics per step:
 - `time/step` — total step time
@@ -94,7 +107,7 @@ High `wait_for_batch` means the orchestrator is the bottleneck (slow rollouts, s
 
 #### Orchestrator
 
-Check `{output_dir}/logs/orchestrator.log` or the SLURM orchestrator log.
+Check `{output_dir}/logs/orchestrator.log`.
 
 Key metrics per step:
 - `time/step` — total orchestrator step time

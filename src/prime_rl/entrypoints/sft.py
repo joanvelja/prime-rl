@@ -77,10 +77,11 @@ def sft_slurm(config: SFTConfig):
     write_slurm_script(config, config_path, script_path)
     logger.info(f"Wrote SLURM script to {script_path}")
 
+    log_dir = get_log_dir(config.output_dir)
     if config.deployment.type == "single_node":
-        log_message = f"Logs:\n  Trainer:  tail -F {get_log_dir(config.output_dir)}/trainer/rank_0.log"
+        log_message = f"Logs:\n  Trainer:  tail -F {log_dir}/trainer.log"
     else:
-        log_message = f"Logs:\n  Trainer:  tail -F {config.output_dir}/slurm/latest_train_node_rank_*.log"
+        log_message = f"Logs:\n  Trainer:  tail -F {log_dir}/trainer.log"
 
     if config.dry_run:
         logger.success(f"Dry run complete. To submit manually:\n\n  sbatch {script_path}\n\n{log_message}")
@@ -122,7 +123,7 @@ def sft_local(config: SFTConfig):
         "torchrun",
         f"--rdzv-endpoint=localhost:{get_free_port()}",
         f"--rdzv-id={uuid.uuid4().hex}",
-        f"--log-dir={config.output_dir / 'torchrun'}",
+        f"--log-dir={config.output_dir / 'logs' / 'trainer' / 'torchrun'}",
         "--local-ranks-filter=0",
         "--redirect=3",
         "--tee=3",
@@ -141,7 +142,7 @@ def sft_local(config: SFTConfig):
     error_queue: list[Exception] = []
 
     try:
-        with open(log_dir / "trainer.stdout", "w") as log_file:
+        with open(log_dir / "trainer.log", "w") as log_file:
             trainer_process = Popen(
                 trainer_cmd,
                 env={
@@ -163,7 +164,7 @@ def sft_local(config: SFTConfig):
         monitor_threads.append(monitor_thread)
 
         logger.success("Startup complete. Showing trainer logs...")
-        tail_process = Popen(["tail", "-F", str(log_dir / "trainer.stdout")])
+        tail_process = Popen(["tail", "-F", str(log_dir / "trainer.log")])
         processes.append(tail_process)
 
         stop_event.wait()

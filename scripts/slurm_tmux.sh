@@ -8,7 +8,7 @@ if [[ -z "$JOB_NAME" || -z "$OUTPUT_DIR" ]]; then
   exit 1
 fi
 
-SLURM_LOG_DIR="${OUTPUT_DIR}/slurm"
+LOG_DIR="${OUTPUT_DIR}/logs"
 SESSION_NAME="slurm-${JOB_NAME}"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -35,17 +35,16 @@ tmux select-pane -t "$SESSION_NAME:Logs.2" -T "Envs"
 tmux select-pane -t "$SESSION_NAME:Logs.3" -T "Inference"
 
 tmux send-keys -t "$SESSION_NAME:Logs.0" \
-  "tail -F ${SLURM_LOG_DIR}/latest_train_node_rank_*.log 2>/dev/null" C-m
+  "tail -F ${LOG_DIR}/trainer.log 2>/dev/null" C-m
 
 tmux send-keys -t "$SESSION_NAME:Logs.1" \
-  "tail -F ${SLURM_LOG_DIR}/latest_orchestrator.log 2>/dev/null" C-m
+  "tail -F ${LOG_DIR}/orchestrator.log 2>/dev/null" C-m
 
-ENV_LOG_DIR="${OUTPUT_DIR}/logs/envs"
 tmux send-keys -t "$SESSION_NAME:Logs.2" \
-  "tail -F ${ENV_LOG_DIR}/*/*/*.log 2>/dev/null" C-m
+  "tail -F ${LOG_DIR}/envs/*/*/*.log 2>/dev/null" C-m
 
 tmux send-keys -t "$SESSION_NAME:Logs.3" \
-  "tail -F ${SLURM_LOG_DIR}/latest_infer_node_rank_*.log 2>/dev/null" C-m
+  "tail -F ${LOG_DIR}/inference.log 2>/dev/null" C-m
 
 # Pane title styling
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top

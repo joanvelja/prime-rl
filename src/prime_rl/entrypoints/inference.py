@@ -7,7 +7,7 @@ import tomli_w
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
-from prime_rl.utils.pathing import get_config_dir
+from prime_rl.utils.pathing import get_config_dir, get_log_dir
 
 INFERENCE_TOML = "inference.toml"
 INFERENCE_SBATCH = "inference.sbatch"
@@ -87,10 +87,9 @@ def inference_slurm(config: InferenceConfig):
     write_slurm_script(config, config_path, script_path)
     logger.info(f"Wrote SLURM script to {script_path}")
 
+    log_dir = get_log_dir(config.output_dir)
     log_message = (
-        f"Logs:\n"
-        f"  Job:        tail -F {config.output_dir}/job_*.log\n"
-        f"  Inference:  tail -F {config.output_dir}/slurm/latest_infer_node_rank_*.log\n"
+        f"Logs:\n  Job:        tail -F {config.output_dir}/job_*.log\n  Inference:  tail -F {log_dir}/inference.log\n"
     )
 
     if config.dry_run:
