@@ -88,7 +88,7 @@ def get_language_model(model: nn.Module, override: str | None = None) -> nn.Modu
 
 
 def get_image_token_id(model_config: PretrainedConfig) -> int | None:
-    """Return the image token ID for VLM models, or None for text-only models."""
+    """Return the image token ID from the VLM registry, or None for text-only models."""
     info = _get_model_info_from_config(model_config)
     return info.image_token_id if info is not None else None
 
