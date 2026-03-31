@@ -886,7 +886,6 @@ async def orchestrate(config: OrchestratorConfig):
     # Log final (immutable) samples and distributions to monitors
     wandb_monitor.log_final_samples()
     wandb_monitor.save_final_summary()
-    prime_monitor.log_final_samples()
     prime_monitor.save_final_summary()
 
     # Write final checkpoint

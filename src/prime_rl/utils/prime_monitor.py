@@ -447,13 +447,6 @@ class PrimeMonitor:
                 await asyncio.sleep(delay)
         return False
 
-    def log_eval_samples(self, rollouts: list[vf.RolloutOutput], env_name: str, step: int) -> None:
-        pass
-
-    def log_final_samples(self) -> None:
-        """Log final samples (no-op - samples are logged per-step only)."""
-        pass
-
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         """Log distributions to Prime Intellect API."""
         if not self.is_master:

@@ -189,4 +189,3 @@ async def evaluate_env(
     wandb_monitor.log(eval_metrics, step=step)
     wandb_monitor.log_eval_samples(outputs, env_name=env_name, step=step)
     prime_monitor.log(eval_metrics, step=step)
-    prime_monitor.log_eval_samples(outputs, env_name=env_name, step=step)
