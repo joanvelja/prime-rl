@@ -11,8 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchtitan.distributed.expert_parallel import expert_parallel
-
-EPCommBackend = Literal["torch", "deepep"]
+from prime_rl.configs.trainer import EPCommBackend
 
 
 @dataclass
