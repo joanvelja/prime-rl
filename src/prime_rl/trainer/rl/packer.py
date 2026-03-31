@@ -46,15 +46,25 @@ class BasePacker(ABC):
             self.multi_run_manager.output_dir, dp_world_size, start_step, config
         )
         self._last_heartbeat = time.monotonic()
+        self._watchdog_armed = threading.Event()
         self._watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
         self._watchdog.start()
 
     def _heartbeat(self) -> None:
         self._last_heartbeat = time.monotonic()
 
+    def _arm_watchdog(self) -> None:
+        self._last_heartbeat = time.monotonic()
+        self._watchdog_armed.set()
+
+    def _disarm_watchdog(self) -> None:
+        self._watchdog_armed.clear()
+
     def _watchdog_loop(self) -> None:
         while True:
             time.sleep(60)
+            if not self._watchdog_armed.is_set():
+                continue
             stale = time.monotonic() - self._last_heartbeat
             if stale > WATCHDOG_TIMEOUT_SECONDS:
                 self.logger.error(f"Packer heartbeat stale for {stale:.0f}s, killing process to trigger restart")
