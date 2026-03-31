@@ -919,7 +919,7 @@ class OrchestratorConfig(BaseConfig):
         if isinstance(data, dict) and "prime_monitor" in data:
             from prime_rl.utils.logger import get_logger
 
-            get_logger().warning("[prime_monitor] will be deprecated in a future version, use [prime] instead")
+            get_logger().warning("Config: [prime_monitor] will be deprecated in a future version, use [prime] instead")
         return data
 
     @model_validator(mode="after")
