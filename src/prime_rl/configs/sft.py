@@ -14,6 +14,7 @@ from prime_rl.configs.trainer import (
     BenchConfig,
     CheckpointConfig,
     ConstantSchedulerConfig,
+    GCConfig,
     ModelConfig,
     OptimizerConfig,
     SchedulerConfig,
@@ -212,6 +213,13 @@ class SFTConfig(BaseConfig):
         BenchConfig | None,
         Field(
             description="Whether to run in benchmark mode. It will automatically set the maximum number of steps to run to 4 and use fake data.",
+        ),
+    ] = None
+
+    gc: Annotated[
+        GCConfig | None,
+        Field(
+            description="Garbage collection config. Disables automatic GC and runs deterministic collections every N steps to avoid stragglers. If None, uses Python's default GC behavior.",
         ),
     ] = None
 
