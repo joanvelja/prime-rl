@@ -365,7 +365,7 @@ class WandbWithExtrasConfig(WandbConfig):
     ] = LogExtrasConfig()
 
 
-class PrimeMonitorConfig(BaseConfig):
+class PrimeConfig(BaseConfig):
     """Configures logging to Prime Intellect API."""
 
     base_url: Annotated[

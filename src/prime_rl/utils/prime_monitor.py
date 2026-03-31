@@ -13,10 +13,10 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import verifiers as vf
-from prime_cli.core.config import Config as PrimeConfig
+from prime_cli.core.config import Config as PrimeCliConfig
 from transformers.tokenization_utils import PreTrainedTokenizer
 
-from prime_rl.configs.shared import PrimeMonitorConfig
+from prime_rl.configs.shared import PrimeConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.sampling import sample_items
@@ -60,7 +60,7 @@ class PrimeMonitor:
 
     def __init__(
         self,
-        config: PrimeMonitorConfig | None,
+        config: PrimeConfig | None,
         output_dir: Path | None = None,
         tokenizer: PreTrainedTokenizer | None = None,
         run_config: BaseConfig | None = None,
@@ -86,7 +86,7 @@ class PrimeMonitor:
 
         api_key = os.getenv(config.api_key_var)
         if api_key is None:
-            prime_config = PrimeConfig()
+            prime_config = PrimeCliConfig()
             api_key = prime_config.api_key
 
         if not api_key:
@@ -129,7 +129,7 @@ class PrimeMonitor:
             if config.log_extras.distributions:
                 self.last_log_distributions_step = -1
 
-    def _register_run(self, config: PrimeMonitorConfig, run_config: BaseConfig | None) -> str | None:
+    def _register_run(self, config: PrimeConfig, run_config: BaseConfig | None) -> str | None:
         """Register an external run with the platform. Returns run_id on success, None on failure."""
         registration_api_key = self.api_key
         if not registration_api_key:
@@ -143,7 +143,7 @@ class PrimeMonitor:
         team_id = config.team_id
         frontend_url = config.frontend_url
         if team_id is None or frontend_url is None:
-            prime_config = PrimeConfig()
+            prime_config = PrimeCliConfig()
         if team_id is None:
             team_id = prime_config.team_id
         if frontend_url is None:

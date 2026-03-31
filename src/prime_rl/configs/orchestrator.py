@@ -9,7 +9,7 @@ from prime_rl.configs.shared import (
     FileSystemTransportConfig,
     HeartbeatConfig,
     LogConfig,
-    PrimeMonitorConfig,
+    PrimeConfig,
     TransportConfig,
     WandbWithExtrasConfig,
 )
@@ -765,7 +765,7 @@ class OrchestratorConfig(BaseConfig):
 
     # The prime monitor configuration
     prime: Annotated[
-        PrimeMonitorConfig | None,
+        PrimeConfig | None,
         Field(
             validation_alias=AliasChoices("prime", "prime_monitor"),
         ),
