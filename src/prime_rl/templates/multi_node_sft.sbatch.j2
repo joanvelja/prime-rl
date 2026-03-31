@@ -90,7 +90,7 @@ srun bash -c '
         --log-dir=$OUTPUT_DIR/logs/trainer/torchrun \
         --tee=3 \
         --redirects=3 \
-        --local-ranks-filter=0 \
+        --local-ranks-filter={{ ranks_filter }} \
         -m prime_rl.trainer.sft.train \
         @ $CONFIG_PATH \
         2>&1 | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log

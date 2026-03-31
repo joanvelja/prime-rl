@@ -7,8 +7,8 @@ from prime_rl.configs.shared import (
     BaseModelConfig,
     FileSystemTransportConfig,
     HeartbeatConfig,
-    LogConfig,
     MetricsServerConfig,
+    TrainerLogConfig,
     TransportConfig,
     WandbConfig,
 )
@@ -692,7 +692,7 @@ class TrainerConfig(BaseConfig):
     rollout_transport: TransportConfig = FileSystemTransportConfig()
 
     # The logging configuration
-    log: LogConfig = LogConfig()
+    log: TrainerLogConfig = TrainerLogConfig()
 
     # The wandb configuration
     wandb: WandbConfig | None = None

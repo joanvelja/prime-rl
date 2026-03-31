@@ -266,10 +266,21 @@ class LogConfig(BaseConfig):
         Field(description="Logging level for the process. Will determine the logging verbosity and format."),
     ] = "info"
 
-    vf_level: Annotated[
-        str,
-        Field(description="Logging level for the verifiers package. Will determine the logging verbosity and format."),
-    ] = "info"
+    json_logging: Annotated[
+        bool,
+        Field(
+            description="Emit JSON logs (newline-delimited) for log aggregation (Loki, Grafana, etc.).",
+        ),
+    ] = False
+
+
+class TrainerLogConfig(LogConfig):
+    """Trainer-specific log config."""
+
+    ranks_filter: Annotated[
+        list[int],
+        Field(description="Which trainer ranks to show in console output. Passed to torchrun's --local-ranks-filter."),
+    ] = [0]
 
     log_data: Annotated[
         bool,
@@ -278,12 +289,14 @@ class LogConfig(BaseConfig):
         ),
     ] = False
 
-    json_logging: Annotated[
-        bool,
-        Field(
-            description="Emit JSON logs (newline-delimited) for log aggregation (Loki, Grafana, etc.).",
-        ),
-    ] = False
+
+class OrchestratorLogConfig(LogConfig):
+    """Orchestrator-specific log config."""
+
+    vf_level: Annotated[
+        str,
+        Field(description="Logging level for the verifiers package. Will determine the logging verbosity and format."),
+    ] = "info"
 
 
 class LogExtrasConfig(BaseConfig):

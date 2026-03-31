@@ -298,7 +298,7 @@ def rl_local(config: RLConfig):
             f"--rdzv-id={uuid.uuid4().hex}",
             # Pipe all logs to file, and only master rank logs to stdout
             f"--log-dir={log_dir / 'trainer' / 'torchrun'}",
-            "--local-ranks-filter=0",
+            f"--local-ranks-filter={','.join(map(str, config.trainer.log.ranks_filter))}",
             "--redirect=3",
             "--tee=3",
             f"--nproc-per-node={len(trainer_gpu_ids)}",
@@ -431,6 +431,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             decode_env_overrides=infer_deploy.decode_env_overrides,
             use_nccl_broadcast=config.weight_broadcast is not None and config.weight_broadcast.type == "nccl",
             wandb_shared=config.wandb is not None and config.wandb.shared,
+            ranks_filter=",".join(map(str, config.trainer.log.ranks_filter)),
         )
     else:
         script = template.render(
@@ -452,6 +453,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             inference_data_parallel_rpc_port=config.inference.data_parallel_rpc_port if config.inference else 29600,
             use_nccl_broadcast=config.weight_broadcast is not None and config.weight_broadcast.type == "nccl",
             wandb_shared=config.wandb is not None and config.wandb.shared,
+            ranks_filter=",".join(map(str, config.trainer.log.ranks_filter)),
         )
 
     script_path.parent.mkdir(parents=True, exist_ok=True)

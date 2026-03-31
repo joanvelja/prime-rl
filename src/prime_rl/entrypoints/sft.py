@@ -51,6 +51,7 @@ def write_slurm_script(config: SFTConfig, config_path: Path, script_path: Path) 
             output_dir=config.output_dir,
             num_nodes=config.deployment.num_nodes,
             gpus_per_node=config.deployment.gpus_per_node,
+            ranks_filter=",".join(map(str, config.log.ranks_filter)),
         )
 
     script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +123,7 @@ def sft_local(config: SFTConfig):
         f"--rdzv-endpoint=localhost:{get_free_port()}",
         f"--rdzv-id={uuid.uuid4().hex}",
         f"--log-dir={config.output_dir / 'logs' / 'trainer' / 'torchrun'}",
-        "--local-ranks-filter=0",
+        f"--local-ranks-filter={','.join(map(str, config.log.ranks_filter))}",
         "--redirect=3",
         "--tee=3",
         f"--nproc-per-node={config.deployment.num_gpus}",
