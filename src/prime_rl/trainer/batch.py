@@ -25,6 +25,12 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
     routed_experts = training_example.routed_experts
 
     if len(input_ids) > seq_len:
+        if training_example.pixel_values is not None:
+            raise ValueError(
+                f"Multimodal sample exceeds seq_len ({len(input_ids)} > {seq_len}) "
+                f"but was not filtered by the orchestrator. This would corrupt "
+                f"pixel_values/token alignment. Increase seq_len or check orchestrator filtering."
+            )
         input_ids = input_ids[:seq_len]
         loss_mask = loss_mask[:seq_len]
         inference_logprobs = inference_logprobs[:seq_len]

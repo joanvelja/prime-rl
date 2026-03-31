@@ -136,8 +136,8 @@ def test_prepare_sample_none_routed_experts():
     assert micro_batch.routed_experts is None
 
 
-def test_prepare_sample_truncates_multimodal_exceeding_seq_len():
-    """Multimodal samples that exceed seq_len are truncated (filtering happens in orchestrator)."""
+def test_prepare_sample_raises_on_multimodal_exceeding_seq_len():
+    """Multimodal samples that exceed seq_len raise ValueError (should be filtered by orchestrator)."""
     sample = TrainingSample(
         prompt_ids=[1, 2, 3],
         prompt_mask=[False, False, False],
@@ -150,9 +150,8 @@ def test_prepare_sample_truncates_multimodal_exceeding_seq_len():
         pixel_values_shape=[1, 16],
         image_grid_thw=[[1, 1, 1]],
     )
-    # 5 tokens total, seq_len=3 — truncated like any other sample
-    result = prepare_sample(sample, seq_len=3)
-    assert len(result.input_ids) == 3
+    with pytest.raises(ValueError, match="Multimodal sample exceeds seq_len"):
+        prepare_sample(sample, seq_len=3)
 
 
 def test_prepare_sample_keeps_multimodal_within_seq_len():
