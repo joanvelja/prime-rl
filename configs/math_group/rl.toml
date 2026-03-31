@@ -10,7 +10,7 @@ name = "Qwen/Qwen3-4B-Instruct-2507"
 [orchestrator]
 batch_size = 512
 rollouts_per_example = 16
-oversampling_factor = 1.5
+oversampling_factor = 1.0
 
 [[orchestrator.env]]
 id = "math-env"
@@ -36,7 +36,7 @@ interval = 50
 [[orchestrator.eval.env]]
 id = "aime2024"
 name = "aime2024"
-num_examples = 30
+num_examples = 10
 rollouts_per_example = 4
 
 [trainer.model]

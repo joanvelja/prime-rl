@@ -1,35 +1,31 @@
-from typing import TYPE_CHECKING, Any
+from __future__ import annotations
 
-from prime_rl.utils.envs import _ENV_PARSERS as _BASE_ENV_PARSERS, get_env_value, get_dir, set_defaults
+import verifiers as vf
 
-if TYPE_CHECKING:
-    # Enable type checking for shared envs
-    # ruff: noqa
-    from prime_rl.utils.envs import *
-
-    # vLLM
-    VLLM_CONFIGURE_LOGGING: int
-
-    # tqdm
-    TQDM_DISABLE: int
+from prime_rl.configs.orchestrator import EnvConfig
+from prime_rl.utils.utils import strip_env_version
 
 
-_ORCHESTRATOR_ENV_PARSERS = {
-    "VLLM_CONFIGURE_LOGGING": int,
-    "TQDM_DISABLE": int,
-    **_BASE_ENV_PARSERS,
-}
+class Envs:
+    """Holds a set of environments."""
 
-_ORCHESTRATOR_ENV_DEFAULTS = {
-    "VLLM_CONFIGURE_LOGGING": "0",
-}
+    def __init__(self, configs: list[EnvConfig]):
+        def load_env(config: EnvConfig) -> vf.Environment:
+            env_id = strip_env_version(config.id)
+            return vf.load_environment(env_id, **config.args)
 
-set_defaults(_ORCHESTRATOR_ENV_DEFAULTS)
+        self.configs = configs
+        self.envs = {config.resolved_name: load_env(config) for config in configs}
 
+    @property
+    def names(self) -> list[str]:
+        return list(self.envs.keys())
 
-def __getattr__(name: str) -> Any:
-    return get_env_value(_ORCHESTRATOR_ENV_PARSERS, name)
+    def get_env(self, name: str) -> vf.Environment:
+        return self.envs[name]
 
+    def items(self):
+        return self.envs.items()
 
-def __dir__() -> list[str]:
-    return get_dir(_ORCHESTRATOR_ENV_PARSERS)
+    def __len__(self) -> int:
+        return len(self.envs)

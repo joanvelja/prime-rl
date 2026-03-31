@@ -4,6 +4,7 @@ import gc
 import multiprocessing as mp
 import random
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
@@ -35,8 +36,9 @@ import verifiers as vf
 from transformers import AutoProcessor, AutoTokenizer
 
 from prime_rl.configs.orchestrator import BufferConfig, OrchestratorConfig
-from prime_rl.orchestrator.buffer import Buffer
+from prime_rl.orchestrator.buffer import BufferSet
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
+from prime_rl.orchestrator.envs import Envs
 from prime_rl.orchestrator.eval_utils import evaluate_env
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
@@ -56,7 +58,6 @@ from prime_rl.orchestrator.vf_utils import (
     resolve_num_workers,
     setup_env_client,
     spawn_env_server,
-    task_uses_group_scoring,
     wait_for_env_servers,
 )
 from prime_rl.utils.client import (
@@ -171,36 +172,28 @@ async def orchestrate(config: OrchestratorConfig):
     if rollout_filters:
         logger.info(f"Initialized {len(rollout_filters)} rollout filter(s): {[f.name for f in rollout_filters]}")
 
-    # Load environment and extract dataset
-    logger.info(
-        f"Loading {len(config.env)} training environment(s) ({', '.join(env.resolved_name for env in config.env)})"
-    )
-    env_ids = [strip_env_version(env.id) for env in config.env]
-    train_env_names = [env.resolved_name for env in config.env]
-    train_env_group = vf.EnvGroup(
-        envs=[vf.load_environment(env_id, **env.args) for env_id, env in zip(env_ids, config.env)],
-        env_names=train_env_names,
-        map_kwargs=dict(writer_batch_size=1),  # set defensively to not error on map operations on large datasets
-    )
-    verification_enabled = config.verification.enabled
+    # Load environments
+    logger.info("Loading training environments")
+    train_envs = Envs(config.train_envs)
+    logger.info(f"Loaded {len(train_envs)} training environment(s): {', '.join(train_envs.names)}")
 
-    train_env_deferred_group_scoring_tasks = (
-        {env_name for env_name in train_env_names if task_uses_group_scoring(train_env_group, env_name)}
-        if verification_enabled
-        else set()
-    )
-    for train_env_name, env_cfg in zip(train_env_names, config.env):
-        env_cfg.extra_env_kwargs["score_rollouts"] = (
-            verification_enabled and train_env_name not in train_env_deferred_group_scoring_tasks
-        )
-    if not verification_enabled:
-        logger.info("Verification disabled; all training envs will skip scoring.")
-    elif train_env_deferred_group_scoring_tasks:
-        deferred_tasks = ", ".join(sorted(train_env_deferred_group_scoring_tasks))
-        logger.info(
-            f"Deferred group scoring enabled for training tasks: {deferred_tasks}. "
-            "Rollouts run individually and are scored once each group completes."
-        )
+    # train_env_deferred_group_scoring_tasks = (
+    #     {name for name in train_env_names if task_uses_group_scoring(train_envs.get_env(name), name)}
+    #     if verification_enabled
+    #     else set()
+    # )
+    # for train_env_name, env_cfg in zip(train_env_names, config.env):
+    #     # Disable server-side scoring for envs with deferred group scoring (scored client-side after group completes)
+    #     if train_env_name in train_env_deferred_group_scoring_tasks:
+    #         env_cfg.extra_env_kwargs["score_rollouts"] = False
+    # if not verification_enabled:
+    #     logger.info("Verification disabled; all training envs will skip scoring.")
+    # elif train_env_deferred_group_scoring_tasks:
+    #     deferred_tasks = ", ".join(sorted(train_env_deferred_group_scoring_tasks))
+    #     logger.info(
+    #         f"Deferred group scoring enabled for training tasks: {deferred_tasks}. "
+    #         "Rollouts run individually and are scored once each group completes."
+    #     )
 
     train_env_addresses = []
     env_processes: list[mp.Process] = []
@@ -215,14 +208,15 @@ async def orchestrate(config: OrchestratorConfig):
 
     atexit.register(_cleanup_env_processes)
 
-    for env_id, env, env_name in zip(env_ids, config.env, train_env_names):
-        if env.address is None:
-            num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
+    for env_cfg, env_name in zip(train_envs.configs, train_envs.names):
+        if env_cfg.address is None:
+            env_id = strip_env_version(env_cfg.id)
+            num_workers = resolve_num_workers(env_cfg.num_workers, config.max_inflight_rollouts)
             log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "train" / env_name).as_posix()
             address, process = spawn_env_server(
                 env_id=env_id,
-                env_args=env.args,
-                extra_env_kwargs=env.extra_env_kwargs,
+                env_args=env_cfg.args,
+                extra_env_kwargs=env_cfg.extra_env_kwargs,
                 num_workers=num_workers,
                 log_level=config.log.vf_level,
                 log_dir=log_dir,
@@ -233,10 +227,10 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             if env_name in train_env_deferred_group_scoring_tasks:
                 logger.warning(
-                    f"Training env {env_name} uses external server at {env.address}. "
+                    f"Training env {env_name} uses external server at {env_cfg.server.address}. "
                     "Ensure that server was started with score_rollouts=False."
                 )
-            address = env.address
+            address = env_cfg.server.address
         logger.info(f"Connecting train environment {env_name} to server at {address}")
         train_env_addresses.append(address)
     train_env_clients = [
@@ -247,22 +241,22 @@ async def orchestrate(config: OrchestratorConfig):
     await wait_for_env_servers(train_env_clients)
     logger.success("Train environment servers ready")
 
-    # this puts all train envs into server model
+    # this puts all train envs into server mode
     # all calls to run_rollout and run_group will be routed to the server via the env client
-    for env, env_client in zip(train_env_group.envs, train_env_clients):
-        env.env_client = env_client
+    for name, env_client in zip(train_env_names, train_env_clients):
+        train_envs.get_env(name).env_client = env_client
 
     if config.eval:
-        env_ids = [strip_env_version(env.id) for env in config.eval.env]
-        eval_envs = [vf.load_environment(env_id, **env.args) for env_id, env in zip(env_ids, config.eval.env)]
-        eval_env_names = [env.resolved_name for env in config.eval.env]
+        eval_envs = Envs(config.eval.env)
+        eval_env_names = eval_envs.names
         eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
         eval_env_addresses = []
 
-        for env_id, env, eval_env_name in zip(env_ids, config.eval.env, eval_env_names):
-            if env.address is None:
-                num_examples = env.num_examples or config.eval.num_examples
-                rollouts_per_example = env.rollouts_per_example or config.eval.rollouts_per_example
+        for env_cfg, eval_env_name in zip(config.eval.env, eval_env_names):
+            if env_cfg.server.address is None:
+                env_id = strip_env_version(env_cfg.id)
+                num_examples = env_cfg.num_examples
+                rollouts_per_example = env_cfg.rollouts_per_example
                 if num_examples == -1:
                     max_concurrent = 1024
                     logger.warning(
@@ -271,12 +265,12 @@ async def orchestrate(config: OrchestratorConfig):
                     )
                 else:
                     max_concurrent = num_examples * rollouts_per_example
-                num_workers = resolve_num_workers(env.num_workers, max_concurrent)
+                num_workers = resolve_num_workers(env_cfg.server.num_workers, max_concurrent)
                 log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "eval" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
-                    env_args=env.args,
-                    extra_env_kwargs=env.extra_env_kwargs,
+                    env_args=env_cfg.args,
+                    extra_env_kwargs=env_cfg.extra_env_kwargs,
                     num_workers=num_workers,
                     log_level=config.log.vf_level,
                     log_dir=log_dir,
@@ -285,7 +279,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info(f"Spawned eval env server for {eval_env_name} with {num_workers} worker(s)")
                 env_processes.append(process)
             else:
-                address = env.address
+                address = env_cfg.server.address
             logger.info(f"Connecting eval environment {eval_env_name} to server at {address}")
             eval_env_addresses.append(address)
 
@@ -298,22 +292,19 @@ async def orchestrate(config: OrchestratorConfig):
         logger.success("Eval environment servers ready")
 
         # this puts all eval envs into server mode
-        # all calls to run_rollout and run_group will be routed to the server via the env client
-        for eval_env, eval_env_client in zip(eval_envs, eval_env_clients):
-            eval_env.env_client = eval_env_client
+        for name, eval_env_client in zip(eval_env_names, eval_env_clients):
+            eval_envs.get_env(name).env_client = eval_env_client
     else:
-        eval_envs: list[vf.Environment] = []
+        eval_envs = None
         eval_env_names: list[str] = []
         eval_sampling_args = {}
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
-    train_dataset = train_env_group.get_dataset(seed=config.buffer.seed)
-    buffer = Buffer(train_dataset, train_env_group.env_names, config.buffer)
+    buffer = BufferSet(train_envs, config.buffer)
     if config.val is not None:
         val_buffer_config = BufferConfig(env_ratios=config.buffer.env_ratios)
-        val_dataset = train_env_group.get_eval_dataset(seed=val_buffer_config.seed)
-        val_buffer = Buffer(val_dataset, train_env_group.env_names, val_buffer_config)
+        val_buffer = BufferSet(train_envs, val_buffer_config, eval=True)
     else:
         val_buffer = None
 
@@ -329,7 +320,7 @@ async def orchestrate(config: OrchestratorConfig):
             checkpoint_step = config.ckpt.resume_step
 
     scheduler = Scheduler(
-        env=train_env_group,
+        envs=train_envs,
         buffer=buffer,
         inference_pool=inference_pool,
         max_inflight_rollouts=config.max_inflight_rollouts,
@@ -489,13 +480,14 @@ async def orchestrate(config: OrchestratorConfig):
                         get_client=inference_pool.get_next_client,
                         model_name=scheduler.model_name,
                         sampling_args=eval_sampling_args,
-                        num_examples=eval_env_config.num_examples or config.eval.num_examples,
-                        rollouts_per_example=eval_env_config.rollouts_per_example or config.eval.rollouts_per_example,
+                        num_examples=eval_env_config.num_examples,
+                        rollouts_per_example=eval_env_config.rollouts_per_example,
                         max_retries=eval_env_config.max_retries,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
-                    for eval_env, eval_env_name, eval_env_config in zip(eval_envs, eval_env_names, config.eval.env)
+                    for eval_env_name, eval_env_config in zip(eval_env_names, config.eval.env)
+                    for eval_env in [eval_env_set.get_env(eval_env_name)]
                 ]
             )
 
@@ -516,17 +508,23 @@ async def orchestrate(config: OrchestratorConfig):
         if val_buffer and config.val and progress.step % config.val.interval == 0:
             logger.info(f"Running validation for step {progress.step}")
             val_examples = val_buffer.sample_examples(config.val.num_examples)
-            val_task = asyncio.create_task(
+            # Group val examples by env_name so each generate() call uses the correct env
+            val_examples_by_env: dict[str, list[dict]] = defaultdict(list)
+            for ex in val_examples:
+                val_examples_by_env[ex["env_name"]].append(ex)
+            val_tasks = [
                 generate(
-                    env=train_env_group,
+                    env=train_env_set.get_env(env_name),
                     model_name=scheduler.model_name,
-                    examples=val_examples,
+                    examples=env_examples,
                     rollouts_per_example=config.val.rollouts_per_example,
                     sampling_args=sampling_args,
                     clients=inference_pool.clients,
-                    pbar_description="Generating rollouts (val)",
+                    pbar_description=f"Generating rollouts (val/{env_name})",
                 )
-            )
+                for env_name, env_examples in val_examples_by_env.items()
+            ]
+            val_task = asyncio.create_task(asyncio.gather(*val_tasks))
         else:
             val_task = asyncio.create_task(asyncio.sleep(0))  # Dummy task
 
@@ -649,7 +647,12 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Await and process val results
         await val_task
-        val_outputs = val_task.result()
+        val_result = val_task.result()
+        # val_result is either a list of lists (from gather) or None-like (from sleep)
+        if isinstance(val_result, list):
+            val_outputs = [output for outputs in val_result for output in outputs]
+        else:
+            val_outputs = None
 
         step_time = time.perf_counter() - step_start_time
 
@@ -657,7 +660,7 @@ async def orchestrate(config: OrchestratorConfig):
         results_df = pd.DataFrame(
             {
                 "example_id": [rollout["example_id"] for rollout in train_rollouts],
-                "task": [rollout["task"] for rollout in train_rollouts],
+                "env_name": [rollout["env_name"] for rollout in train_rollouts],
                 "reward": [rollout["reward"] for rollout in train_rollouts],
                 "is_truncated": [rollout["is_truncated"] for rollout in train_rollouts],
                 "stop_condition": [rollout.get("stop_condition") for rollout in train_rollouts],
@@ -678,7 +681,7 @@ async def orchestrate(config: OrchestratorConfig):
             pd.DataFrame(
                 {
                     "example_id": [rollout["example_id"] for rollout in val_outputs],
-                    "task": [rollout["task"] for rollout in val_outputs],
+                    "env_name": [rollout["env_name"] for rollout in val_outputs],
                     "reward": [rollout["reward"] for rollout in val_outputs],
                 }
             )
@@ -755,7 +758,7 @@ async def orchestrate(config: OrchestratorConfig):
             "solve_none/all": solve_none,
             "solve_all/all": solve_all,
             "effective_batch_size/all": effective_batch_size,
-            **{f"batch/{env}": r for env, r in results_df.task.value_counts(normalize=True).items()},
+            **{f"batch/{env}": r for env, r in results_df.env_name.value_counts(normalize=True).items()},
             # Time metrics
             "time/step": step_time,
             "time/generate_completions": generate_completions_time,
@@ -786,7 +789,7 @@ async def orchestrate(config: OrchestratorConfig):
             "scoring_ms",
         ]
 
-        for env, env_df in results_df.groupby("task"):
+        for env, env_df in results_df.groupby("env_name"):
             env_by_example = env_df.groupby("example_id")
             for col in per_env_columns:
                 to_log[f"{col}/{env}/mean"] = env_by_example[col].mean().mean()
@@ -814,7 +817,7 @@ async def orchestrate(config: OrchestratorConfig):
             to_log["val/reward/all/mean"] = val_by_example.reward.mean().mean()
             to_log["val/reward/all/max"] = val_by_example.reward.mean().max()
             to_log["val/reward/all/min"] = val_by_example.reward.mean().min()
-            for env, env_df in val_results_df.groupby("task"):
+            for env, env_df in val_results_df.groupby("env_name"):
                 env_by_example = env_df.groupby("example_id")
                 to_log[f"val/reward/{env}/mean"] = env_by_example.reward.mean().mean()
                 to_log[f"val/reward/{env}/max"] = env_by_example.reward.mean().max()
@@ -875,7 +878,8 @@ async def orchestrate(config: OrchestratorConfig):
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
-                for eval_env, eval_env_name, eval_env_config in zip(eval_envs, eval_env_names, config.eval.env)
+                for eval_env_name, eval_env_config in zip(eval_env_names, config.eval.env)
+                for eval_env in [eval_env_set.get_env(eval_env_name)]
             ]
         )
 

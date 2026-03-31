@@ -10,7 +10,8 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
-from prime_rl.orchestrator.buffer import Buffer
+from prime_rl.orchestrator.buffer import BufferSet as Buffer
+from prime_rl.orchestrator.envs import Envs
 from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -30,7 +31,7 @@ class InflightRolloutInfo(NamedTuple):
 
     off_policy_steps: int
     client_config: vf.ClientConfig
-    task: str
+    env_name: str
     group_id: int | None = None
 
 
@@ -57,7 +58,7 @@ class Scheduler:
 
     def __init__(
         self,
-        env: vf.Environment,
+        envs: Envs,
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
@@ -75,7 +76,7 @@ class Scheduler:
             self.rate_limiter = AsyncLimiter(max_rate=tasks_per_minute, time_period=60)
         else:
             self.rate_limiter = None
-        self.env = env
+        self.envs = envs
         self.buffer = buffer
         self.config = config
         self.batch_size = config.batch_size
@@ -200,18 +201,20 @@ class Scheduler:
             if group_id not in self.groups:
                 return
             group.pinned_client = client_config
+        env_name = group.example["env_name"]
+        env = self.envs.get_env(env_name)
         run_rollout_task = asyncio.create_task(
             run_rollout(
-                env=self.env,
+                env=env,
                 client=client_config,
                 example=group.example,
                 model_name=self.model_name,
                 sampling_args=self.sampling_args,
-                max_retries=self.max_retries_by_task.get(group.example["task"], 0),
+                max_retries=self.max_retries_by_task.get(env_name, 0),
             )
         )
         self.inflight_requests[run_rollout_task] = InflightRolloutInfo(
-            off_policy_steps=0, client_config=client_config, task=group.example["task"], group_id=group_id
+            off_policy_steps=0, client_config=client_config, env_name=env_name, group_id=group_id
         )
 
     @property
@@ -348,17 +351,17 @@ class Scheduler:
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
 
-    def _should_defer_group_scoring(self, task: str) -> bool:
-        return task in self.deferred_group_scoring_tasks and self.config.verification.enabled
+    def _should_defer_group_scoring(self, env_name: str) -> bool:
+        return env_name in self.deferred_group_scoring_tasks and self.config.verification.enabled
 
     async def _score_group_if_deferred(self, completed_rollouts: list[vf.RolloutOutput]) -> list[vf.RolloutOutput]:
         if not completed_rollouts:
             return completed_rollouts
-        task = completed_rollouts[0]["task"]
-        if not self._should_defer_group_scoring(task):
+        env_name = completed_rollouts[0]["env_name"]
+        if not self._should_defer_group_scoring(env_name):
             return completed_rollouts
-        env_for_task = self.env.get_env_for_task(task)
-        await env_for_task.rubric.score_group(cast(list[vf.State], completed_rollouts))
+        env = self.envs.get_env(env_name)
+        await env.rubric.score_group(cast(list[vf.State], completed_rollouts))
         return completed_rollouts
 
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
@@ -414,21 +417,21 @@ class Scheduler:
                         continue
                     rollout = finished_task.result()
 
-                    task = rollout_info.task
-                    self.total_rollouts_by_task[task] += 1
+                    env_name = rollout_info.env_name
+                    self.total_rollouts_by_task[env_name] += 1
                     should_reschedule = False
                     if len(rollout["trajectory"]) == 0:
-                        self.empty_rollouts_by_task[task] += 1
+                        self.empty_rollouts_by_task[env_name] += 1
                         should_reschedule = True
                         self.logger.warning(
-                            f"Empty trajectory in group {group_id} ({task}), re-scheduling "
+                            f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
                             f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                         )
                     if rollout["error"] is not None:
-                        self.errored_rollouts_by_task[task] += 1
+                        self.errored_rollouts_by_task[env_name] += 1
                         should_reschedule = True
                         self.logger.warning(
-                            f"Rollout error in group {group_id} ({task}), re-scheduling "
+                            f"Rollout error in group {group_id} ({env_name}), re-scheduling "
                             f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
                             f"{rollout['error']['error_chain_repr']}"
                         )
@@ -436,6 +439,7 @@ class Scheduler:
                         group.rollouts_to_schedule += 1
                         continue
 
+                    rollout["env_name"] = env_name
                     group.completed_rollouts.append(rollout)
                     if len(group.completed_rollouts) < self.rollouts_per_example:
                         continue
@@ -523,7 +527,7 @@ class Scheduler:
             metrics[f"errored_rollouts/{task}"] = count / task_total
         by_task: dict[str, list[int]] = {}
         for info in self.inflight_requests.values():
-            by_task.setdefault(info.task, []).append(info.off_policy_steps)
+            by_task.setdefault(info.env_name, []).append(info.off_policy_steps)
         for task, steps in by_task.items():
             metrics[f"off_policy_level/{task}/max"] = max(steps)
             metrics[f"off_policy_level/{task}/mean"] = sum(steps) / len(steps)

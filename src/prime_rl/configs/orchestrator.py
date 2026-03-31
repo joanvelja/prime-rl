@@ -268,41 +268,57 @@ class EvalSaveHFConfig(BaseConfig):
 
 
 class EnvConfig(BaseConfig):
-    """Configures an environment for training."""
+    """Base environment configuration."""
 
     id: Annotated[str, Field(description="ID of the environment to use.")] = "reverse-text"
     args: Annotated[dict, Field(description="Arguments to pass to the environment.")] = {}
     name: Annotated[str | None, Field(description="Name of the environment to use.")] = None
-    address: Annotated[
-        str | None,
-        Field(
-            description="Address of the environment server. If None, will spawn an environment server in a subprocess automatically.If given, will try to connect an environment client to the environment server at this address."
-        ),
-    ] = None
     extra_env_kwargs: Annotated[
         dict[str, Any],
         Field(
             description=(
-                "Extra kwargs passed to an env (e.g. seq_len, score_rollouts). This field is auto-populated with the seq_len, and score_rollouts for training envs on the orchestrator. It is generally NOT recommended for this field to be overriden by the user. It's main use case is to match the extra_env_kwargs when running an env in an isolated environment server."
+                "Extra kwargs passed to an env (e.g. seq_len, score_rollouts). This field is auto-populated "
+                "by the orchestrator. It is generally NOT recommended for this field to be overridden by the user."
             ),
         ),
     ] = {}
+
+    address: Annotated[
+        str | None,
+        Field(
+            description="Address of the environment server. If None, will spawn an environment server in a subprocess automatically. If given, will connect an environment client to the server at this address."
+        ),
+    ] = None
+
     num_workers: Annotated[
         int | Literal["auto"],
         Field(
-            description=(
-                "Number of env server worker processes. "
-                "Set to 'auto' to scale based on the env's concurrency (1 worker per 256 concurrent rollouts). "
-                "When setting manually, we recommend sizing so that each worker handles at most 256 concurrent rollouts. "
-                "Only used when the orchestrator spawns the env server (i.e. address is None)."
-            ),
+            description="Number of env server worker processes. "
+            "Set to 'auto' to scale based on the env's concurrency (1 worker per 256 concurrent rollouts). "
+            "When setting manually, we recommend sizing so that each worker handles at most 256 concurrent rollouts. "
+            "Only used when the orchestrator spawns the env server (i.e. address is None)."
         ),
     ] = "auto"
+
+    score_rollouts: Annotated[
+        bool,
+        Field(
+            description="Whether to score rollouts using the environment rubric. If False, rewards are always set to 0.",
+        ),
+    ] = True
+
+    max_concurrent: Annotated[
+        int | None,
+        Field(
+            description="Maximum number of concurrent rollouts for this environment. If None, will not limit concurrency.",
+        ),
+    ] = None
+
     max_retries: Annotated[
         int,
         Field(
             ge=0,
-            description="Maximum number of times the environment will retry a failed rollout.",
+            description="Maximum number of internal retries the environment will attempt before declaring a rollout failed.",
         ),
     ] = 0
 
@@ -319,54 +335,64 @@ class EnvConfig(BaseConfig):
         return self
 
 
+TrainEnvConfig = EnvConfig
+# class TrainEnvConfig(EnvConfig):
+# """Configures a training environment."""
+
+
 class EvalEnvConfig(EnvConfig):
-    """Configures an environment for evaluation."""
+    """Configures an evaluation environment."""
 
     num_examples: Annotated[
-        int | None,
-        Field(
-            description="Number of examples to evaluate per environment. If not set, will use 'num_examples' from main config."
-        ),
-    ] = None
-    rollouts_per_example: Annotated[
-        int | None,
-        Field(
-            description="Number of samples to generate per example for each environment. If not set, will use 'rollouts_per_example' from main config."
-        ),
-    ] = None
-
-    skip_first: Annotated[
         int,
-        Field(
-            description="Number of examples to skip from the beginning of the dataset.",
-        ),
-    ] = 0
+        Field(description="Number of examples to evaluate."),
+    ] = -1
 
-
-class ValConfig(BaseConfig):
-    """Configures the validation of the model."""
-
-    num_examples: Annotated[
-        int, Field(ge=1, description="Number of examples to use for validation. If -1, will use all examples.")
-    ] = 16
     rollouts_per_example: Annotated[
-        int, Field(ge=1, description="Number of samples to generate per example for validation.")
+        int,
+        Field(ge=1, description="Number of rollouts to generate per example."),
     ] = 1
-    interval: Annotated[int, Field(description="Interval at which to validate the model.")] = 10
 
 
-class EvalConfig(BaseConfig):
-    """Configures evaluation using verifiers environments."""
+class TrainEnvsConfig(BaseConfig):
+    """Configures all training environments."""
+
+    env: list[TrainEnvConfig] = [TrainEnvConfig()]
+
+    @model_validator(mode="after")
+    def validate_unique_env_names(self):
+        env_names = [env.resolved_name for env in self.env]
+        duplicates = [n for n in env_names if env_names.count(n) > 1]
+        if duplicates:
+            raise ValueError(
+                f"Duplicate training environment names: {set(duplicates)}. Each env must have a unique name."
+            )
+        return self
+
+
+class EvalEnvsConfig(BaseConfig):
+    """Configures all evaluation environments."""
 
     env: list[EvalEnvConfig] = [EvalEnvConfig()]
+
+    @model_validator(mode="after")
+    def validate_unique_env_names(self):
+        env_names = [env.resolved_name for env in self.env]
+        duplicates = [n for n in env_names if env_names.count(n) > 1]
+        if duplicates:
+            raise ValueError(
+                f"Duplicate evaluation environment names: {set(duplicates)}. Each env must have a unique name."
+            )
+        return self
+
+
+class EvalConfig(EvalEnvsConfig):
+    """Configures evaluation using verifiers environments."""
+
     sampling: EvalSamplingConfig = Field(
         default_factory=EvalSamplingConfig,
         description="Shared sampling configuration for evals; can differ from training sampling.",
     )
-    num_examples: Annotated[int, Field(description="Number of examples to evaluate per environment.")] = -1
-    rollouts_per_example: Annotated[
-        int, Field(ge=1, description="Number of samples to generate per example for each environment.")
-    ] = 1
 
     interval: Annotated[
         int,
@@ -400,14 +426,6 @@ class EvalConfig(BaseConfig):
             description="Whether to cancel in-flight training rollouts before starting online evals. This is useful to avoid congestion (e.g. do not have training + eval rollouts happening at the same time) but leads to slower training steps as rollouts get cancelled and the pipeline has to fill up after each eval",
         ),
     ] = False
-
-    @model_validator(mode="after")
-    def validate_unique_env_names(self):
-        env_names = [env.resolved_name for env in self.env]
-        duplicates = [n for n in env_names if env_names.count(n) > 1]
-        if duplicates:
-            raise ValueError(f"Duplicate eval environment names: {set(duplicates)}. Each env must have a unique name.")
-        return self
 
 
 class CheckpointConfig(BaseConfig):
@@ -703,7 +721,7 @@ class TeacherRolloutModelConfig(BaseConfig):
     ] = ModelConfig()
 
 
-class OrchestratorConfig(BaseConfig):
+class OrchestratorConfig(TrainEnvsConfig):
     """Configures the orchestrator for RL training."""
 
     # The OAI client configuration
@@ -738,9 +756,6 @@ class OrchestratorConfig(BaseConfig):
 
     # The sampling configuration
     sampling: SamplingConfig = SamplingConfig()
-
-    # The environment configuration
-    env: list[EnvConfig] = [EnvConfig()]
 
     # The evaluation configuration
     eval: EvalConfig | None = None
@@ -908,6 +923,16 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = True
 
+    @property
+    def train_envs(self) -> list[TrainEnvConfig]:
+        return self.env
+
+    @property
+    def eval_envs(self) -> list[EvalEnvConfig]:
+        if self.eval is None:
+            return []
+        return self.eval.env
+
     @model_validator(mode="after")
     def validate_unique_filter_types(self):
         types = [f.type for f in self.filters]
@@ -961,14 +986,6 @@ class OrchestratorConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def validate_unique_env_names(self):
-        env_names = [env.resolved_name for env in self.env]
-        duplicates = [n for n in env_names if env_names.count(n) > 1]
-        if duplicates:
-            raise ValueError(f"Duplicate environment names: {set(duplicates)}. Each env must have a unique name.")
-        return self
-
-    @model_validator(mode="after")
     def validate_env_ratios(self):
         if self.buffer.env_ratios is not None:
             assert len(self.buffer.env_ratios) == len(self.env), "env_ratios length must match number of environments"
@@ -1019,15 +1036,13 @@ class OrchestratorConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def resolve_extra_env_kwargs(self):
-        train_extra_env_kwargs = dict(
-            max_seq_len=self.seq_len,
-            score_rollouts=self.verification.enabled,
-        )
+    def resolve_env_config(self):
+        """Populate extra_env_kwargs from top-level and per-env fields."""
         for env in self.env:
-            # extra_env_kwargs is not meant to be used by the user, we shamelessly override here
-            env.extra_env_kwargs.update(train_extra_env_kwargs)
-
+            env.extra_env_kwargs.update(
+                max_seq_len=self.seq_len,
+                score_rollouts=env.score_rollouts,
+            )
         return self
 
     @model_validator(mode="after")
