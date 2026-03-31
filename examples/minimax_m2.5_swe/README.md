@@ -40,7 +40,7 @@ We recommend using the tmux helper to start the run and look at the logs.
 From your Slurm head node:
 
 ```bash
-bash scripts/slurm_tmux.sh minimax-swe /shared/outputs/minimax-swe
+bash scripts/tmux.sh minimax-swe /shared/outputs/minimax-swe
 ```
 
 You can then attach to it by doing `tmux attach -t minimax-swe`.

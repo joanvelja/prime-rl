@@ -44,7 +44,7 @@ We recommend using the tmux helper to start the run and look at the logs.
 From your Slurm head node:
 
 ```bash
-bash scripts/slurm_tmux.sh intellect-3.1 /shared/outputs/intellect-3.1
+bash scripts/tmux.sh intellect-3.1 /shared/outputs/intellect-3.1
 ```
 
 You can then attach to it by doing `tmux attach -t intellect-3.1`.

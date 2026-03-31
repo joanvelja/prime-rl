@@ -291,5 +291,5 @@ tail -F {output_dir}/logs/inference/node_*.log
 For convenience, a tmux launcher sets up a session with all log streams:
 
 ```bash
-bash scripts/slurm_tmux.sh my-rl-job /shared/outputs/my-rl-job
+bash scripts/tmux.sh my-rl-job /shared/outputs/my-rl-job
 ```

@@ -32,7 +32,7 @@ We recommend using the tmux helper to start the run and look at the logs.
 From your Slurm head node:
 
 ```bash
-bash scripts/slurm_tmux.sh qwen30b-math /shared/outputs/qwen30b-math
+bash scripts/tmux.sh qwen30b-math /shared/outputs/qwen30b-math
 ```
 
 You can then attach to it by doing `tmux attach -t qwen30b-math`.

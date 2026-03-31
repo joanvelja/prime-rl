@@ -40,7 +40,7 @@ We recommend using the tmux helper to start the run and look at the logs.
 From your Slurm head node:
 
 ```bash
-bash scripts/slurm_tmux.sh glm5-pd-disag /shared/outputs/glm5-pd-disag
+bash scripts/tmux.sh glm5-pd-disag /shared/outputs/glm5-pd-disag
 ```
 
 You can then attach to it by doing `tmux attach -t glm5-pd-disag`.

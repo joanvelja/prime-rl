@@ -82,7 +82,7 @@ Only rank 0 output is shown in `trainer.log`. Per-rank logs from all ranks are a
 
 `scripts/tmux.sh` sets up a tmux session for RL runs with **four panes**:
 
-- **Trainer**: run `uv run rl ...` here
+- **Trainer**: follows `{output_dir}/logs/trainer.log`
 - **Orchestrator**: follows `{output_dir}/logs/orchestrator.log`
 - **Envs**: follows `{output_dir}/logs/envs/*/*/*.log`
 - **Inference**: follows `{output_dir}/logs/inference.log`
