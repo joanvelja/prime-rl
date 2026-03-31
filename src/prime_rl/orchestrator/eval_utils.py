@@ -9,9 +9,7 @@ import verifiers as vf
 from prime_rl.configs.orchestrator import EvalSamplingConfig
 from prime_rl.orchestrator.vf_utils import evaluate, get_completion_len
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.prime_monitor import PrimeMonitor
 from prime_rl.utils.utils import capitalize
-from prime_rl.utils.wandb_monitor import WandbMonitor
 
 
 def compute_eval_ckpt_step(
@@ -100,9 +98,12 @@ async def evaluate_env(
     ckpt_step: int,
     step: int,
     get_client: Callable[[], Awaitable[vf.ClientConfig]],
-    wandb_monitor: WandbMonitor | None = None,
-    prime_monitor: PrimeMonitor | None = None,
-):
+) -> tuple[dict[str, Any], list[vf.RolloutOutput]]:
+    """Run evaluation and return (metrics_dict, rollout_outputs).
+
+    Returns metrics prefixed with ``eval/{env_name}/`` and the raw outputs
+    so the caller can log them to any monitor backend.
+    """
     logger = get_logger()
     logger.info(f"Evaluating {env_name} ({num_examples=}, {rollouts_per_example=})")
     eval_start_time = time.perf_counter()
@@ -121,14 +122,8 @@ async def evaluate_env(
 
     if not outputs:
         logger.warning(f"All rollouts failed for {env_name} ({failed_rollouts} failed), skipping metrics")
-        failed_metrics = {
-            f"eval/{env_name}/failed_rollouts": failed_rollouts,
-            "progress/ckpt_step": ckpt_step,
-            "step": step,
-        }
-        wandb_monitor.log(failed_metrics, step=step)
-        prime_monitor.log(failed_metrics, step=step)
-        return
+        metrics = {f"eval/{env_name}/failed_rollouts": failed_rollouts, "progress/ckpt_step": ckpt_step, "step": step}
+        return metrics, []
 
     rows = []
     for output in outputs:
@@ -169,7 +164,7 @@ async def evaluate_env(
     )
     logger.success(message)
 
-    # Log statistics to monitor
+    # Build metrics dict
     eval_metrics = {
         f"avg@{rollouts_per_example}": float(results_df.reward.mean()),
         "no_response/mean": float(results_df.no_response.mean()),
@@ -184,8 +179,6 @@ async def evaluate_env(
     if could_be_binary:
         assert pass_at_k is not None
         eval_metrics.update(pd.Series(pass_at_k.mean()).to_dict())
-    eval_metrics = {**{f"eval/{env_name}/{k}": v for k, v in eval_metrics.items()}}
-    eval_metrics.update({"progress/ckpt_step": ckpt_step, "step": step})
-    wandb_monitor.log(eval_metrics, step=step)
-    wandb_monitor.log_eval_samples(outputs, env_name=env_name, step=step)
-    prime_monitor.log(eval_metrics, step=step)
+    metrics = {f"eval/{env_name}/{k}": v for k, v in eval_metrics.items()}
+    metrics.update({"progress/ckpt_step": ckpt_step, "step": step})
+    return metrics, outputs

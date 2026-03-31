@@ -485,7 +485,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
-            results = await asyncio.gather(
+            eval_results = await asyncio.gather(
                 *[
                     evaluate_env(
                         env=eval_env,
@@ -498,12 +498,16 @@ async def orchestrate(config: OrchestratorConfig):
                         max_retries=eval_env_config.max_retries,
                         ckpt_step=ckpt_step,
                         step=progress.step,
-                        wandb_monitor=wandb_monitor,
-                        prime_monitor=prime_monitor,
                     )
                     for eval_env, eval_env_name, eval_env_config in zip(eval_envs, eval_env_names, config.eval.env)
                 ]
             )
+
+            for (eval_metrics, eval_outputs), eval_env_name in zip(eval_results, eval_env_names):
+                wandb_monitor.log(eval_metrics, step=progress.step)
+                prime_monitor.log(eval_metrics, step=progress.step)
+                if eval_outputs:
+                    wandb_monitor.log_eval_samples(eval_outputs, env_name=eval_env_name, step=progress.step)
 
             # Resume weight updates
             scheduler.checkpoint_ready.set()
@@ -865,7 +869,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval:
         logger.info("Running final evals")
-        results = await asyncio.gather(
+        eval_results = await asyncio.gather(
             *[
                 evaluate_env(
                     env=eval_env,
@@ -882,6 +886,12 @@ async def orchestrate(config: OrchestratorConfig):
                 for eval_env, eval_env_name, eval_env_config in zip(eval_envs, eval_env_names, config.eval.env)
             ]
         )
+
+        for (eval_metrics, eval_outputs), eval_env_name in zip(eval_results, eval_env_names):
+            wandb_monitor.log(eval_metrics, step=progress.step)
+            prime_monitor.log(eval_metrics, step=progress.step)
+            if eval_outputs:
+                wandb_monitor.log_eval_samples(eval_outputs, env_name=eval_env_name, step=progress.step)
 
     # Log final (immutable) samples and distributions to monitors
     wandb_monitor.log_final_samples()
