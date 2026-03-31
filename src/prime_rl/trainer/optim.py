@@ -9,7 +9,6 @@ from torch.distributed.tensor import DTensor
 from torch.optim import SGD, AdamW, Optimizer
 
 from prime_rl.configs.trainer import OptimizerConfig
-from prime_rl.trainer.mezo import MeZO
 from prime_rl.trainer.parallel_dims import ParallelDims
 from prime_rl.trainer.runs import get_multi_run_manager
 from prime_rl.trainer.sign_adamw import SignAdamW
@@ -168,13 +167,6 @@ def _create_optimizer(
             )
         case "muon":
             return _create_muon_optimizer(config, named_params, parallel_dims, lr)
-        case "mezo":
-            return MeZO(
-                params=[p for _, p in named_params],
-                lr=lr,
-                eps=config.eps,
-                weight_decay=config.weight_decay,
-            )
         case "sign_adamw":
             return SignAdamW(
                 params=[p for _, p in named_params],

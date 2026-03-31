@@ -446,12 +446,6 @@ class MuonConfig(BaseOptimizerConfig):
     ] = 0.95
 
 
-class MeZOConfig(BaseOptimizerConfig):
-    type: Literal["mezo"] = "mezo"
-
-    eps: Annotated[float, Field(ge=0, description="Perturbation epsilon for zeroth-order gradient estimation.")] = 1e-3
-
-
 class SignAdamWConfig(BaseOptimizerConfig):
     type: Literal["sign_adamw"] = "sign_adamw"
 
@@ -460,7 +454,7 @@ class SignAdamWConfig(BaseOptimizerConfig):
 
 
 OptimizerConfig: TypeAlias = Annotated[
-    SGDConfig | AdamWConfig | MuonConfig | MeZOConfig | SignAdamWConfig, Field(discriminator="type")
+    SGDConfig | AdamWConfig | MuonConfig | SignAdamWConfig, Field(discriminator="type")
 ]
 
 
