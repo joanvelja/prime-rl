@@ -83,6 +83,50 @@ Log paths are consistent across deployment types — `logs/trainer.log` and `log
     └── ...
 ```
 
+### Identify processes via process tree
+
+All prime-rl and verifiers processes set custom process titles using `setproctitle`, making them easy to identify in `ps`, `htop`, and `pstree`.
+
+#### Process titles
+
+| Process | Title |
+|---------|-------|
+| RL launcher (`uv run rl`) | `PRIME-RL::Launcher` |
+| SFT launcher (`uv run sft`) | `PRIME-RL::SFT` |
+| Inference server (`uv run inference`) | `PRIME-RL::Inference` |
+| Orchestrator (`uv run orchestrator`) | `PRIME-RL::Orchestrator` |
+| RL trainer (via torchrun) | `PRIME-RL::Trainer` |
+| SFT trainer (via torchrun) | `PRIME-RL::SFTTrainer` |
+| Env server (`uv run env-server`) | `PRIME-RL::EnvServer` |
+| Env server (spawned by orchestrator) | `Verifiers::EnvServer` |
+| Env worker N | `Verifiers::EnvWorker{N}` |
+
+#### Inspecting the process tree
+
+```bash
+# Find all prime-rl / verifiers processes
+ps -eo pid,comm,args | grep -E "PRIME-RL|Verifiers"
+
+# Show the full tree from the launcher PID
+pstree -ap <launcher_pid>
+```
+
+A typical single-node RL run process tree:
+
+```
+PRIME-RL::Launcher
+├── PRIME-RL::Inference          (vLLM server, GPU 0)
+├── PRIME-RL::Orchestrator       (CPU-only, data/scheduling)
+│   ├── Verifiers::EnvServer     (ZMQ env server per environment)
+│   │   ├── Verifiers::EnvWorker0
+│   │   ├── Verifiers::EnvWorker1
+│   │   └── ...
+│   └── ...
+├── torchrun
+│   └── PRIME-RL::Trainer        (RL trainer, GPU 1+)
+└── tail -F trainer.log
+```
+
 ### Check performance
 
 #### Trainer

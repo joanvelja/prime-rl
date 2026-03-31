@@ -12,7 +12,7 @@ from prime_rl.configs.sft import SFTConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.pathing import format_log_message, get_config_dir, get_log_dir, validate_output_dir
-from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process
+from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process, set_proc_title
 from prime_rl.utils.utils import get_free_port
 
 SFT_TOML = "sft.toml"
@@ -203,6 +203,7 @@ def sft(config: SFTConfig):
 
 
 def main():
+    set_proc_title("SFT")
     sft(cli(SFTConfig))
 
 
