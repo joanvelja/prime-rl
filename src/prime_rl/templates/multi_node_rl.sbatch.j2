@@ -162,9 +162,6 @@ srun bash -c '
     source .venv/bin/activate
     # Do not sync to avoid conflicts with lockfile
 
-    # Create per-job historical log dirs
-    mkdir -p $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/trainer $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference
-
     # Higher ulimit
     ulimit -n 65536
     export GIT_LFS_SKIP_SMUDGE=1
@@ -185,8 +182,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
     RANK_IN_REPLICA=$((INFER_NODE_RANK % NODES_PER_INFER_REPLICA))
 
     echo "INFER_NODE_RANK=$INFER_NODE_RANK REPLICA=$REPLICA_IDX RANK_IN_REPLICA=$RANK_IN_REPLICA LOCAL_IP=$LOCAL_IP" \
-        | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-              $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
+        | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
 
 {% if is_disaggregated -%}
     # PD disaggregated: NIXL KV transfer + role-based inference
@@ -226,8 +222,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
     fi
 
     echo "ROLE=$ROLE REPLICA=$REPLICA_IDX ROLE_RANK=$ROLE_RANK DP=$DP PORT=$PORT" \
-        | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                 $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
+        | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
 
     if [ "$DP" -gt 1 ]; then
         if [ "$ROLE_RANK" -eq 0 ]; then
@@ -264,9 +259,7 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         --parallel.dp $DP \
         --data-parallel-rpc-port $INFERENCE_DATA_PARALLEL_RPC_PORT \
         --vllm-extra "$VLLM_EXTRA" \
-        2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                      $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-{%- else -%}
+        2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log{%- else -%}
     # Start vllm-router on the first node of each replica
     if [ "$RANK_IN_REPLICA" -eq 0 ]; then
         ROUTER_LOG="$OUTPUT_DIR/logs/inference/router_${REPLICA_IDX}.log"
@@ -300,15 +293,13 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
             --server.port $BACKEND_PORT \
             --data-parallel-rpc-port $INFERENCE_DATA_PARALLEL_RPC_PORT \
             --vllm-extra "$VLLM_EXTRA" \
-            2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                          $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
+            2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
     else
         uv run inference \
             @ $CONFIG_DIR/inference.toml \
             --server.host 0.0.0.0 \
             --server.port $BACKEND_PORT \
-            2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                          $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
+            2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
     fi
 {%- endif %}
 
@@ -321,7 +312,7 @@ else
         ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --client.admin-base-url $ADMIN_URLS"
         {% if use_nccl_broadcast %}ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --weight_broadcast.host $MASTER_ADDR"
         {% endif %}{% if wandb_shared %}WANDB_SHARED_LABEL=orchestrator {% endif %}uv run orchestrator $ORCHESTRATOR_ARGS \
-            2>&1 | tee $OUTPUT_DIR/logs/orchestrator.log $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/orchestrator.log &
+            2>&1 | tee $OUTPUT_DIR/logs/orchestrator.log &
     fi
 {%- else %}
     TRAIN_NODE_RANK=$SLURM_PROCID
@@ -346,6 +337,5 @@ else
         --local-ranks-filter=0 \
         -m prime_rl.trainer.rl.train \
         @ $CONFIG_DIR/trainer.toml \
-        2>&1 | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/trainer/node_${TRAIN_NODE_RANK}.log
-{% if num_infer_nodes > 0 %}    fi{% endif %}
+        2>&1 | tee -a $OUTPUT_DIR/logs/trainer/node_${TRAIN_NODE_RANK}.log{% if num_infer_nodes > 0 %}    fi{% endif %}
 '

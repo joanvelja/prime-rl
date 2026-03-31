@@ -113,9 +113,6 @@ srun bash -c '
     IB_HCA=$(ibv_devinfo 2>/dev/null | sed -n -e "/hca_id/p" -e "/link_layer:/p" | grep -B1 InfiniBand | grep hca_id | sed -e "s/^hca_id://g" | tr -d "[[:blank:]]" | paste -sd,)
     [ -n "$IB_HCA" ] && export NCCL_IB_HCA=$IB_HCA
 
-    # Create per-job historical log dir
-    mkdir -p $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference
-
     INFER_NODE_RANK=$SLURM_PROCID
     LOCAL_IP=$(hostname -I | awk "{print \$1}")
 
@@ -187,8 +184,7 @@ srun bash -c '
 
     echo "NODE_RANK=$INFER_NODE_RANK ROLE=$ROLE REPLICA=$REPLICA_IDX ROLE_RANK=$ROLE_RANK EP=$EP PORT=$PORT LOCAL_IP=$LOCAL_IP" \
         | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-              $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-
+             
     # Start vllm-router on the first prefill node of each replica (background)
     if [ "$RANK_IN_REPLICA" -eq 0 ]; then
         ROUTER_LOG="$OUTPUT_DIR/logs/inference/router_${REPLICA_IDX}.log"
@@ -216,12 +212,10 @@ srun bash -c '
         --data-parallel-rpc-port $RPC_PORT \
         --vllm-extra "$VLLM_EXTRA" \
         2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                      $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-{%- elif num_nodes > 1 %}
+                     {%- elif num_nodes > 1 %}
     echo "INFER_NODE_RANK=${INFER_NODE_RANK}, LOCAL_IP=${LOCAL_IP}" \
         | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-              $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-
+             
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
     # Start router on node 0
@@ -244,15 +238,12 @@ srun bash -c '
         --server.host 0.0.0.0 \
         --server.port $BACKEND_PORT \
         2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log \
-                      $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-{%- else %}
-    echo "INFER_NODE_RANK=${INFER_NODE_RANK}, LOCAL_IP=${LOCAL_IP}" | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-
+                     {%- else %}
+    echo "INFER_NODE_RANK=${INFER_NODE_RANK}, LOCAL_IP=${LOCAL_IP}" | tee $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log
     # Required for graph compilation to work
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
     uv run inference \
         @ $CONFIG_PATH \
-        2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log $OUTPUT_DIR/logs/slurm/job_${SLURM_JOB_ID}/inference/node_${INFER_NODE_RANK}.log
-{%- endif %}
+        2>&1 | tee -a $OUTPUT_DIR/logs/inference/node_${INFER_NODE_RANK}.log{%- endif %}
 '

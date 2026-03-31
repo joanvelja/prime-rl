@@ -79,13 +79,6 @@ Logs are captured at the deployment level — the entrypoint redirects subproces
 │   ├── node_0.log               # per-node inference output
 │   ├── node_1.log
 │   └── router_0.log             # vllm-router per replica
-├── slurm/
-│   └── job_{id}/                # historical per-job copies
-│       ├── trainer/
-│       │   └── node_{N}.log
-│       ├── inference/
-│       │   └── node_{N}.log
-│       └── orchestrator.log
 └── envs/
     └── ...
 ```

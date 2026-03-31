@@ -79,13 +79,6 @@ Log paths are consistent across deployment types — `logs/trainer.log` and `log
 │   ├── node_0.log
 │   ├── node_1.log
 │   └── router_0.log            # vllm-router per replica
-├── slurm/
-│   └── job_{id}/               # historical per-job copies
-│       ├── trainer/
-│       │   └── node_{N}.log
-│       ├── inference/
-│       │   └── node_{N}.log
-│       └── orchestrator.log
 └── envs/
     └── ...
 ```
