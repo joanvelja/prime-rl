@@ -48,9 +48,6 @@ class SignSGD(Optimizer):
                     raise RuntimeError("SignSGD does not support sparse gradients")
 
                 sign_grad = torch.sign(grad)
-                grad_norm = grad.norm()
-                if grad_norm > 0:
-                    sign_grad = sign_grad * grad_norm
 
                 if group["weight_decay"] > 0.0:
                     p.add_(p, alpha=-group["lr"] * group["weight_decay"])
