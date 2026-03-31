@@ -33,6 +33,7 @@ def sft_process(
         "configs/ci/integration/sft/start.toml",
         "--deployment.num-gpus",
         "2",
+        "--clean-output-dir",
         "--wandb.project",
         wandb_project,
         "--wandb.name",
