@@ -20,7 +20,7 @@ from prime_rl.orchestrator.trajectories import (
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
 from prime_rl.utils.pathing import get_log_dir
-from prime_rl.utils.usage_reporter import UsageReporter
+from prime_rl.utils.usage_reporter import UsageConfig, UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
 monkey_patch_oai_iterable_types()
@@ -163,8 +163,6 @@ async def orchestrate(config: OrchestratorConfig):
         tokenizer=tokenizer,
         run_config=config,
     )
-
-    from prime_rl.utils.usage_reporter import UsageConfig
 
     usage_reporter = UsageReporter(config.usage or UsageConfig.from_env())
 

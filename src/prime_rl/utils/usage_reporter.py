@@ -15,15 +15,10 @@ from pydantic import Field
 
 from prime_rl.utils.logger import get_logger
 
-# Import BaseConfig lazily to avoid hard dependency on pydantic_config at import time.
-# In production the full config stack is available; for standalone use BaseModel works.
-try:
-    from prime_rl.utils.config import BaseConfig as _BaseConfig
-except ImportError:
-    from pydantic import BaseModel as _BaseConfig  # type: ignore[assignment]
+from prime_rl.utils.config import BaseConfig
 
 
-class UsageConfig(_BaseConfig):
+class UsageConfig(BaseConfig):
     """Platform usage reporting configuration."""
 
     base_url: Annotated[
