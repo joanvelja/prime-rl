@@ -58,7 +58,6 @@ def cleanup_processes(processes: list[Popen]):
             process.wait(timeout=60)
         except subprocess.TimeoutExpired:
             cleanup_process(process.pid, signal.SIGKILL)
-            process.wait()
         logger.debug(f"Cleaned up process {process.pid}")
 
 
