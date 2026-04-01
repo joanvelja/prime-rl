@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch.distributed.nn as dist_nn
 from torch import nn
 
 from prime_rl.trainer.models.kernels.fp8_indexer import fp8_indexer
@@ -128,26 +127,6 @@ class GlmMoeDsaAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, args.hidden_size, bias=args.attention_bias)
         self.indexer = Indexer(args)
         self.scaling = self.qk_head_dim ** (-0.5)
-        self.cp_group = None
-        self.cp_rank = 0
-        self.cp_world_size = 1
-
-    @property
-    def cp_enabled(self) -> bool:
-        return self.cp_group is not None and self.cp_world_size > 1
-
-    def gather_from_seq_parallel_region(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not self.cp_enabled:
-            return hidden_states
-
-        gathered_hidden_states = dist_nn.all_gather(hidden_states.contiguous(), group=self.cp_group)
-        return torch.cat(gathered_hidden_states, dim=1)
-
-    def scatter_to_seq_parallel_region(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not self.cp_enabled:
-            return hidden_states
-
-        return torch.chunk(hidden_states, self.cp_world_size, dim=1)[self.cp_rank].contiguous()
 
     def attn_projections(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q_latent = self.q_a_layernorm(self.q_a_proj(hidden_states))

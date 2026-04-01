@@ -27,6 +27,7 @@ from prime_rl.trainer.models.layers.mlp import MLP, MLPConfig
 from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
 from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
+from prime_rl.utils.cp import gather_for_cp, shard_for_cp
 
 
 def _sparse_mla_attention_args(config: GlmMoeDsaConfig) -> SparseMlaAttentionArgs:
@@ -81,6 +82,27 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
         self.post_attention_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
 
+    def set_context_parallel_attributes(self, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
+        self._cp_group = cp_group
+        self._cp_rank = cp_rank
+        self._cp_world_size = cp_world_size
+
+    @property
+    def cp_enabled(self) -> bool:
+        return hasattr(self, "_cp_group") and hasattr(self, "_cp_rank") and hasattr(self, "_cp_world_size")
+
+    def shard_to_cp(self, t: torch.Tensor) -> torch.Tensor:
+        if not self.cp_enabled:
+            return t
+
+        return shard_for_cp(t, self._cp_rank, self._cp_world_size)
+
+    def gather_for_cp(self, t: torch.Tensor) -> torch.Tensor:
+        if not self.cp_enabled:
+            return t
+
+        return gather_for_cp(t, self._cp_group)
+
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
         self,
@@ -92,14 +114,14 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn.gather_from_seq_parallel_region(hidden_states)
+        hidden_states = self.shard_to_cp(hidden_states)
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             ks=ks,
             ke=ke,
         )
-        hidden_states = self.self_attn.scatter_to_seq_parallel_region(hidden_states)
+        hidden_states = self.gather_for_cp(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states

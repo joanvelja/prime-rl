@@ -19,6 +19,8 @@ from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
 from prime_rl.utils.cp import (
+    gather_for_cp,
+    gather_for_cp_wo_grad,
     setup_cp_params,
     shard_for_cp,
 )
@@ -406,12 +408,8 @@ def train(config: TrainerConfig):
             # else: FusedOutputLinear was used - logprobs already computed with per-token temperatures
 
             if cp_enabled:
-                logprobs = dist_nn.all_gather(out["logprobs"], group=cp_group)
-                out["logprobs"] = torch.cat(logprobs, dim=1)
-
-                entropies = [torch.zeros_like(out["entropy"]) for _ in range(cp_size)]
-                dist.all_gather(entropies, out["entropy"], group=cp_group)
-                out["entropy"] = torch.cat(entropies, dim=1)
+                out["logprobs"] = gather_for_cp(out["logprobs"], cp_rank, cp_size, cp_group)
+                out["entropy"] = gather_for_cp_wo_grad(out["entropy"], cp_size, cp_group)
 
             vocab_size = getattr(model.config, "vocab_size", None) or model.config.text_config.vocab_size
             # This is not really necessary as the first token should be masked out, but we do it anyway to be sure
