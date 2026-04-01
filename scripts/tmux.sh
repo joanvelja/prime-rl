@@ -58,8 +58,8 @@ fi
 
 echo "Creating new tmux session: $SESSION_NAME"
 
-# Window 0: Command - empty shell
-tmux new-session -d -s "$SESSION_NAME" -n "Command"
+# Window 0: Launcher - empty shell
+tmux new-session -d -s "$SESSION_NAME" -n "Launcher"
 
 # Window 1: Logs - 4 vertical panes
 tmux new-window -t "$SESSION_NAME" -n "Logs"
@@ -90,6 +90,6 @@ tmux send-keys -t "$SESSION_NAME:Logs.3" \
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top
 tmux set-option -t "$SESSION_NAME" -g pane-border-format " #{pane_title} "
 
-# Focus command window and attach
-tmux select-window -t "$SESSION_NAME:Command"
+# Focus launcher window and attach
+tmux select-window -t "$SESSION_NAME:Launcher"
 exec tmux attach-session -t "$SESSION_NAME"
