@@ -1,11 +1,10 @@
 import json
 import uuid
 from collections import defaultdict
-from pathlib import Path
 from typing import Literal, TypedDict, cast
 
 import torch
-from datasets import Dataset, interleave_datasets, load_dataset, load_from_disk
+from datasets import Dataset, interleave_datasets, load_dataset
 from jaxtyping import Bool, Int
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
@@ -492,11 +491,6 @@ def setup_and_interleave_datasets(
 def load_sft_dataset(config: SFTDataConfig) -> Dataset:
     """Load and interleave the raw HF dataset. This is the expensive I/O step."""
     logger = get_logger()
-    dataset_path = Path(config.name)
-    if dataset_path.exists():
-        logger.info(f"Loading local SFT dataset from {dataset_path}")
-        return load_from_disk(str(dataset_path))
-
     if config.subsets is None and config.splits is None:
         return setup_and_interleave_datasets(
             dataset_name=config.name,
