@@ -303,10 +303,11 @@ def inject_prime_lm_head(
     final_logit_softcapping = getattr(model.config, "final_logit_softcapping", None)
     if final_logit_softcapping:
         if fused_cross_entropy == "quack":
-            raise ValueError(
-                "quack_fused does not support Gemma logit softcapping. "
-                "Use loss_impl='liger_fused' or loss_impl='torch' instead."
+            logger.warning(
+                "quack fused cross-entropy does not support Gemma logit softcapping; "
+                "falling back to Liger fused cross-entropy."
             )
+            fused_cross_entropy = "liger"
         if not fused_cross_entropy:
             from prime_rl.trainer.models.layers.lm_head_gemma import inject_gemma_lm_head
 

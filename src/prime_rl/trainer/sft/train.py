@@ -3,7 +3,6 @@ from contextlib import nullcontext
 from datetime import timedelta
 
 from ring_flash_attn import substitute_hf_flash_attn
-from torch.nn import CrossEntropyLoss
 
 # Import environment before any other imports
 # ruff: noqa: I001
@@ -47,7 +46,6 @@ from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
-from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX
 
 from torchtitan.distributed.utils import clip_grad_norm_
@@ -119,7 +117,14 @@ def train(config: SFTConfig):
     # Initialize the model and tokenizer
     logger.info(f"Initializing model ({config.model})")
     loading_from_ckpt_later = config.ckpt and checkpoint_step is not None
-    fused_cross_entropy: bool | str = {"liger_fused": "liger", "quack_fused": "quack"}.get(config.loss_impl, False)
+    fused_cross_entropy: bool | str = False
+    if config.loss_impl == "fused":
+        try:
+            from quack.linear_cross_entropy import chunked_linear_cross_entropy  # noqa: F401
+        except ImportError:
+            fused_cross_entropy = "liger"
+        else:
+            fused_cross_entropy = "quack"
     model = setup_model(config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=fused_cross_entropy)
 
     if parallel_dims.cp_enabled:
@@ -187,15 +192,10 @@ def train(config: SFTConfig):
     cp_size = parallel_dims.cp
 
     ce_loss = None
-    match config.loss_impl:
-        case "liger":
-            ce_loss = LigerCrossEntropyLoss(reduction="none")
-        case "torch":
-            ce_loss = CrossEntropyLoss(reduction="none")
-        case "liger_fused" | "quack_fused":
-            pass  # loss is computed inside the fused lm_head
-        case _:
-            raise ValueError(f"Invalid loss implementation: {config.loss_impl}")
+    if config.loss_impl == "standard":
+        from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+
+        ce_loss = LigerCrossEntropyLoss(reduction="none")
 
     def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass returning (loss_sum, token_count) over unmasked tokens."""
@@ -215,7 +215,7 @@ def train(config: SFTConfig):
         token_count = loss_mask.sum(dtype=torch.int64)
 
         with maybe_activation_offloading(config.model.ac_offloading):
-            if config.loss_impl in ("liger_fused", "quack_fused"):
+            if config.loss_impl == "fused":
                 masked_target_ids = target_ids.clone()
                 masked_target_ids[~loss_mask] = FUSED_CE_IGNORE_INDEX
                 out = forward(model, input_ids, position_ids, labels=masked_target_ids)

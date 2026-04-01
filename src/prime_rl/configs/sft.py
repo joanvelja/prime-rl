@@ -233,13 +233,13 @@ class SFTConfig(BaseConfig):
     ] = 600
 
     loss_impl: Annotated[
-        Literal["liger", "torch", "liger_fused", "quack_fused"],
+        Literal["standard", "fused"],
         Field(
-            description="Implementation of the cross entropy loss function to use. "
-            "'liger_fused' fuses the lm_head projection with the CE loss to avoid materializing full logits. "
-            "'quack_fused' uses quack-kernels for chunked linear + CE with CuTe DSL CUDA kernels."
+            description="Cross entropy loss mode. "
+            "'standard' uses the standard Liger cross-entropy kernel. "
+            "'fused' prefers quack-kernels fused lm_head + CE and falls back to Liger."
         ),
-    ] = "torch"
+    ] = "fused"
 
     heartbeat: Annotated[
         HeartbeatConfig | None, Field(description="The heartbeat config for monitoring training progress.")
