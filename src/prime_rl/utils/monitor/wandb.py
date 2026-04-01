@@ -31,6 +31,7 @@ class WandbMonitor(Monitor):
         self.logger = get_logger()
         self.history: list[dict[str, Any]] = []
         self.output_dir = output_dir
+        self._jsonl_file = None
 
         rank = int(os.environ.get("RANK", os.environ.get("DP_RANK", "0")))
         self.enabled = self.config is not None
@@ -46,6 +47,7 @@ class WandbMonitor(Monitor):
         self._maybe_overwrite_wandb_command()
 
         shared_mode = os.environ.get("WANDB_SHARED_MODE") == "1"
+        self._setup_jsonl(shared_mode)
         if shared_mode:
             run_id = os.environ.get("WANDB_SHARED_RUN_ID")
             label = os.environ.get("WANDB_SHARED_LABEL")
@@ -108,6 +110,16 @@ class WandbMonitor(Monitor):
                     log_mode="INCREMENTAL",
                 )
 
+    def _setup_jsonl(self, shared_mode: bool) -> None:
+        """Open a JSONL file for human-readable metric logging."""
+        if self.output_dir is None:
+            return
+        label = os.environ.get("WANDB_SHARED_LABEL", "metrics") if shared_mode else "metrics"
+        path = self.output_dir / "metrics" / f"{label}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._jsonl_file = open(path, "a")
+        self.logger.info(f"Logging metrics to {path}")
+
     def _maybe_overwrite_wandb_command(self) -> None:
         """Overwrites sys.argv with the start command if it is set in the environment variables."""
         wandb_args = os.environ.get("WANDB_ARGS", None)
@@ -122,6 +134,9 @@ class WandbMonitor(Monitor):
         if not self.enabled:
             return
         wandb.log({**metrics, "step": step})
+        if self._jsonl_file is not None:
+            self._jsonl_file.write(json.dumps({**metrics, "step": step}, default=str) + "\n")
+            self._jsonl_file.flush()
 
     def log_samples(self, rollouts: list[vf.RolloutOutput], step: int) -> None:
         """Logs rollouts to W&B table."""
@@ -227,6 +242,11 @@ class WandbMonitor(Monitor):
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         """Log distributions (no-op for W&B)."""
         pass
+
+    def close(self) -> None:
+        if self._jsonl_file is not None:
+            self._jsonl_file.close()
+            self._jsonl_file = None
 
     def save_final_summary(self, filename: str = "final_summary.json") -> None:
         """Save final summary to W&B table."""
