@@ -10,7 +10,6 @@ from prime_rl.trainer.rl.broadcast import setup_weight_broadcast
 from prime_rl.utils.act_offloading import maybe_activation_offloading
 import torch
 import torch.distributed as dist
-import torch.distributed.nn as dist_nn
 from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.trainer.multi_ckpt import setup_multi_checkpoint_manager
