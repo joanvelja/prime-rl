@@ -13,24 +13,30 @@ from prime_rl.utils.logger import get_logger
 FUSED_CE_IGNORE_INDEX = -100
 
 
-def resolve_fused_cross_entropy_backend() -> tuple[Literal["liger", "quack"], str | None]:
+def resolve_fused_cross_entropy_backend() -> Literal["liger", "quack"]:
     """Choose the fused CE backend for the current CUDA device."""
+    logger = get_logger()
+
     if not torch.cuda.is_available():
-        return "liger", "CUDA is unavailable"
+        logger.warning("Falling back to Liger fused cross-entropy: CUDA is unavailable")
+        return "liger"
 
     major, minor = torch.cuda.get_device_capability()
     if major < 9:
-        return "liger", (
+        logger.warning(
+            "Falling back to Liger fused cross-entropy: "
             "quack-kernels fused cross-entropy requires CUDA compute capability >= 9.0 "
             f"(sm90+); current device is sm_{major}{minor}"
         )
+        return "liger"
 
     try:
         importlib.import_module("quack.linear_cross_entropy")
     except ImportError:
-        return "liger", "quack-kernels is not installed"
+        logger.warning("Falling back to Liger fused cross-entropy: quack-kernels is not installed")
+        return "liger"
 
-    return "quack", None
+    return "quack"
 
 
 class PrimeLmOutput(TypedDict, total=False):
@@ -318,12 +324,10 @@ def inject_prime_lm_head(
         f"model.lm_head.bias is not supported: {model.lm_head}\n{model}"
     )
 
-    logger = get_logger()
-
     if fused_cross_entropy == "quack":
-        fused_cross_entropy, fallback_reason = resolve_fused_cross_entropy_backend()
-        if fallback_reason is not None:
-            logger.warning(f"Falling back to Liger fused cross-entropy: {fallback_reason}")
+        fused_cross_entropy = resolve_fused_cross_entropy_backend()
+
+    logger = get_logger()
 
     # Check for Gemma-style softcapping - dispatch to specialized implementation
     final_logit_softcapping = getattr(model.config, "final_logit_softcapping", None)
