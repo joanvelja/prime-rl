@@ -89,7 +89,7 @@ tmux send-keys -t "$SESSION_NAME:Logs.3" \
 # Window 2: Claude Code with log context
 tmux new-window -t "$SESSION_NAME" -n "Claude"
 tmux send-keys -t "$SESSION_NAME:Claude" \
-  "claude --append-system-prompt 'You are monitoring a prime-rl training run. The output directory is ${OUTPUT_DIR}. Log paths:
+  "claude --permission-mode auto --append-system-prompt 'You are monitoring a prime-rl training run. The output directory is ${OUTPUT_DIR}. Log paths:
   Trainer:        ${LOG_DIR}/trainer.log
   All nodes:      ${LOG_DIR}/trainer/node_*.log
   All ranks:      ${LOG_DIR}/trainer/torchrun/*/*/*/*.log
