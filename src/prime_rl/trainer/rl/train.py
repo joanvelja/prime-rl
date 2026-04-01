@@ -45,6 +45,7 @@ from prime_rl.trainer.utils import (
     MemoryProfiler,
     Tensors,
     export_benchmark_json,
+    filter_rl_trainer_tensor_stats_for_wandb,
     get_zero_gradient_ratio,
     get_ckpt_disk_metrics,
     setup_torch_distributed,
@@ -440,8 +441,6 @@ def train(config: TrainerConfig):
                 loss.backward()
 
             # Add relevant tensors to tensor dict for logging purposes
-            tensors["trainer_probs"].append(torch.exp(out["logprobs"])[loss_mask].detach().to("cpu"))
-            tensors["inference_probs"].append(torch.exp(inference_logprobs)[loss_mask].detach().to("cpu"))
             tensors["entropy"].append(out["entropy"][loss_mask].detach().to("cpu"))
             tensors["loss"].append(loss.detach().to("cpu").unsqueeze(0))
 
@@ -539,9 +538,8 @@ def train(config: TrainerConfig):
         if mismatch_kl_mean is not None and entropy_mean > 0:
             tensor_stats["kl_ent_ratio/mean"] = mismatch_kl_mean / entropy_mean
 
-        # Log tensor stats
         tensor_stats["step"] = progress.step
-        monitor.log(tensor_stats, step=progress.step)
+        monitor.log(filter_rl_trainer_tensor_stats_for_wandb(tensor_stats), step=progress.step)
 
         # Log time metrics
         time_metrics = {
