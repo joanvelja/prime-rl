@@ -18,21 +18,50 @@ def test_default_advantage_fn_simple_mean():
     result = default_advantage_fn(inputs)
 
     assert result.advantages.shape == (2, 3)
-    # Check that mean is subtracted per row
     assert torch.allclose(result.advantages.mean(dim=1), torch.zeros(2), atol=1e-6)
 
 
-def test_default_advantage_fn_gr3_length_shaping():
+def test_length_shaping_only_penalizes_correct_rollouts():
+    """Correct rollouts get attenuated by L_min/L_i; incorrect ones are unchanged."""
     inputs = AdvantageInputs(
-        rewards=torch.tensor([[1.0, 0.5, 0.8]]),
-        completion_lengths=torch.tensor([[10, 20, 10]]),
+        rewards=torch.tensor([[1.0, 1.0, 0.0, 1.0]]),
+        completion_lengths=torch.tensor([[10, 30, 20, 20]]),
     )
+    result = default_advantage_fn(inputs, length_shaping=True)
 
-    result = default_advantage_fn(inputs, length_shaping_alpha=0.33)
+    # min_correct = 10
+    # shaped: [1*10/10, 1*10/30, 0, 1*10/20] = [1.0, 1/3, 0.0, 0.5]
+    shaped_rewards = torch.tensor([1.0, 1.0 / 3, 0.0, 0.5])
+    expected = shaped_rewards - shaped_rewards.mean()
 
-    expected = torch.tensor([[0.20915856, -0.25799648, 0.04883792]])
-    assert torch.allclose(result.advantages, expected, atol=1e-6)
-    assert torch.allclose(result.advantages.mean(dim=1), torch.zeros(1), atol=1e-6)
+    assert torch.allclose(result.advantages, expected.unsqueeze(0), atol=1e-6)
+
+
+def test_length_shaping_shortest_correct_keeps_full_reward():
+    """The shortest correct rollout keeps reward=1."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 1.0, 1.0]]),
+        completion_lengths=torch.tensor([[10, 20, 40]]),
+    )
+    result = default_advantage_fn(inputs, length_shaping=True)
+
+    # shaped: [1*10/10, 1*10/20, 1*10/40] = [1.0, 0.5, 0.25]
+    shaped_rewards = torch.tensor([1.0, 0.5, 0.25])
+    expected = shaped_rewards - shaped_rewards.mean()
+
+    assert torch.allclose(result.advantages, expected.unsqueeze(0), atol=1e-6)
+
+
+def test_length_shaping_no_correct_rollouts():
+    """When no rollout is correct, length shaping has no effect."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[0.0, 0.0, 0.0]]),
+        completion_lengths=torch.tensor([[10, 20, 15]]),
+    )
+    result_with = default_advantage_fn(inputs, length_shaping=True)
+    result_without = default_advantage_fn(inputs)
+
+    assert torch.allclose(result_with.advantages, result_without.advantages, atol=1e-6)
 
 
 def test_compute_advantages_with_config():
@@ -42,9 +71,7 @@ def test_compute_advantages_with_config():
     result = compute_advantages(rewards, lengths, samples_per_problem=3, advantage_config=DefaultAdvantageConfig())
 
     assert len(result) == 6
-    # First 3 should sum to ~0 (mean subtracted)
     assert abs(sum(result[:3])) < 1e-5
-    # Last 3 should sum to ~0
     assert abs(sum(result[3:])) < 1e-5
 
 
@@ -54,7 +81,6 @@ def test_compute_advantages_without_config():
 
     result = compute_advantages(rewards, lengths, samples_per_problem=3, advantage_config=None)
 
-    # Without config, returns raw rewards
     assert result == rewards
 
 
@@ -72,7 +98,6 @@ def test_setup_advantage_fn_with_custom_config():
 
     result = advantage_fn(inputs)
     assert isinstance(result, AdvantageOutputs)
-    # Dummy just multiplies rewards by scale
     assert torch.allclose(result.advantages, torch.tensor([[2.0, 1.0, 1.6]]))
 
 

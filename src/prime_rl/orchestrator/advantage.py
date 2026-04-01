@@ -35,16 +35,23 @@ Expected signature:
 
 def default_advantage_fn(
     inputs: AdvantageInputs,
-    length_shaping_alpha: float | None = None,
+    length_shaping: bool = False,
 ) -> AdvantageOutputs:
     """Default GRPO advantage: reward minus per-problem baseline."""
     rewards = inputs.rewards
 
-    if length_shaping_alpha is not None:
+    if length_shaping:
         completion_lengths = inputs.completion_lengths.to(dtype=rewards.dtype)
-        lengths_normalized = completion_lengths / completion_lengths.mean(dim=1, keepdim=True)
-        length_shaping = (1 + length_shaping_alpha * lengths_normalized) ** -1
-        rewards = rewards * length_shaping
+        correct_mask = rewards >= 1.0
+
+        # Shortest correct completion per problem (inf where no rollout is correct)
+        lengths_masked = completion_lengths.masked_fill(~correct_mask, float("inf"))
+        min_correct_length = lengths_masked.min(dim=1, keepdim=True).values
+
+        # Correct rollouts: reward * L_min/L_i (shortest correct keeps 1, longer ones attenuated)
+        shaped = rewards * (min_correct_length / completion_lengths)
+        rewards = torch.where(correct_mask, shaped, rewards)
+
     baseline = rewards.mean(dim=1, keepdim=True)
 
     return AdvantageOutputs(advantages=rewards - baseline)
@@ -64,7 +71,7 @@ def setup_advantage_fn(config: AdvantageConfig) -> AdvantageFn:
     def advantage_fn(inputs: AdvantageInputs) -> AdvantageOutputs:
         return default_advantage_fn(
             inputs,
-            length_shaping_alpha=config.length_shaping_alpha,
+            length_shaping=config.length_shaping,
         )
 
     return advantage_fn
