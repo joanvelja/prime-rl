@@ -53,7 +53,7 @@ from prime_rl.utils.validation import (
 class SharedLogConfig(BaseConfig):
     """Configures shared logging."""
 
-    level: Annotated[str | None, Field(description="The log level to use.")] = "info"
+    level: Annotated[str, Field(description="The log level to use.")] = "info"
 
     json_logging: Annotated[
         bool,
@@ -64,11 +64,11 @@ class SharedLogConfig(BaseConfig):
 class SharedWandbConfig(BaseConfig):
     """Configures shared W&B configs."""
 
-    project: Annotated[str | None, Field(description="The W&B project to use.")] = "prime-rl"
+    project: Annotated[str, Field(description="The W&B project to use.")] = "prime-rl"
 
-    name: Annotated[str | None, Field(description="The W&B run name to use.")] = None
+    name: Annotated[str, Field(description="The W&B run name to use.")] = ""
 
-    offline: Annotated[bool | None, Field(description="Whether to run W&B in offline mode.")] = False
+    offline: Annotated[bool, Field(description="Whether to run W&B in offline mode.")] = False
 
     shared: Annotated[
         bool,
@@ -268,25 +268,19 @@ class RLConfig(BaseConfig):
     ] = SharedLogConfig()
 
     ckpt: Annotated[
-        SharedCheckpointConfig | None,
-        Field(
-            description="Shared checkpoint configs. If None, will fallback to the checkpoint configs specified on submodule configs."
-        ),
-    ] = None
+        SharedCheckpointConfig,
+        Field(description="Shared checkpoint configs. Propagates to submodule configs only when explicitly set."),
+    ] = SharedCheckpointConfig()
 
     wandb: Annotated[
-        SharedWandbConfig | None,
-        Field(
-            description="Shared W&B configs. If None, will fallback to the W&B configs specified on submodule configs."
-        ),
-    ] = None
+        SharedWandbConfig,
+        Field(description="Shared W&B configs. Propagates to submodule configs only when explicitly set."),
+    ] = SharedWandbConfig()
 
     model: Annotated[
-        SharedModelConfig | None,
-        Field(
-            description="Shared model configs. If None, will fallback to the model configs specified on submodule configs."
-        ),
-    ] = None
+        SharedModelConfig,
+        Field(description="Shared model configs. Propagates to submodule configs only when explicitly set."),
+    ] = SharedModelConfig()
 
     max_steps: Annotated[
         int | None,
@@ -318,9 +312,9 @@ class RLConfig(BaseConfig):
         ),
     ] = None
 
-    weight_broadcast: Annotated[
-        SharedWeightBroadcastConfig | None, Field(description="The weight broadcast config.")
-    ] = None
+    weight_broadcast: Annotated[SharedWeightBroadcastConfig, Field(description="The weight broadcast config.")] = (
+        SharedWeightBroadcastConfig()
+    )
 
     bench: Annotated[
         bool,
@@ -378,7 +372,7 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_quantize_in_weight_transfer(self):
-        if self.weight_broadcast is None or not self.weight_broadcast.quantize_in_weight_transfer:
+        if "weight_broadcast" not in self.model_fields_set or not self.weight_broadcast.quantize_in_weight_transfer:
             return self
 
         if self.weight_broadcast.type != "nccl":
@@ -439,10 +433,10 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_logs(self):
         """Auto-setup shared log config for trainer and orchestrator."""
-        if self.log is not None:
-            if self.log.level is not None:
-                self.trainer.log.level = self.log.level
-                self.orchestrator.log.level = self.log.level
+        if "level" in self.log.model_fields_set:
+            self.trainer.log.level = self.log.level
+            self.orchestrator.log.level = self.log.level
+        if "json_logging" in self.log.model_fields_set:
             self.trainer.log.json_logging = self.log.json_logging
             self.orchestrator.log.json_logging = self.log.json_logging
 
@@ -451,33 +445,29 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_ckpt(self):
         """Auto-setup shared checkpoint config for trainer and orchestrator."""
-        if self.ckpt is not None:
+        if "ckpt" in self.model_fields_set:
             # Create checkpoint configs if not specified
             if self.trainer.ckpt is None:
                 self.trainer.ckpt = TrainerCheckpointConfig()
             if self.orchestrator.ckpt is None:
                 self.orchestrator.ckpt = OrchestratorCheckpointConfig()
 
-            # If specified, override checkpoint output directory
-            if self.ckpt.output_dir is not None:
+            if "output_dir" in self.ckpt.model_fields_set:
                 self.trainer.ckpt.output_dir = self.ckpt.output_dir
 
-            # If specified, use the same ckpt interval
-            if self.ckpt.interval is not None:
+            if "interval" in self.ckpt.model_fields_set:
                 self.trainer.ckpt.interval = self.ckpt.interval
                 self.orchestrator.ckpt.interval = self.ckpt.interval
 
-            # If resuming training, ensure orchestrator resume from the same step
-            if self.ckpt.resume_step is not None:
+            if "resume_step" in self.ckpt.model_fields_set:
                 self.trainer.ckpt.resume_step = self.ckpt.resume_step
                 self.orchestrator.ckpt.resume_step = self.ckpt.resume_step
 
-            # If specified, propagate keep policy
-            if self.ckpt.keep_last is not None:
+            if "keep_last" in self.ckpt.model_fields_set:
                 self.trainer.ckpt.keep_last = self.ckpt.keep_last
                 self.orchestrator.ckpt.keep_last = self.ckpt.keep_last
 
-            if self.ckpt.keep_interval is not None:
+            if "keep_interval" in self.ckpt.model_fields_set:
                 self.trainer.ckpt.keep_interval = self.ckpt.keep_interval
                 self.orchestrator.ckpt.keep_interval = self.ckpt.keep_interval
 
@@ -488,33 +478,33 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_wandb(self):
         """Auto-setup shared W&B config for trainer and orchestrator."""
-        if self.wandb is not None:
+        if "wandb" in self.model_fields_set:
             if not self.trainer.wandb:
                 self.trainer.wandb = WandbConfig()
             if not self.orchestrator.wandb:
                 self.orchestrator.wandb = WandbWithExtrasConfig()
 
-            if self.wandb.project:
+            if "project" in self.wandb.model_fields_set:
                 self.trainer.wandb.project = self.wandb.project
                 self.orchestrator.wandb.project = self.wandb.project
 
             if self.wandb.shared:
-                if self.wandb.name:
+                if "name" in self.wandb.model_fields_set:
                     self.trainer.wandb.name = self.wandb.name
                     self.orchestrator.wandb.name = self.wandb.name
             else:
-                if self.wandb.name:
+                if "name" in self.wandb.model_fields_set:
                     self.trainer.wandb.name = f"{self.wandb.name}-trainer"
                     self.orchestrator.wandb.name = f"{self.wandb.name}-orchestrator"
 
-            if self.wandb.offline:
+            if "offline" in self.wandb.model_fields_set:
                 self.trainer.wandb.offline = self.wandb.offline
                 self.orchestrator.wandb.offline = self.wandb.offline
 
         validate_shared_wandb_config(self.trainer, self.orchestrator)
 
         if self.orchestrator.prime_monitor is not None and self.orchestrator.prime_monitor.run_name is None:
-            if self.wandb and self.wandb.name:
+            if "name" in self.wandb.model_fields_set:
                 self.orchestrator.prime_monitor.run_name = self.wandb.name
 
         return self
@@ -522,7 +512,7 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_model(self):
         """Auto-setup shared model config for trainer, orchestrator, and inference."""
-        if self.model is not None:
+        if "model" in self.model_fields_set:
             self.trainer.model.name = self.model.name
             if self.inference is not None:
                 inference_model_explicitly_set = "name" in self.inference.model.model_fields_set
@@ -545,7 +535,7 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_max_steps(self):
         """Auto-setup shared max steps for trainer and orchestrator."""
-        if self.max_steps is not None:
+        if "max_steps" in self.model_fields_set:
             self.trainer.max_steps = self.max_steps
             self.orchestrator.max_steps = self.max_steps
 
@@ -556,7 +546,7 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_async_level(self):
         """Auto-setup shared async level for trainer and orchestrator."""
-        if self.max_async_level is not None:
+        if "max_async_level" in self.model_fields_set:
             self.trainer.max_async_level = self.max_async_level
             self.orchestrator.max_async_level = self.max_async_level
 
@@ -571,7 +561,7 @@ class RLConfig(BaseConfig):
         Only propagates to components that weren't explicitly set in the config.
         Uses model_fields_set to detect explicit assignment.
         """
-        if self.seq_len is not None:
+        if "seq_len" in self.model_fields_set:
             if "seq_len" not in self.trainer.model.model_fields_set:
                 self.trainer.model.seq_len = self.seq_len
             if "seq_len" not in self.orchestrator.model_fields_set:
@@ -588,7 +578,7 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def auto_setup_weight_broadcast(self):
         """Auto-setup shared weight broadcast config for trainer, orchestrator, and inference."""
-        if self.weight_broadcast is not None:
+        if "weight_broadcast" in self.model_fields_set:
             if self.weight_broadcast.type == "nccl":
                 inference_world_size = self.inference.parallel.dp * self.inference.parallel.tp if self.inference else 1
                 self.trainer.weight_broadcast = TrainerNCCLWeightBroadcastConfig(
@@ -770,7 +760,7 @@ class RLConfig(BaseConfig):
                 if not self.inference.enable_lora and self.inference.api_server_count == self.inference.parallel.dp:
                     self.inference.api_server_count = inferred_dp_local
 
-            if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
+            if "weight_broadcast" in self.model_fields_set and self.weight_broadcast.type == "nccl":
                 total_infer_gpus = self.deployment.gpus_per_node * self.deployment.total_infer_nodes
                 assert self.trainer.weight_broadcast.type == "nccl"
                 self.trainer.weight_broadcast.host = "0.0.0.0"
@@ -798,7 +788,7 @@ class RLConfig(BaseConfig):
             )
 
         total_infer_gpus = self.deployment.total_infer_nodes * self.deployment.gpus_per_node
-        if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
+        if "weight_broadcast" in self.model_fields_set and self.weight_broadcast.type == "nccl":
             assert self.trainer.weight_broadcast.type == "nccl"
             self.trainer.weight_broadcast.inference_world_size = total_infer_gpus
             assert self.orchestrator.weight_broadcast.type == "nccl"
