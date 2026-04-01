@@ -1,11 +1,11 @@
 #!/bin/bash
-# Builds the patched vllm-router wheel (Rust via setuptools-rust) from our fork.
+# Builds the vllm-router wheel (Rust via setuptools-rust) from the PrimeIntellect fork.
 # Requires: Rust toolchain (cargo), Python 3.8+, and uv or pip.
 # Override output dir: VLLM_ROUTER_WHEEL_DIR=/path/to/dir
 set -euo pipefail
 
-REPO_URL="https://github.com/S1ro1/router.git"
-BRANCH="fix/preserve-extra-fields-disagg"
+REPO_URL="https://github.com/PrimeIntellect-ai/router.git"
+BRANCH="main"
 BUILD_DIR="/tmp/vllm-router-build"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT_DIR="${VLLM_ROUTER_WHEEL_DIR:-$SCRIPT_DIR/deps}"
