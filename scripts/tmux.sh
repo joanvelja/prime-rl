@@ -86,6 +86,19 @@ tmux send-keys -t "$SESSION_NAME:Logs.2" \
 tmux send-keys -t "$SESSION_NAME:Logs.3" \
   "tail -F ${LOG_DIR}/inference.log 2>/dev/null" C-m
 
+# Window 2: Claude Code with log context
+tmux new-window -t "$SESSION_NAME" -n "Claude"
+tmux send-keys -t "$SESSION_NAME:Claude" \
+  "claude --append-system-prompt 'You are monitoring a prime-rl training run. The output directory is ${OUTPUT_DIR}. Log paths:
+  Trainer:        ${LOG_DIR}/trainer.log
+  All nodes:      ${LOG_DIR}/trainer/node_*.log
+  All ranks:      ${LOG_DIR}/trainer/torchrun/*/*/*/*.log
+  Orchestrator:   ${LOG_DIR}/orchestrator.log
+  Inference:      ${LOG_DIR}/inference.log
+  Envs:           ${LOG_DIR}/envs/*/*/*.log
+  Train envs:     ${LOG_DIR}/envs/train/*/*.log
+Help the user monitor and debug this run.'" C-m
+
 # Pane title styling
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top
 tmux set-option -t "$SESSION_NAME" -g pane-border-format " #{pane_title} "
