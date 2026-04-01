@@ -27,7 +27,7 @@ def test_length_shaping_only_penalizes_correct_rollouts():
         rewards=torch.tensor([[1.0, 1.0, 0.0, 1.0]]),
         completion_lengths=torch.tensor([[10, 30, 20, 20]]),
     )
-    result = default_advantage_fn(inputs, length_shaping=True)
+    result = default_advantage_fn(inputs, length_shaping="brevity_bonus")
 
     # min_correct = 10
     # shaped: [1*10/10, 1*10/30, 0, 1*10/20] = [1.0, 1/3, 0.0, 0.5]
@@ -43,7 +43,7 @@ def test_length_shaping_shortest_correct_keeps_full_reward():
         rewards=torch.tensor([[1.0, 1.0, 1.0]]),
         completion_lengths=torch.tensor([[10, 20, 40]]),
     )
-    result = default_advantage_fn(inputs, length_shaping=True)
+    result = default_advantage_fn(inputs, length_shaping="brevity_bonus")
 
     # shaped: [1*10/10, 1*10/20, 1*10/40] = [1.0, 0.5, 0.25]
     shaped_rewards = torch.tensor([1.0, 0.5, 0.25])
@@ -58,10 +58,25 @@ def test_length_shaping_no_correct_rollouts():
         rewards=torch.tensor([[0.0, 0.0, 0.0]]),
         completion_lengths=torch.tensor([[10, 20, 15]]),
     )
-    result_with = default_advantage_fn(inputs, length_shaping=True)
+    result_with = default_advantage_fn(inputs, length_shaping="brevity_bonus")
     result_without = default_advantage_fn(inputs)
 
     assert torch.allclose(result_with.advantages, result_without.advantages, atol=1e-6)
+
+
+def test_gr3_length_shaping():
+    """GR³: multiplicative shaping on all rollouts relative to mean length."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 0.5, 0.8]]),
+        completion_lengths=torch.tensor([[10, 20, 10]]),
+    )
+    result = default_advantage_fn(inputs, length_shaping="gr3", length_shaping_alpha=0.33)
+
+    # mean_length = 40/3, normalized = [10/13.33, 20/13.33, 10/13.33] = [0.75, 1.5, 0.75]
+    # factor = (1 + 0.33 * normalized)^-1
+    # rewards_shaped = rewards * factor, then subtract mean
+    expected = torch.tensor([[0.20915856, -0.25799648, 0.04883792]])
+    assert torch.allclose(result.advantages, expected, atol=1e-6)
 
 
 def test_compute_advantages_with_config():
