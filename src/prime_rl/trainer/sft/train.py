@@ -45,6 +45,7 @@ from prime_rl.trainer.world import get_world
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
 from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
@@ -538,6 +539,7 @@ def train(config: SFTConfig):
 
 
 def main():
+    set_proc_title("SFTTrainer")
     train(cli(SFTConfig))
 
 

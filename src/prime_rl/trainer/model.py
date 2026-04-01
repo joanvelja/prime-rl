@@ -322,8 +322,8 @@ def get_model(
             )
         logger.debug(f"Loaded model {config.name} in {time.perf_counter() - load_model_start_time:.2f} seconds")
 
-    # For VLM training, freeze the vision encoder
-    if is_vlm_training:
+    # For VLM models, optionally freeze the vision encoder
+    if is_vlm_training and config.vlm.freeze_vision_encoder:
         freeze_vision_encoder(model, override_attr=config.vlm.vision_encoder_attr)
 
     assert model.lm_head.weight.dtype == dtype, (
@@ -367,8 +367,9 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         vision_encoder = get_vision_encoder(model, override=config.vlm.vision_encoder_attr)
         if vision_encoder is None:
             raise ValueError(f"VLM model {config.name} has no recognized vision encoder")
+
         fully_shard(vision_encoder, mesh=hsdp_mesh, **fsdp_config)
-        get_logger().info("Applied FSDP to frozen vision encoder")
+        get_logger().info(f"Applied FSDP to vision encoder (frozen={config.vlm.freeze_vision_encoder})")
 
     language_model = get_language_model(model, override=config.vlm.language_model_attr if is_vlm_training else None)
     transformer_layers = language_model.layers

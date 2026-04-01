@@ -8,6 +8,7 @@ from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.pathing import format_log_message, get_config_dir, get_log_dir
+from prime_rl.utils.process import set_proc_title
 
 INFERENCE_TOML = "inference.toml"
 INFERENCE_SBATCH = "inference.sbatch"
@@ -137,6 +138,7 @@ def inference(config: InferenceConfig):
 
 
 def main():
+    set_proc_title("Inference")
     inference(cli(InferenceConfig))
 
 

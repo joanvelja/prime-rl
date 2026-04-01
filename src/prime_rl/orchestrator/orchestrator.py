@@ -66,6 +66,7 @@ from prime_rl.utils.config import cli
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     clean_exit,
@@ -916,7 +917,7 @@ async def orchestrate(config: OrchestratorConfig):
 
 def main():
     """Main entry-point for orchestrator. Run using `uv run orchestrator`"""
-
+    set_proc_title("Orchestrator")
     asyncio.run(orchestrate(cli(OrchestratorConfig)))
 
 
