@@ -42,7 +42,6 @@ def monkey_patch_indexcache():
     from contextvars import ContextVar
 
     import torch
-
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
     from vllm.model_executor.models.deepseek_v2 import (
         DeepseekAttention,
@@ -670,7 +669,6 @@ def monkey_patch_fused_moe_lora_dp():
     """
     import types
 
-    from vllm import envs
     from vllm.distributed.utils import divide
     from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
     from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
@@ -680,6 +678,8 @@ def monkey_patch_fused_moe_lora_dp():
     from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import UnfusedOAITritonExperts
     from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
     from vllm.model_executor.layers.fused_moe.prepare_finalize import MoEPrepareAndFinalizeNoDPEPModular
+
+    from vllm import envs
 
     def _fixed_inject(self):
         moe_state_dict = {}
