@@ -13,9 +13,8 @@ from typing import Annotated, Any
 import httpx
 from pydantic import Field
 
-from prime_rl.utils.logger import get_logger
-
 from prime_rl.utils.config import BaseConfig
+from prime_rl.utils.logger import get_logger
 
 
 class UsageConfig(BaseConfig):
