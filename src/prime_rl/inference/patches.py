@@ -28,7 +28,10 @@ def _skip_topk_from_prefix(config, prefix):
     if num_hidden_layers is None:
         return False
 
-    layer_idx = int(_LAYER_INDEX_RE.findall(prefix)[-1])
+    matches = _LAYER_INDEX_RE.findall(prefix)
+    if not matches:
+        return False
+    layer_idx = int(matches[-1])
     if layer_idx >= num_hidden_layers:
         return False
 
@@ -97,7 +100,7 @@ def monkey_patch_indexcache():
                 raise ValueError("IndexCache shared layers require cached top-k indices.")
             topk_indices = prev_topk_indices
         else:
-            topk_indices = self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            topk_indices = self.indexer(hidden_states, q_c if q_c is not None else hidden_states, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
