@@ -177,17 +177,65 @@ class GroupedExperts(nn.Module):
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
         self.ep_comm_backend: EPCommBackend = "torch"
+        self._run_experts_for_loop = expert_parallel(self._run_experts_for_loop_impl)
+        self._run_experts_grouped_mm = expert_parallel(self._run_experts_grouped_mm_impl)
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
         self.ep_comm_backend = backend
+
+    def moe_act(self, fc1_output: torch.Tensor, gate_output: torch.Tensor) -> torch.Tensor:
+        return F.silu(fc1_output) * gate_output
+
+    def _run_experts_for_loop_impl(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        # NOTE: this would incur a synchronization between device and host
+        num_tokens_per_expert = num_tokens_per_expert.tolist()
+        num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+        x = torch.split(
+            x[: sum(num_tokens_per_expert)],
+            split_size_or_sections=num_tokens_per_expert,
+            dim=0,
+        )
+        out_experts_splits = []
+        for expert_idx, x_expert in enumerate(x):
+            fc1_output = torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1))
+            gate_output = torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+            hidden_states = self.moe_act(fc1_output, gate_output)
+            out_experts_splits.append(torch.matmul(hidden_states, w2[expert_idx].transpose(-2, -1)))
+
+        out = torch.cat(out_experts_splits, dim=0)
+        return torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+
+    def _run_experts_grouped_mm_impl(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+        assert x.dim() == 2
+
+        fc1_output = torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+        gate_output = torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
+        hidden_states = self.moe_act(fc1_output, gate_output)
+        return torch._grouped_mm(hidden_states, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 
     def _forward_deepep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         w1 = self.w1.to_local()
         w2 = self.w2.to_local()
         w3 = self.w3.to_local()
         if self.use_grouped_mm:
-            return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
-        return _run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
+            return self._run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
+        return self._run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(
         self,
@@ -198,9 +246,9 @@ class GroupedExperts(nn.Module):
             return self._forward_deepep(x, num_tokens_per_expert)
 
         if self.use_grouped_mm:
-            return _run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+            return self._run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+            return self._run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
@@ -674,17 +722,61 @@ class NonGatedGroupedExperts(nn.Module):
         self.w3 = nn.Parameter(torch.empty(0))
         self.use_grouped_mm = use_grouped_mm
         self.ep_comm_backend: EPCommBackend = "torch"
+        self._run_experts_for_loop = expert_parallel(self._run_experts_for_loop_impl)
+        self._run_experts_grouped_mm = expert_parallel(self._run_experts_grouped_mm_impl)
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
         self.ep_comm_backend = backend
+
+    def moe_act(self, fc1_output: torch.Tensor) -> torch.Tensor:
+        return relu2(fc1_output)
+
+    def _run_experts_for_loop_impl(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        _w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens_per_expert = num_tokens_per_expert.tolist()
+        num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+        x = torch.split(
+            x[: sum(num_tokens_per_expert)],
+            split_size_or_sections=num_tokens_per_expert,
+            dim=0,
+        )
+        out_experts_splits = []
+        for expert_idx, x_expert in enumerate(x):
+            fc1_output = torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1))
+            hidden_states = self.moe_act(fc1_output)
+            out_experts_splits.append(torch.matmul(hidden_states, w2[expert_idx].transpose(-2, -1)))
+        out = torch.cat(out_experts_splits, dim=0)
+        return torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+
+    def _run_experts_grouped_mm_impl(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        _w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+        assert x.dim() == 2
+
+        fc1_output = torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+        hidden_states = self.moe_act(fc1_output)
+        return torch._grouped_mm(hidden_states, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 
     def _forward_deepep(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
         w1 = self.w1.to_local()
         w2 = self.w2.to_local()
         w3 = self.w3.to_local()
         if self.use_grouped_mm:
-            return _run_nongated_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
-        return _run_nongated_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
+            return self._run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
+        return self._run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
 
     def forward(
         self,
@@ -694,9 +786,9 @@ class NonGatedGroupedExperts(nn.Module):
         if self.ep_comm_backend == "deepep":
             return self._forward_deepep(x, num_tokens_per_expert)
         if self.use_grouped_mm:
-            return _run_nongated_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+            return self._run_experts_grouped_mm(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
         else:
-            return _run_nongated_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+            return self._run_experts_for_loop(self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)

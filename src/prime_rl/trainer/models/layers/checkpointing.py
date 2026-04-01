@@ -15,6 +15,8 @@ New model integration contract:
   `attn_projections(...)`.
 - `mlp`: expose a dense `layer.mlp.forward(...)`. A module is treated as dense
   when it does not define `_run_routed_experts` or `tokens_per_expert`.
+- `moe_act`: expose `layer.mlp.experts.moe_act(...)` or `layer.mlp.moe_act(...)`
+  for routed MoE activations between expert input and output projections.
 - `routed_experts`: expose `layer.mlp._run_routed_experts(...)` for the MoE
   expert path, and optionally `layer.mlp._run_local_routed_experts(...)` when
   local expert compute is separated from dispatch/combine.
@@ -33,7 +35,9 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-SELECTIVE_AC_TARGETS = frozenset({"norm", "attn_proj", "mlp", "mla_up_proj", "routed_experts", "linear_attn"})
+SELECTIVE_AC_TARGETS = frozenset(
+    {"norm", "attn_proj", "mlp", "moe_act", "mla_up_proj", "routed_experts", "linear_attn"}
+)
 _PATCHED_METHODS_ATTR = "_prime_rl_selective_ac_patched_methods"
 
 
@@ -96,12 +100,27 @@ def _get_linear_attn_module(layer: nn.Module) -> nn.Module | None:
     return None
 
 
+def _get_moe_act_module(mlp: nn.Module | None) -> nn.Module | None:
+    if mlp is None:
+        return None
+
+    if hasattr(mlp, "moe_act"):
+        return mlp
+
+    experts = getattr(mlp, "experts", None)
+    if experts is not None and hasattr(experts, "moe_act"):
+        return experts
+
+    return None
+
+
 def get_supported_targets(layer: nn.Module) -> frozenset[str]:
     """Infer which selective activation checkpoint targets a decoder layer supports."""
     supported_targets = {"norm"}
     self_attn = getattr(layer, "self_attn", None)
     mlp = getattr(layer, "mlp", None)
     linear_attn = _get_linear_attn_module(layer)
+    moe_act_module = _get_moe_act_module(mlp)
 
     if _supports_attn_proj(self_attn):
         supported_targets.add("attn_proj")
@@ -109,6 +128,8 @@ def get_supported_targets(layer: nn.Module) -> frozenset[str]:
         supported_targets.add("mla_up_proj")
     if mlp is not None and _is_dense_mlp(mlp):
         supported_targets.add("mlp")
+    if moe_act_module is not None:
+        supported_targets.add("moe_act")
     if mlp is not None and (hasattr(mlp, "_run_routed_experts") or hasattr(mlp, "_run_local_routed_experts")):
         supported_targets.add("routed_experts")
     if linear_attn is not None:
@@ -127,7 +148,9 @@ def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[s
     self_attn = getattr(layer, "self_attn", None)
     mlp = getattr(layer, "mlp", None)
     linear_attn = _get_linear_attn_module(layer)
+    moe_act_module = _get_moe_act_module(mlp)
     attn_proj_is_subsumed = "linear_attn" in enabled_targets and linear_attn is self_attn
+    moe_act_is_subsumed = "routed_experts" in enabled_targets
 
     if self_attn is not None and "attn_proj" in enabled_targets and not attn_proj_is_subsumed:
         checkpoint_method(self_attn, "attn_projections")
@@ -136,6 +159,8 @@ def set_selective_activation_checkpointing(layer: nn.Module, targets: Iterable[s
         checkpoint_method(self_attn, "mla_up_proj")
     if mlp is not None and "mlp" in enabled_targets:
         checkpoint_method(mlp, "forward")
+    if moe_act_module is not None and "moe_act" in enabled_targets and not moe_act_is_subsumed:
+        checkpoint_method(moe_act_module, "moe_act")
     if mlp is not None and "routed_experts" in enabled_targets:
         if hasattr(mlp, "_run_routed_experts"):
             checkpoint_method(mlp, "_run_routed_experts")

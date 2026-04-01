@@ -146,7 +146,7 @@ def build_command(config: BenchmarkConfig) -> list[str]:
 
     # Add activation checkpointing if enabled
     if config.ac == "Recompute":
-        cmd.append("--model.ac")
+        cmd.extend(["--model.ac", "--model.ac.mode", "full"])
     elif config.ac == "Selective":
         cmd.extend(["--model.ac", "--model.ac.mode", "selective"])
         if config.selective_targets:

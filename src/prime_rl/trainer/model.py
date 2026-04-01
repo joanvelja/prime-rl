@@ -646,12 +646,19 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
 
     if ac_config.mode == "selective":
         unsupported_targets = frozenset(target_list) - model_supported_targets
-        if unsupported_targets:
+        allow_norm_only_full_fallback = selective_layers == 0 and frozenset(target_list) == frozenset({"norm"})
+
+        if unsupported_targets and not allow_norm_only_full_fallback:
             raise ValueError(
                 f"Selective activation checkpoint targets {sorted(unsupported_targets)} are not supported "
                 f"by the selected model layers. Supported targets across the model: {sorted(model_supported_targets)}"
             )
-        if fallback_layer_types:
+        if allow_norm_only_full_fallback:
+            logger.warning(
+                "The selected model does not expose selective activation checkpointing hooks; "
+                "falling back to full checkpointing for all selected layers."
+            )
+        elif fallback_layer_types:
             logger.warning(
                 "Selective activation checkpointing is not supported for layer types "
                 f"{sorted(fallback_layer_types)}; falling back to full checkpointing for those layers."

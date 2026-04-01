@@ -48,9 +48,9 @@ class ActivationCheckpointConfig(BaseConfig):
     mode: Annotated[
         Literal["full", "selective"],
         Field(
-            description="Whether to checkpoint whole transformer blocks (`full`) or selected subcomponents inside supported custom decoder layers (`selective`).",
+            description="Whether to checkpoint whole transformer blocks (`full`) or selected subcomponents inside supported decoder layers (`selective`). Defaults to `selective`.",
         ),
-    ] = "full"
+    ] = "selective"
 
     freq: Annotated[
         int,
@@ -63,7 +63,7 @@ class ActivationCheckpointConfig(BaseConfig):
     targets: Annotated[
         list[str],
         Field(
-            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints projection-side attention work outside the kernel, including input/output projections, attention-local norms, RoPE, gating, and model-specific MLA projection helpers where exposed. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints routed expert compute in MoE layers (including LatentMoE). `linear_attn` checkpoints supported token mixers outside the standard softmax-attention path, including NemotronH Mamba layers, Qwen3.5-MoE GatedDeltaNet layers, and AFMoE sliding-window attention layers.",
+            description="Selective checkpoint targets. `norm` checkpoints every norm module inside selected layers (decoder, attention, MLA, etc.). `attn_proj` checkpoints projection-side attention work outside the kernel, including input/output projections, attention-local norms, RoPE, gating, and model-specific MLA projection helpers where exposed. `mlp` checkpoints the entire dense MLP forward (not applicable to MoE layers). `moe_act` checkpoints routed MoE activation functions inside expert MLPs, such as SiLU/GLU or relu2, without checkpointing the surrounding expert projections. `mla_up_proj` checkpoints MLA Q/KV up-projection work where supported. `routed_experts` checkpoints the broader routed expert path in MoE layers (including LatentMoE). `linear_attn` checkpoints supported token mixers outside the standard softmax-attention path, including NemotronH Mamba layers, Qwen3.5-MoE GatedDeltaNet layers, and AFMoE sliding-window attention layers.",
         ),
     ] = ["norm"]
 
@@ -197,9 +197,9 @@ class ModelConfig(BaseModelConfig):
     ac: Annotated[
         ActivationCheckpointConfig | None,
         Field(
-            description="Whether to apply activation checkpointing to the model. If None, will not apply activation checkpointing.",
+            description='Activation checkpointing config. Defaults to selective activation checkpointing with `targets = ["norm"]`. Set to None to disable activation checkpointing.',
         ),
-    ] = None
+    ] = ActivationCheckpointConfig(mode="selective")
 
     ac_offloading: Annotated[
         ActivationOffloadingConfig | None,
@@ -385,8 +385,14 @@ class ModelConfig(BaseModelConfig):
 
     @model_validator(mode="after")
     def selective_ac_only_with_custom_impl(self):
-        if self.ac is not None and self.ac.mode == "selective" and self.impl not in ("custom", "auto"):
-            raise ValueError("Selective activation checkpointing requires model.impl='custom' or 'auto'")
+        if self.ac is None or self.ac.mode != "selective" or self.impl in ("custom", "auto"):
+            return self
+
+        if frozenset(self.ac.targets) != frozenset({"norm"}):
+            raise ValueError(
+                "Selective activation checkpointing with model.impl='hf' only supports model.ac.targets=['norm']; "
+                "use model.impl='custom' or 'auto', switch to full AC, or disable AC."
+            )
         return self
 
     @model_validator(mode="after")
