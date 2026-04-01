@@ -2755,7 +2755,7 @@ requires-dist = [
     { name = "torchtitan", git = "https://github.com/pytorch/torchtitan?rev=a1fdd7e" },
     { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=5c1c72b" },
     { name = "uvloop", specifier = ">=0.21.0" },
-    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=73deb26" },
+    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=adf8138" },
     { name = "vllm", specifier = ">=0.18.0" },
     { name = "vllm-router", marker = "platform_machine == 'x86_64' and extra == 'disagg'", url = "https://github.com/samsja/flash-attn-builds/releases/download/v0.3/vllm_router-0.1.11-cp38-abi3-linux_x86_64.whl" },
     { name = "wandb", specifier = ">=0.24.2" },
@@ -2775,7 +2775,7 @@ mamba-ssm = [{ name = "mamba-ssm", specifier = ">=2.3.0" }]
 
 [[package]]
 name = "prime-sandboxes"
-version = "0.2.16"
+version = "0.2.19"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -2785,23 +2785,23 @@ dependencies = [
     { name = "pydantic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "tenacity", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/58/fdb9a63f1ea0c793da5e08b283c0eb2a3d986a25953126abd0b9bfa9535a/prime_sandboxes-0.2.16.tar.gz", hash = "sha256:c1a4504d7c094427fee436ad1561e12079c1d607003dd0345d4fead34ae873a8", size = 55606, upload-time = "2026-02-28T00:45:49.118Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/8c/7d8b8013f65d8394094a922bc493eaae09e5e88058f80bd009637ffeff63/prime_sandboxes-0.2.19.tar.gz", hash = "sha256:081cd9ef246d397b4a2fdd77a94679a5f08115ecbbe3f90f320e5f4a7988820e", size = 60558, upload-time = "2026-04-01T00:46:28.212Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/33/7f/b717338c70a785feef5cb1bdaff46a1f942115a40fcd53df3127dea8c2f7/prime_sandboxes-0.2.16-py3-none-any.whl", hash = "sha256:18ef8b2bd073628bdc979b5a17acb640e5c30d19ab7ec356153b51c8fe3b12a2", size = 26639, upload-time = "2026-02-28T00:45:47.891Z" },
+    { url = "https://files.pythonhosted.org/packages/79/56/9bd4b3733773e6c122ebfe92144476c143666d09d9e8cccb9d1349d4d43c/prime_sandboxes-0.2.19-py3-none-any.whl", hash = "sha256:ce5db7314c007aae796e1ce274181eaa1370000a478bcd55c26149edfee580c1", size = 31617, upload-time = "2026-04-01T00:46:27.216Z" },
 ]
 
 [[package]]
 name = "prime-tunnel"
-version = "0.1.4"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "pydantic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "tenacity", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/50/d4/be7356eab434edd623bc000b5c8d457e98b6feb3eed513b88e7865522178/prime_tunnel-0.1.4.tar.gz", hash = "sha256:caf092ae01be921a17824d14aca3b526f8b5b704f9996dbc6cdcefd40619ca8a", size = 11660, upload-time = "2026-02-27T01:32:15.261Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/d2/17236f43b855a4261252d317ef230beb0571268427418c8d471d3eba195c/prime_tunnel-0.1.5.tar.gz", hash = "sha256:eec296f92abbd761edcb779db7052bf9ce9c3469641f8f17645b7ed5c478257e", size = 12609, upload-time = "2026-03-21T00:52:56.147Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/c3/8def582c17f0f64f31efe11f7a0299139af3120c19fb2937a21c63de48d0/prime_tunnel-0.1.4-py3-none-any.whl", hash = "sha256:8e49715fdcdeed2e761c9b96fc7a94f07e6733ba9bf8e4022f8c46f496998a54", size = 13675, upload-time = "2026-02-27T01:32:13.816Z" },
+    { url = "https://files.pythonhosted.org/packages/66/d2/26c801e0ee8ed867875a704c1fa238581f505bbd96f618c894c8dca991fc/prime_tunnel-0.1.5-py3-none-any.whl", hash = "sha256:fc24bf60d8023f53850be9602dc7d0e1be3e091a019a06c65d32a6b3d61754af", size = 14758, upload-time = "2026-03-21T00:52:55.278Z" },
 ]
 
 [[package]]
@@ -4005,7 +4005,7 @@ wheels = [
 [[package]]
 name = "verifiers"
 version = "0.1.12.dev1"
-source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=73deb26#73deb26ba27981e5852bfe54b25718945160a4c7" }
+source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=adf8138#adf81382fedcc5a137db6eb8c7a1d73865246f9e" }
 dependencies = [
     { name = "aiolimiter", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "anthropic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
