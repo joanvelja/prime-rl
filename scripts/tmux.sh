@@ -97,6 +97,7 @@ tmux send-keys -t "$SESSION_NAME:Claude" \
   Inference:      ${LOG_DIR}/inference.log
   Envs:           ${LOG_DIR}/envs/*/*/*.log
   Train envs:     ${LOG_DIR}/envs/train/*/*.log
+You are running inside tmux session \"${SESSION_NAME}\". The Launcher window (window 0) is where the user runs launch commands. You can read its contents with: tmux capture-pane -t ${SESSION_NAME}:Launcher -p
 Help the user monitor and debug this run.'" C-m
 
 # Pane title styling
