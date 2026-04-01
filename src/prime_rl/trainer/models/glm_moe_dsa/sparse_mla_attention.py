@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -126,6 +127,7 @@ class GlmMoeDsaAttention(nn.Module):
 
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, args.hidden_size, bias=args.attention_bias)
         self.indexer = Indexer(args)
+        self.skip_topk = False
         self.scaling = self.qk_head_dim ** (-0.5)
 
     def attn_projections(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -179,12 +181,16 @@ class GlmMoeDsaAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         ks: torch.Tensor | None = None,
         ke: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cached_topk_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         q_latent, k_compressed_normed, k_rope = self.attn_projections(hidden_states)
 
-        indices = self.indexer.compute_sparse_indices(
-            hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
-        )
+        if self.skip_topk:
+            indices = cast(torch.Tensor, cached_topk_indices)
+        else:
+            indices = self.indexer.compute_sparse_indices(
+                hidden_states, q_latent, ks, ke, self.args.index_topk, position_embeddings
+            )
 
         sparse_q, sparse_kv, w_v = self.mla_up_proj(
             q_latent,
@@ -194,4 +200,4 @@ class GlmMoeDsaAttention(nn.Module):
         )
 
         out = _SparseMLA.apply(sparse_q, sparse_kv, indices, self.scaling)
-        return self.output_proj(out, w_v), None
+        return self.output_proj(out, w_v), indices

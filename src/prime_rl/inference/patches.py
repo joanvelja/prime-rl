@@ -1,3 +1,9 @@
+import inspect
+import re
+
+_LAYER_INDEX_RE = re.compile(r"\.(\d+)(?=\.|$)")
+
+
 def transformers_v5_compat():
     """vLLM general plugin: patch transformers v5 config attrs that vLLM 0.16 still expects.
 
@@ -9,8 +15,171 @@ def transformers_v5_compat():
     if not hasattr(Qwen3VLMoeTextConfig, "tie_word_embeddings"):
         Qwen3VLMoeTextConfig.tie_word_embeddings = False
 
+    monkey_patch_indexcache()
     _patch_qwen35_lora()
     monkey_patch_dp_engine_core_pause_resume_deadlock()
+
+
+def _skip_topk_from_prefix(config, prefix):
+    if not hasattr(config, "index_topk"):
+        return False
+
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        return False
+
+    layer_idx = int(_LAYER_INDEX_RE.findall(prefix)[-1])
+    if layer_idx >= num_hidden_layers:
+        return False
+
+    return layer_idx % int(getattr(config, "index_topk_freq", 1)) != 0
+
+
+def monkey_patch_indexcache():
+    if getattr(monkey_patch_indexcache, "_patched", False):
+        return
+
+    from contextvars import ContextVar
+
+    import torch
+
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekAttention,
+        DeepseekV2DecoderLayer,
+        DeepseekV2MLAAttention,
+        DeepseekV2MLP,
+        DeepseekV2Model,
+    )
+
+    topk_context = ContextVar("prime_rl_indexcache_topk", default=None)
+
+    _original_mla_forward = MultiHeadLatentAttentionWrapper.forward
+    _original_attn_init = DeepseekV2MLAAttention.__init__
+    _original_model_forward = DeepseekV2Model.forward
+    _attn_init_signature = inspect.signature(_original_attn_init)
+
+    def _patched_mla_forward(self, positions, hidden_states, llama_4_scaling=None, prev_topk_indices=None):
+        if not self.indexer or not self.is_sparse:
+            return _original_mla_forward(self, positions, hidden_states, llama_4_scaling)
+
+        q_c = None
+        kv_lora = None
+
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, "fused_qkv_a_proj is required when q_lora_rank is not None"
+            assert self.q_a_layernorm is not None, "q_a_layernorm is required when q_lora_rank is not None"
+            assert self.q_b_proj is not None, "q_b_proj is required when q_lora_rank is not None"
+
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None, "kv_a_proj_with_mqa is required when q_lora_rank is None"
+            assert self.q_proj is not None, "q_proj is required when q_lora_rank is None"
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
+
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        k_pe = k_pe.unsqueeze(1)
+
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(positions, q[..., self.qk_nope_head_dim :], k_pe)
+
+        if getattr(self, "skip_topk", False):
+            if prev_topk_indices is None:
+                raise ValueError("IndexCache shared layers require cached top-k indices.")
+            topk_indices = prev_topk_indices
+        else:
+            topk_indices = self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+
+        output = self.o_proj(attn_out)[0]
+        return output, topk_indices
+
+    def _patched_attn_init(self, *args, **kwargs):
+        _original_attn_init(self, *args, **kwargs)
+
+        bound = _attn_init_signature.bind_partial(self, *args, **kwargs)
+        config = bound.arguments.get("config")
+        prefix = bound.arguments.get("prefix", "")
+        self.mla_attn.skip_topk = _skip_topk_from_prefix(config, prefix)
+
+    def _patched_attn_forward(self, positions, hidden_states, llama_4_scaling, prev_topk_indices=None):
+        return self.mla_attn(
+            positions,
+            hidden_states,
+            llama_4_scaling,
+            prev_topk_indices=prev_topk_indices,
+        )
+
+    def _patched_decoder_forward(self, positions, hidden_states, residual, llama_4_scaling=None):
+        if residual is None:
+            residual = hidden_states.clone()
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        attn_kwargs = {
+            "positions": positions,
+            "hidden_states": hidden_states,
+        }
+        if not self.use_mha:
+            attn_kwargs["llama_4_scaling"] = llama_4_scaling
+            attn_kwargs["prev_topk_indices"] = topk_context.get()
+        hidden_states = self.self_attn(**attn_kwargs)
+        if isinstance(hidden_states, tuple):
+            hidden_states, topk_indices = hidden_states
+        else:
+            topk_indices = None
+
+        if self.use_mha:
+            topk_context.set(None)
+        else:
+            topk_context.set(topk_indices)
+
+        if not isinstance(self.self_attn, DeepseekAttention) and hidden_states.dtype == torch.float16:
+            hidden_states *= 1.0 / self.routed_scaling_factor
+            if self.layer_idx == 0:
+                residual *= 1.0 / self.routed_scaling_factor
+
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+
+        if hidden_states.dtype == torch.float16 and isinstance(self.mlp, DeepseekV2MLP):
+            hidden_states *= 1.0 / self.routed_scaling_factor
+
+        return hidden_states, residual
+
+    def _patched_model_forward(self, *args, **kwargs):
+        token = topk_context.set(None)
+        try:
+            return _original_model_forward(self, *args, **kwargs)
+        finally:
+            topk_context.reset(token)
+
+    MultiHeadLatentAttentionWrapper.forward = _patched_mla_forward
+    DeepseekV2MLAAttention.__init__ = _patched_attn_init
+    DeepseekV2MLAAttention.forward = _patched_attn_forward
+    DeepseekV2DecoderLayer.forward = _patched_decoder_forward
+    DeepseekV2Model.forward = _patched_model_forward
+    monkey_patch_indexcache._patched = True
 
 
 def _patch_qwen35_lora():

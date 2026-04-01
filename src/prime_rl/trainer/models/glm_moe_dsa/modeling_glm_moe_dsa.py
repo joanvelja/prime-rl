@@ -55,6 +55,7 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = GlmMoeDsaAttention(_sparse_mla_attention_args(config))
+        self.self_attn.skip_topk = layer_idx % config.index_topk_freq != 0
 
         moe_args = MoEArgs(
             num_experts=config.n_routed_experts,
@@ -110,16 +111,18 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         ks: Optional[torch.Tensor] = None,
         ke: Optional[torch.Tensor] = None,
+        cached_topk_indices: Optional[torch.Tensor] = None,
         routed_experts: Optional[torch.LongTensor] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.gather_for_cp(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states, topk_indices = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             ks=ks,
             ke=ke,
+            cached_topk_indices=cached_topk_indices,
         )
         hidden_states = self.shard_to_cp(hidden_states)
         hidden_states = residual + hidden_states
@@ -128,7 +131,7 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, routed_experts=routed_experts)
         hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, topk_indices
 
 
 @auto_docstring
@@ -259,14 +262,16 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids_for_attn)
+        cached_topk_indices = None
 
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             routed_experts_layer = routed_experts[:, :, layer_idx, :] if routed_experts is not None else None
-            hidden_states = decoder_layer(
+            hidden_states, cached_topk_indices = decoder_layer(
                 hidden_states,
                 position_embeddings=position_embeddings,
                 ks=ks,
                 ke=ke,
+                cached_topk_indices=cached_topk_indices,
                 routed_experts=routed_experts_layer,
             )
 
