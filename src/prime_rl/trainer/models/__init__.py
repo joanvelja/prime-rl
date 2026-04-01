@@ -9,8 +9,6 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
 from prime_rl.trainer.models.afmoe import AfmoeConfig, AfmoeForCausalLM
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
