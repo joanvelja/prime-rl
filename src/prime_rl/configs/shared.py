@@ -116,6 +116,13 @@ class BaseModelConfig(BaseConfig):
 
     name: Annotated[str, Field(description="Name or path of the HF model to use.")] = "Qwen/Qwen3-0.6B"
 
+    index_topk_freq: Annotated[
+        int | None,
+        Field(
+            description="Override the loaded Hugging Face config's `index_topk_freq` at runtime without editing the model directory.",
+        ),
+    ] = None
+
     trust_remote_code: Annotated[
         bool,
         Field(

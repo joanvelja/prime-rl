@@ -225,6 +225,9 @@ def get_model(
             config.name, attn_implementation=config.attn, trust_remote_code=config.trust_remote_code
         ),
     )
+    if config.index_topk_freq is not None:
+        logger.info(f"Applying trainer index_topk_freq override: {config.index_topk_freq}")
+        model_config.index_topk_freq = config.index_topk_freq
     model_config.use_cache = False
     is_vlm_arch = is_vlm_architecture(model_config)
 

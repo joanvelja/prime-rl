@@ -126,6 +126,13 @@ class SharedModelConfig(BaseConfig):
         Field(description="The name of the model to use."),
     ] = "Qwen/Qwen3-0.6B"
 
+    index_topk_freq: Annotated[
+        int | None,
+        Field(
+            description="Override the loaded Hugging Face config's `index_topk_freq` for trainer and inference without editing the model directory.",
+        ),
+    ] = None
+
     vlm: Annotated[
         "VLMConfig | None",
         Field(description="VLM configuration. Set to enable vision-language model support."),
@@ -524,10 +531,14 @@ class RLConfig(BaseConfig):
         """Auto-setup shared model config for trainer, orchestrator, and inference."""
         if self.model is not None:
             self.trainer.model.name = self.model.name
+            if self.trainer.model.index_topk_freq is None:
+                self.trainer.model.index_topk_freq = self.model.index_topk_freq
             if self.inference is not None:
                 inference_model_explicitly_set = "name" in self.inference.model.model_fields_set
                 if not inference_model_explicitly_set:
                     self.inference.model.name = self.model.name
+                if self.inference.model.index_topk_freq is None:
+                    self.inference.model.index_topk_freq = self.model.index_topk_freq
                 self.orchestrator.model.name = self.inference.model.name
             else:
                 self.orchestrator.model.name = self.model.name

@@ -1,7 +1,9 @@
 import inspect
+import os
 import re
 
 _LAYER_INDEX_RE = re.compile(r"\.(\d+)(?=\.|$)")
+_INDEX_TOPK_FREQ_ENV_VAR = "PRIME_RL_INDEX_TOPK_FREQ"
 
 
 def transformers_v5_compat():
@@ -52,6 +54,8 @@ def monkey_patch_indexcache():
     )
 
     topk_context = ContextVar("prime_rl_indexcache_topk", default=None)
+    raw_index_topk_freq = os.environ.get(_INDEX_TOPK_FREQ_ENV_VAR)
+    index_topk_freq = int(raw_index_topk_freq) if raw_index_topk_freq is not None else None
 
     _original_mla_forward = MultiHeadLatentAttentionWrapper.forward
     _original_attn_init = DeepseekV2MLAAttention.__init__
@@ -113,10 +117,13 @@ def monkey_patch_indexcache():
         return output, topk_indices
 
     def _patched_attn_init(self, *args, **kwargs):
-        _original_attn_init(self, *args, **kwargs)
-
         bound = _attn_init_signature.bind_partial(self, *args, **kwargs)
         config = bound.arguments.get("config")
+        if config is not None and index_topk_freq is not None:
+            config.index_topk_freq = index_topk_freq
+
+        _original_attn_init(self, *args, **kwargs)
+
         prefix = bound.arguments.get("prefix", "")
         self.mla_attn.skip_topk = _skip_topk_from_prefix(config, prefix)
 
