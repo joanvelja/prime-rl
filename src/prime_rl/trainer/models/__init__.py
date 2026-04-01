@@ -7,6 +7,10 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.models.auto.auto_factory import _BaseAutoModelClass, _LazyAutoMapping, auto_class_update
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
 from prime_rl.trainer.models.afmoe import AfmoeConfig, AfmoeForCausalLM
 from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
@@ -16,6 +20,8 @@ from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput, cast_float_and
 from prime_rl.trainer.models.llama import LlamaForCausalLM
 from prime_rl.trainer.models.minimax_m2 import MiniMaxM2Config, MiniMaxM2ForCausalLM
 from prime_rl.trainer.models.nemotron_h import NemotronHConfig, NemotronHForCausalLM
+from prime_rl.trainer.models.qwen3 import Qwen3ForCausalLM
+from prime_rl.trainer.models.qwen3_5 import Qwen3_5ForCausalLM
 from prime_rl.trainer.models.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeForCausalLM
 from prime_rl.trainer.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
@@ -35,6 +41,8 @@ _CUSTOM_CAUSAL_LM_MAPPING.register(Glm4MoeConfig, Glm4MoeForCausalLM, exist_ok=T
 _CUSTOM_CAUSAL_LM_MAPPING.register(GlmMoeDsaConfig, GlmMoeDsaForCausalLM, exist_ok=True)
 _CUSTOM_CAUSAL_LM_MAPPING.register(MiniMaxM2Config, MiniMaxM2ForCausalLM, exist_ok=True)
 _CUSTOM_CAUSAL_LM_MAPPING.register(NemotronHConfig, NemotronHForCausalLM, exist_ok=True)
+_CUSTOM_CAUSAL_LM_MAPPING.register(Qwen3Config, Qwen3ForCausalLM, exist_ok=True)
+_CUSTOM_CAUSAL_LM_MAPPING.register(Qwen3_5TextConfig, Qwen3_5ForCausalLM, exist_ok=True)
 _CUSTOM_CAUSAL_LM_MAPPING.register(Qwen3MoeConfig, Qwen3MoeForCausalLM, exist_ok=True)
 _CUSTOM_CAUSAL_LM_MAPPING.register(Qwen3_5MoeConfig, Qwen3_5MoeForCausalLM, exist_ok=True)
 

@@ -225,6 +225,13 @@ def get_model(
             config.name, attn_implementation=config.attn, trust_remote_code=config.trust_remote_code
         ),
     )
+    if not is_vlm_training and getattr(model_config, "model_type", "") == "qwen3_5":
+        logger.info(f"Using text-only Qwen3.5 config path for {config.name}")
+        text_config = cast(PretrainedConfig, model_config.text_config)
+        text_config._attn_implementation = getattr(model_config, "_attn_implementation", config.attn)
+        text_config._name_or_path = getattr(model_config, "_name_or_path", config.name)
+        model_config = text_config
+
     model_config.use_cache = False
     is_vlm_arch = is_vlm_architecture(model_config)
 
