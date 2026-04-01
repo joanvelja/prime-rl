@@ -58,8 +58,11 @@ fi
 
 echo "Creating new tmux session: $SESSION_NAME"
 
+# Window 0: Command - empty shell
+tmux new-session -d -s "$SESSION_NAME" -n "Command"
+
 # Window 1: Logs - 4 vertical panes
-tmux new-session -d -s "$SESSION_NAME" -n "Logs"
+tmux new-window -t "$SESSION_NAME" -n "Logs"
 
 tmux split-window -v -t "$SESSION_NAME:Logs.0"
 tmux split-window -v -t "$SESSION_NAME:Logs.1"
@@ -83,22 +86,10 @@ tmux send-keys -t "$SESSION_NAME:Logs.2" \
 tmux send-keys -t "$SESSION_NAME:Logs.3" \
   "tail -F ${LOG_DIR}/inference.log 2>/dev/null" C-m
 
-# Window 2: Monitor
-tmux new-window -t "$SESSION_NAME" -n "Monitor"
-tmux split-window -h -t "$SESSION_NAME:Monitor"
-tmux select-layout -t "$SESSION_NAME:Monitor" even-horizontal
-
-tmux select-pane -t "$SESSION_NAME:Monitor.0" -T "GPU"
-tmux send-keys -t "$SESSION_NAME:Monitor.0" "nvtop" C-m
-
-tmux select-pane -t "$SESSION_NAME:Monitor.1" -T "CPU"
-tmux send-keys -t "$SESSION_NAME:Monitor.1" "htop" C-m
-
 # Pane title styling
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top
 tmux set-option -t "$SESSION_NAME" -g pane-border-format " #{pane_title} "
 
-# Focus logs window and attach
-tmux select-window -t "$SESSION_NAME:Logs"
-tmux select-pane -t "$SESSION_NAME:Logs.0"
+# Focus command window and attach
+tmux select-window -t "$SESSION_NAME:Command"
 exec tmux attach-session -t "$SESSION_NAME"
