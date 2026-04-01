@@ -98,7 +98,6 @@ def _build_grouped_layout_kernel(
     BLOCK_M: tl.constexpr,
 ):
     pid_g = tl.program_id(axis=0)
-    start = tl.load(starts_ptr + pid_g)
     actual_m = tl.load(actual_ms_ptr + pid_g)
     aligned_m = tl.load(aligned_ms_ptr + pid_g)
     block_start = tl.load(block_starts_ptr + pid_g)
