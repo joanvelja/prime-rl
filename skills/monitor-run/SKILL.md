@@ -22,7 +22,7 @@ After the initial overview, schedule recurring check-ins. By default, check in e
 At each check-in:
 
 1. Check that all processes are alive.
-2. Read the logs — look for errors, warnings, hangs, or degraded performance.
+2. Read the logs — look for errors, warnings, hangs, or degraded performance
 3. Note the current training step, key metrics, and checkpoint progress.
 4. **Append an entry to `{output_dir}/STATUS.md`**:
 
@@ -32,27 +32,29 @@ At each check-in:
 **Step**: {current_step} / {max_steps}
 **Health**: {Healthy | Degraded | Down}
 
-**Metrics**:
-- reward/mean: ...
-- time/step: ...
-- (other notable metrics)
+**Progress**: reward/mean, seq_len, truncation rate, eval scores (if available), notable env-specific metrics.
+**Stability**: entropy, mismatch KL, grad norm — flag any spikes or concerning trends.
+**Performance**: trainer and orchestrator step times, who is waiting on whom, env server lag, inference pressure.
 
-**Notes**: (anything unusual — errors, high wait times, restarts, etc. Omit if nothing notable.)
+**Notes**: (anything unusual — errors, restarts, hangs, etc. Omit if nothing notable.)
 ```
 
 Always append — never overwrite previous entries.
 
 ### Restarting a run
 
-**IMPORTANT**: Never restart a run unless you were explicitly asked to so by the researcher. If you were given permission, make sure to ask the researcher for the exact command to resume a run and under what conditions a restart is necessary.
+**IMPORTANT**: Never restart a run unless you were explicitly instructed by the researcher. If you were given permission, make sure to ask the researcher for the exact command to resume a run and under what conditions a restart is necessary.
 
 **IMPORTANT**: Never run kill or launch commands directly from your shell. Instead, send them to the tmux **Launcher** window so the researcher can see exactly what was executed.
 
 Use `tmux send-keys` to dispatch commands to the Launcher pane:
 
 ```bash
-# General pattern — replace SESSION with the actual tmux session name
-tmux send-keys -t SESSION:Launcher 'your command here' Enter
+# Get your current tmux session name
+SESSION=$(tmux display-message -p '#S')
+
+# Send a command to the Launcher window
+tmux send-keys -t "$SESSION:Launcher" 'your command here' Enter
 ```
 
 ---
@@ -63,13 +65,13 @@ tmux send-keys -t SESSION:Launcher 'your command here' Enter
 
 The output directory and tmux session name are typically provided by the researcher in the appended system prompt (see `scripts/tmux.sh` — the Claude window is launched with this context). If not provided, **ask the researcher** which output directory to monitor and which tmux session the run is in.
 
-The tmux session contains the **Launcher** window where the researcher runs launch commands — this is where you should send any restart commands (see [Restarting a run](#restarting-or-relaunching-a-run)).
+The tmux session contains the **Launcher** window where the researcher runs launch commands — this is where you should send any restart commands (see [Restarting a run](#restarting-a-run)).
 
 Once you have the output directory, the resolved configs are at `{output_dir}/configs/`.
 
 ### Configs
 
-The launcher writes resolved configs as TOML files to `{output_dir}/configs/`:
+The launcher writes resolved configs as TOML files to `{output_dir}/configs/`. Read `rl.toml` to get the full picture of the experiment (model, envs, hyperparameters, wandb, deployment).
 
 ### Logs
 
@@ -94,7 +96,7 @@ Logs are usually the most informative place to monitor a run.
         └── ...
 ```
 
-Usually it's sufficient to tail `trainer.log`, `orchestrator.log`, and `inference.log`. For debugging, it may be necessary to check the per-node logs (`node_*.log`) or per-rank trainer logs under `torchrun/`. You
+Usually it's sufficient to tail `trainer.log`, `orchestrator.log`, and `inference.log`. For debugging, it may be necessary to check the per-node logs (`node_*.log`) or per-rank trainer logs under `torchrun/`.
 
 ```bash
 tail {output_dir}/logs/trainer.log                     # training progress — kl mismatch, entropy, grad norm, trainer step time
@@ -102,6 +104,16 @@ tail {output_dir}/logs/orchestrator.log                # orchestrator — reward
 tail {output_dir}/logs/inference.log                   # inference — completed HTTP requests, engine stats, OOM errors
 tail {output_dir}/logs/envs/train/*/env_server.log     # env server — aggregated stats across its workers (lag, task distribution)
 tail {output_dir}/logs/envs/train/*/env_worker_*.log   # env workers — individual env logs
+```
+
+All logs use loguru with the format `HH:mm:ss  LEVEL message`. Log levels: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. To scan for problems:
+
+```bash
+grep -E "WARNING|ERROR" {output_dir}/logs/trainer.log
+grep -E "WARNING|ERROR" {output_dir}/logs/orchestrator.log
+grep -E "WARNING|ERROR" {output_dir}/logs/inference.log
+grep -E "WARNING|ERROR" {output_dir}/logs/envs/train/*/env_server.log
+grep -E "WARNING|ERROR" {output_dir}/logs/envs/train/*/env_worker_*.log
 ```
 
 ### Metrics
@@ -181,9 +193,21 @@ Key vLLM metrics to watch:
 - `vllm:num_requests_waiting` — requests queued waiting for KV cache space
 - `vllm:gpu_cache_usage_perc` — KV cache pressure (approaching 1.0 = requests will queue)
 
+### Errors and warnings
+
+As part of every check-in, grep all logs for `WARNING` and `ERROR` level messages. Pay special attention to env server and env worker logs — these are the most common source of issues since they run user-provided code.
+
+Common things to look for:
+- **Env workers**: exceptions in environment execution, timeouts, sandbox errors, OOM kills
+- **Orchestrator**: empty/errored rollout spikes, weight broadcast failures, checkpoint errors
+- **Trainer**: NCCL/CUDA errors, OOM, NaN loss or gradients
+- **Inference**: NCCL/CUDA errors, OOM, request timeouts
+
+A small number of warnings is normal (e.g. occasional env timeouts). Escalate to the researcher if you see errors that are persistent, increasing, or affect a large fraction of rollouts.
+
 ### Processes
 
-All processes have custom process names, making them easy to identify in `ps`, `htop`, and `pstree`.
+All processes have custom process names, making them easy to identify in `ps`, `htop`, and `pstree`. Use this in case you need to debug a process that is not responding or behaving unexpectedly.
 
 ```
 PRIME-RL::Launcher
@@ -199,5 +223,5 @@ PRIME-RL::Launcher
 └── tail trainer.log
 ```
 
-For multi-node runs, trainer and inference processes are distributed across separate nodes. For deep debugging, use `srun` or `ssh` to inspect processes on other nodes directly.
+For multi-node runs, trainer and inference processes are distributed across separate nodes. Use `srun` or `ssh` to inspect processes on other nodes directly.
 
