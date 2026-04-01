@@ -23,6 +23,7 @@ def align(x: int, y: int) -> int:
 # Layout building
 # ---------------------------------------------------------------------------
 
+
 def build_grouped_layout(offs: torch.Tensor, *, total_m: int | None = None):
     assert offs.dim() == 1
     assert offs.dtype == torch.int32
@@ -87,6 +88,7 @@ def _build_grouped_layout_triton(
 # Triton kernels
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _build_grouped_layout_kernel(
     grouped_layout_ptr,
@@ -140,7 +142,9 @@ def _unpack_grouped_rows_kernel(
     valid_rows = row_offsets < actual_m
     valid_cols = col_offsets < cols
     x = tl.load(
-        x_ptr + (pid_blk * GROUP_BLOCK_M + pid_sub * BLOCK_M + tl.arange(0, BLOCK_M))[:, None] * stride_xm + col_offsets[None, :] * stride_xn,
+        x_ptr
+        + (pid_blk * GROUP_BLOCK_M + pid_sub * BLOCK_M + tl.arange(0, BLOCK_M))[:, None] * stride_xm
+        + col_offsets[None, :] * stride_xn,
         mask=valid_rows[:, None] & valid_cols[None, :],
         other=0.0,
     )
@@ -344,6 +348,7 @@ def _grouped_per_block_fp8_kernel(
 # ---------------------------------------------------------------------------
 # Public quantization functions
 # ---------------------------------------------------------------------------
+
 
 def unpack_rows_triton(
     x: torch.Tensor,
