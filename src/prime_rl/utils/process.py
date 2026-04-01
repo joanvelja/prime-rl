@@ -24,9 +24,9 @@ def cleanup_process(pid: int, sig: int = signal.SIGTERM):
     """
     try:
         parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
     except psutil.NoSuchProcess:
         return
-    children = parent.children(recursive=True)
     for child in children:
         with contextlib.suppress(ProcessLookupError):
             os.kill(child.pid, sig)
