@@ -164,7 +164,8 @@ async def orchestrate(config: OrchestratorConfig):
         run_config=config,
     )
 
-    usage_reporter = UsageReporter(config.usage or UsageConfig.from_env())
+    usage_config = config.prime_monitor.usage if config.prime_monitor else None
+    usage_reporter = UsageReporter(usage_config or UsageConfig.from_env())
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)
     heart = None
