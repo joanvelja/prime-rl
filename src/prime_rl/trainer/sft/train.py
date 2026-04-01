@@ -119,9 +119,7 @@ def train(config: SFTConfig):
     loading_from_ckpt_later = config.ckpt and checkpoint_step is not None
     fused_cross_entropy: bool | str = False
     if config.loss_impl == "fused":
-        fused_cross_entropy, fallback_reason = resolve_fused_cross_entropy_backend()
-        if fallback_reason is not None:
-            logger.warning(f"Falling back to Liger fused cross-entropy: {fallback_reason}")
+        fused_cross_entropy = resolve_fused_cross_entropy_backend()
     model = setup_model(config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=fused_cross_entropy)
 
     if parallel_dims.cp_enabled:
