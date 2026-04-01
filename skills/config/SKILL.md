@@ -81,6 +81,13 @@ uv run inference --model.enforce-eager          # sets to true
 uv run inference --model.no-enforce-eager       # sets to false
 ```
 
+For `bool | None` fields (e.g. `wandb.offline`), the `--no-flag` toggle syntax does **not** work. Pass the value explicitly instead:
+
+```bash
+uv run rl @ config.toml --wandb.offline true    # sets to true
+uv run rl @ config.toml --wandb.offline false   # sets to false
+```
+
 In TOML, booleans must be explicit:
 
 ```toml
