@@ -387,7 +387,7 @@ MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 class MemoryProfiler:
     def __init__(self, step_num: int, snapshot_path: Path):
-        torch.cuda.memory._record_memory_history()
+        torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES)
         self.logger = get_logger()
         snapshot_path.mkdir(parents=True, exist_ok=True)
         self.snapshot_path = snapshot_path
