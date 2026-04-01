@@ -1,11 +1,3 @@
-"""FP8 quantization kernels for DeepGEMM-based FP8 training.
-
-Triton kernels for per-token, per-block, per-channel, and grouped FP8 quantization,
-plus layout building and row unpacking utilities needed by the FP8 gemm layers.
-
-Adapted from https://github.com/S1ro1/fp8
-"""
-
 from __future__ import annotations
 
 from typing import Tuple

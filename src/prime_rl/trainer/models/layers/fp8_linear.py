@@ -1,12 +1,5 @@
-"""FP8 blockwise linear layer using DeepGEMM.
-
-Drop-in replacement for nn.Linear that performs forward and backward passes
-in FP8 using DeepGEMM's fp8_gemm_nt kernel. Requires SM90 (Hopper) GPUs.
-
-Adapted from https://github.com/S1ro1/fp8
-"""
-
 from __future__ import annotations
+
 import re
 
 import deep_gemm
@@ -43,7 +36,6 @@ class _FP8BlockwiseMM(torch.autograd.Function):
         grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
 
         grad_x = grad_weight = None
-
         if ctx.needs_input_grad[0]:
             grad_output_fp8 = per_token_cast_to_fp8_triton(grad_output_2d, False, block_size)
             weight_t = weight.transpose(0, 1).contiguous()
@@ -101,7 +93,9 @@ class Float8BlockwiseLinear(nn.Linear):
         return new_mod
 
 
-def replace_linear_with_fp8_blockwise_linear(model: nn.Module, ignore_modules: list[str] = ["lm_head", "model.layers.*.router.gate"]) -> None:
+def replace_linear_with_fp8_blockwise_linear(
+    model: nn.Module, ignore_modules: list[str] = ["lm_head", "model.layers.*.router.gate"]
+) -> None:
     logger = get_logger()
     logger.info("Replacing linear layers with FP8 blockwise linear layers")
     replaced_modules = []
@@ -115,4 +109,6 @@ def replace_linear_with_fp8_blockwise_linear(model: nn.Module, ignore_modules: l
             setattr(parent, attr_name, Float8BlockwiseLinear.from_linear(module))
             replaced_modules.append(name)
 
-    logger.info(f"Replaced {len(replaced_modules)} linear layers with FP8 blockwise linear layers: {replaced_modules[:5]}...")
+    logger.info(
+        f"Replaced {len(replaced_modules)} linear layers with FP8 blockwise linear layers: {replaced_modules[:5]}..."
+    )

@@ -1,19 +1,7 @@
-"""FP8 grouped GEMM using DeepGEMM.
-
-Drop-in replacement for torch._grouped_mm that performs forward and backward
-passes in FP8 using DeepGEMM's m_grouped and k_grouped kernels.
-Requires SM90 (Hopper) GPUs.
-
-Adapted from https://github.com/S1ro1/fp8
-"""
-
 from __future__ import annotations
 
-from typing import Optional
-
-import torch
-
 import deep_gemm
+import torch
 
 from prime_rl.trainer.models.kernels.fp8_utils import (
     GROUP_ALIGNMENT,
