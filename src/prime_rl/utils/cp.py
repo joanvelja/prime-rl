@@ -39,6 +39,7 @@ def setup_hybrid_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int,
 def setup_sparse_mla_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
     """Configure GLM-5 sparse MLA modules for context-parallel gather/scatter."""
 
+    count = 0
     if not hasattr(model, "model"):
         return
 

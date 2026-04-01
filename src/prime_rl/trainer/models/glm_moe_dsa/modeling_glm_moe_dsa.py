@@ -114,14 +114,14 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.shard_to_cp(hidden_states)
+        hidden_states = self.gather_for_cp(hidden_states)
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             ks=ks,
             ke=ke,
         )
-        hidden_states = self.gather_for_cp(hidden_states)
+        hidden_states = self.shard_to_cp(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -215,8 +215,8 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
         if len(self.layers) == 0:
             return None, 0, 1
 
-        attn = self.layers[0].self_attn
-        return getattr(attn, "cp_group", None), getattr(attn, "cp_rank", 0), getattr(attn, "cp_world_size", 1)
+        layer = self.layers[0]
+        return getattr(layer, "_cp_group", None), getattr(layer, "_cp_rank", 0), getattr(layer, "_cp_world_size", 1)
 
     def _gather_position_ids_for_cp(
         self,
