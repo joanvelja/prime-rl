@@ -682,24 +682,35 @@ def monkey_patch_fused_moe_lora_dp():
 
 
 def monkey_patch_dp_engine_core_pause_resume_deadlock():
-    """Fix deadlock with pause/resume and collective_rpc in DP engine core.
+    """Fix DP pause/resume deadlocks around weight updates.
 
-    When a request arrives for an already-completed wave while the scheduler is
-    paused, the unpatched code sends a start_wave notification that triggers
-    collective_rpc on other DP engines. But the paused engine can't participate
-    in the collective, causing a deadlock.
+    Bug 1 (job 3756): while paused, START_DP_WAVE can wake idle ranks into the
+    DP loop. Those ranks then run dummy batches and hit DP collectives while
+    other ranks are still in NCCL weight transfer.
 
-    Fix: only send the start_wave notification when the scheduler is unpaused,
-    and explicitly set engines_running=True before notifying.
+    Bug 2 (jobs 3769/3771): resume ties the DP running state to local
+    unfinished requests, but the DP wave state is global. Ranks with no local
+    work still need to re-enter the loop so they can participate in the same
+    DP collectives as ranks that are resuming remote-KV or decode work.
 
-    Upstream: https://github.com/vllm-project/vllm/pull/37024
+    Fix:
+    - ignore START_DP_WAVE wakeups while paused
+    - on resume, wake every DP rank and force an immediate global unfinished
+      sync instead of waiting for the normal 32-step cadence
+
+    This keeps the upstream pause-side fix from
+    https://github.com/vllm-project/vllm/pull/37024 and extends it with the
+    resume-side wave-state fix.
     """
+    from vllm.config import ParallelConfig
     from vllm.v1.core.sched.interface import PauseState
-    from vllm.v1.engine import EngineCoreOutputs
-    from vllm.v1.engine.core import DPEngineCoreProc, EngineCore
+    from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
     from vllm.v1.request import Request
 
     _base_add_request = EngineCore.add_request
+    _base_handle_client_request = EngineCoreProc._handle_client_request
+    _base_resume_scheduler = DPEngineCoreProc.resume_scheduler
 
     def _patched_add_request(self, request: Request, request_wave: int = 0):
         _base_add_request(self, request, request_wave)
@@ -710,4 +721,33 @@ def monkey_patch_dp_engine_core_pause_resume_deadlock():
                 self.engines_running = True
                 self.output_queue.put_nowait((-1, EngineCoreOutputs(start_wave=self.current_wave)))
 
+    def _patched_handle_client_request(self, request_type, request):
+        if request_type == EngineCoreRequestType.START_DP_WAVE:
+            new_wave, exclude_eng_index = request
+            if exclude_eng_index != self.engine_index and new_wave >= self.current_wave:
+                self.current_wave = new_wave
+                if not self.engines_running and self.scheduler.pause_state == PauseState.UNPAUSED:
+                    self.engines_running = True
+        else:
+            _base_handle_client_request(self, request_type, request)
+
+    def _patched_resume_scheduler(self):
+        was_paused = self.scheduler.pause_state != PauseState.UNPAUSED
+        _base_resume_scheduler(self)
+        if was_paused:
+            self.engines_running = True
+            self._force_dp_running_state_sync = True
+
+    def _patched_has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        self.step_counter += 1
+        if getattr(self, "_force_dp_running_state_sync", False):
+            self._force_dp_running_state_sync = False
+            return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+        if self.step_counter % 32 != 0:
+            return True
+        return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+
     DPEngineCoreProc.add_request = _patched_add_request
+    DPEngineCoreProc._handle_client_request = _patched_handle_client_request
+    DPEngineCoreProc.resume_scheduler = _patched_resume_scheduler
+    DPEngineCoreProc._has_global_unfinished_reqs = _patched_has_global_unfinished_reqs

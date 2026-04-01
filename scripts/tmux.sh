@@ -58,8 +58,11 @@ fi
 
 echo "Creating new tmux session: $SESSION_NAME"
 
+# Window 0: Launcher - empty shell
+tmux new-session -d -s "$SESSION_NAME" -n "Launcher"
+
 # Window 1: Logs - 4 vertical panes
-tmux new-session -d -s "$SESSION_NAME" -n "Logs"
+tmux new-window -t "$SESSION_NAME" -n "Logs"
 
 tmux split-window -v -t "$SESSION_NAME:Logs.0"
 tmux split-window -v -t "$SESSION_NAME:Logs.1"
@@ -83,22 +86,24 @@ tmux send-keys -t "$SESSION_NAME:Logs.2" \
 tmux send-keys -t "$SESSION_NAME:Logs.3" \
   "tail -F ${LOG_DIR}/inference.log 2>/dev/null" C-m
 
-# Window 2: Monitor
-tmux new-window -t "$SESSION_NAME" -n "Monitor"
-tmux split-window -h -t "$SESSION_NAME:Monitor"
-tmux select-layout -t "$SESSION_NAME:Monitor" even-horizontal
-
-tmux select-pane -t "$SESSION_NAME:Monitor.0" -T "GPU"
-tmux send-keys -t "$SESSION_NAME:Monitor.0" "nvtop" C-m
-
-tmux select-pane -t "$SESSION_NAME:Monitor.1" -T "CPU"
-tmux send-keys -t "$SESSION_NAME:Monitor.1" "htop" C-m
+# Window 2: Claude Code with log context
+tmux new-window -t "$SESSION_NAME" -n "Claude"
+tmux send-keys -t "$SESSION_NAME:Claude" \
+  "claude --permission-mode auto --append-system-prompt 'You are monitoring a prime-rl training run. The output directory is ${OUTPUT_DIR}. Log paths:
+  Trainer:        ${LOG_DIR}/trainer.log
+  All nodes:      ${LOG_DIR}/trainer/node_*.log
+  All ranks:      ${LOG_DIR}/trainer/torchrun/*/*/*/*.log
+  Orchestrator:   ${LOG_DIR}/orchestrator.log
+  Inference:      ${LOG_DIR}/inference.log
+  Envs:           ${LOG_DIR}/envs/*/*/*.log
+  Train envs:     ${LOG_DIR}/envs/train/*/*.log
+You are running inside tmux session \"${SESSION_NAME}\". The Launcher window (window 0) is where the user runs launch commands. You can read its contents with: tmux capture-pane -t ${SESSION_NAME}:Launcher -p
+Help the user monitor and debug this run.'" C-m
 
 # Pane title styling
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top
 tmux set-option -t "$SESSION_NAME" -g pane-border-format " #{pane_title} "
 
-# Focus logs window and attach
-tmux select-window -t "$SESSION_NAME:Logs"
-tmux select-pane -t "$SESSION_NAME:Logs.0"
+# Focus launcher window and attach
+tmux select-window -t "$SESSION_NAME:Launcher"
 exec tmux attach-session -t "$SESSION_NAME"

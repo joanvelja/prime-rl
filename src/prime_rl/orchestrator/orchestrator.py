@@ -66,6 +66,7 @@ from prime_rl.utils.config import cli
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     clean_exit,
@@ -204,10 +205,15 @@ async def orchestrate(config: OrchestratorConfig):
     env_processes: list[mp.Process] = []
 
     def _cleanup_env_processes():
+        if not env_processes:
+            return
+        logger.info(f"Shutting down {len(env_processes)} env server(s), waiting for sandbox cleanup...")
         for proc in env_processes:
             proc.terminate()
-            proc.join(timeout=5)
+        for proc in env_processes:
+            proc.join(timeout=25)
             if proc.is_alive():
+                logger.warning(f"Env server {proc.pid} did not exit after 25s, force killing")
                 proc.kill()
                 proc.join(timeout=5)
 
@@ -916,7 +922,7 @@ async def orchestrate(config: OrchestratorConfig):
 
 def main():
     """Main entry-point for orchestrator. Run using `uv run orchestrator`"""
-
+    set_proc_title("Orchestrator")
     asyncio.run(orchestrate(cli(OrchestratorConfig)))
 
 
