@@ -35,6 +35,34 @@ def setup_hybrid_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int,
         get_logger().info(f"Configured hybrid CP on {count} DeltaNet modules (fla native state passing)")
 
 
+def setup_sparse_mla_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
+    """Configure GLM-5 sparse MLA modules for context-parallel gather/scatter."""
+    layers = None
+    if hasattr(model, "model"):
+        inner = model.model
+        if hasattr(inner, "language_model"):
+            inner = inner.language_model
+        if hasattr(inner, "layers"):
+            layers = inner.layers
+
+    if layers is None:
+        return
+
+    count = 0
+    for layer in layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and hasattr(attn, "gather_from_seq_parallel_region"):
+            attn.cp_group = cp_group
+            attn.cp_rank = cp_rank
+            attn.cp_world_size = cp_world_size
+            count += 1
+
+    if count > 0:
+        from prime_rl.utils.logger import get_logger
+
+        get_logger().info(f"Configured sparse MLA CP on {count} GLM-5 attention modules")
+
+
 def shard_for_cp(t: torch.Tensor, cp_rank: int, cp_world_size: int) -> torch.Tensor:
     """
     Shard a tensor for context parallelism.

@@ -15,6 +15,17 @@ from torchtitan.distributed.expert_parallel import expert_parallel
 from prime_rl.configs.trainer import EPCommBackend
 
 
+def _uniform_routed_experts(num_tokens: int, num_experts: int, top_k: int, device: torch.device) -> torch.Tensor:
+    """Generate uniform random expert assignments for forced load balancing.
+
+    Returns tensor of shape (num_tokens, top_k) where each token is assigned
+    top_k distinct experts chosen uniformly at random.
+    """
+    # For each token, generate a random permutation and take the first top_k experts
+    rand = torch.rand(num_tokens, num_experts, device=device)
+    return rand.topk(top_k, dim=1).indices
+
+
 @dataclass
 class MoEArgs:
     num_experts: int = 8
@@ -393,6 +404,7 @@ class MoE(nn.Module):
         )
         self.score_before_experts = moe_args.score_before_experts
         self.deepep_token_chunk_size: int | None = None
+        self.force_load_balance = False
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
@@ -520,11 +532,11 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
+        if self.force_load_balance:
+            routed_experts = _uniform_routed_experts(bs * slen, self.router.num_experts, self.router.top_k, x.device)
+
         if routed_experts is not None:
-            _, _, top_k = routed_experts.shape
-            routed_experts = routed_experts.reshape(
-                -1, top_k
-            )  # we have to reshape here because the original is non-contiguous
+            routed_experts = routed_experts.reshape(-1, routed_experts.shape[-1])
 
         # top_scores and selected_experts_indices shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
@@ -842,6 +854,7 @@ class LatentMoE(nn.Module):
             self.fc2_latent_proj = nn.Identity()
 
         self.routed_scaling_factor = routed_scaling_factor
+        self.force_load_balance = False
         self.load_balance_coeff = load_balance_coeff
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
@@ -952,6 +965,18 @@ class LatentMoE(nn.Module):
         x_flat = x.view(-1, dim)
 
         top_scores, selected_experts_indices, num_tokens_per_expert = self.router(x_flat, self.expert_bias)
+
+        if self.force_load_balance:
+            selected_experts_indices = _uniform_routed_experts(
+                bs * slen, self.router.num_experts, self.router.top_k, x.device
+            )
+            top_scores = torch.ones_like(selected_experts_indices, dtype=top_scores.dtype) / self.router.top_k
+            num_tokens_per_expert = torch.histc(
+                selected_experts_indices.reshape(-1).float(),
+                bins=self.router.num_experts,
+                min=0,
+                max=self.router.num_experts,
+            )
 
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)

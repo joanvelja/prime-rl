@@ -707,6 +707,12 @@ def _reset_runtime_moe_buffers(model: nn.Module) -> None:
             module.tokens_per_expert.zero_()
 
 
+def _set_force_load_balance(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, (MoE, LatentMoE)):
+            module.force_load_balance = True
+
+
 def _validate_flash_attn_4_installed() -> None:
     """Validate that flash-attn-cute is installed and not overwritten by flash-attn.
 
@@ -832,6 +838,10 @@ def setup_model(
             load_dcp_from_hf(model, config, parallel_dims)
 
     _reset_runtime_moe_buffers(model)
+
+    if config.debug.force_load_balance:
+        _set_force_load_balance(model)
+
     return model
 
 

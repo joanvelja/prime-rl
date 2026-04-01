@@ -2,6 +2,7 @@ import warnings
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
@@ -91,12 +92,14 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn.gather_from_seq_parallel_region(hidden_states)
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             ks=ks,
             ke=ke,
         )
+        hidden_states = self.self_attn.scatter_to_seq_parallel_region(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -186,6 +189,23 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
 
         self.post_init()
 
+    def _context_parallel_state(self) -> tuple[dist.ProcessGroup | None, int, int]:
+        if len(self.layers) == 0:
+            return None, 0, 1
+
+        attn = self.layers[0].self_attn
+        return getattr(attn, "cp_group", None), getattr(attn, "cp_rank", 0), getattr(attn, "cp_world_size", 1)
+
+    def _gather_position_ids_for_cp(
+        self,
+        position_ids: torch.LongTensor,
+        cp_group: dist.ProcessGroup,
+        cp_world_size: int,
+    ) -> torch.LongTensor:
+        gathered_position_ids = [torch.empty_like(position_ids) for _ in range(cp_world_size)]
+        dist.all_gather(gathered_position_ids, position_ids.contiguous(), group=cp_group)
+        return torch.cat(gathered_position_ids, dim=1)
+
     @auto_docstring
     def forward(
         self,
@@ -204,13 +224,19 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
 
-        flat_position_ids = position_ids.view(-1)
+        cp_group, _, cp_world_size = self._context_parallel_state()
+        if cp_group is not None and cp_world_size > 1:
+            position_ids_for_attn = self._gather_position_ids_for_cp(position_ids, cp_group, cp_world_size)
+        else:
+            position_ids_for_attn = position_ids
+
+        flat_position_ids = position_ids_for_attn.view(-1)
         S = flat_position_ids.shape[0]
         ks = torch.arange(S, dtype=torch.int32, device=flat_position_ids.device) - flat_position_ids.to(torch.int32)
         ke = torch.arange(1, S + 1, dtype=torch.int32, device=flat_position_ids.device)
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids_for_attn)
 
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             routed_experts_layer = routed_experts[:, :, layer_idx, :] if routed_experts is not None else None

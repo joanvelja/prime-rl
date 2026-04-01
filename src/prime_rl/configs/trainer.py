@@ -174,6 +174,13 @@ class DebugModelConfig(BaseConfig):
         ),
     ] = False
 
+    force_load_balance: Annotated[
+        bool,
+        Field(
+            description="Force uniform routing in MoE layers by randomly assigning experts, ensuring perfect load balance.",
+        ),
+    ] = False
+
 
 class ModelConfig(BaseModelConfig):
     """Configures the model for training."""
