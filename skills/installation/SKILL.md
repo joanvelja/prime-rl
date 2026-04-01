@@ -14,6 +14,16 @@ uv sync --all-extras # recommended: includes flash-attn, flash-attn-cute, etc.
 
 ## Advanced
 
+### Quack kernels (optional)
+
+`quack-kernels` provides fused SFT loss and RMSNorm kernels. Install it with:
+
+```bash
+uv sync --extra quack
+```
+
+Important hardware note: quack's fused SFT cross-entropy path requires Hopper-or-newer GPUs (`sm90+`). On older GPUs, prime-rl automatically falls back to the Liger fused cross-entropy implementation even if `quack-kernels` is installed.
+
 ### Mamba-SSM (NemotronH models)
 
 For NemotronH (hybrid Mamba-Transformer-MoE) models, install `mamba-ssm` for Triton-based SSD kernels that match vLLM's precision:

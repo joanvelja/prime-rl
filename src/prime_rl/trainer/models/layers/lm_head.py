@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import types
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,26 @@ from torch import Tensor
 from prime_rl.utils.logger import get_logger
 
 FUSED_CE_IGNORE_INDEX = -100
+
+
+def resolve_fused_cross_entropy_backend() -> tuple[Literal["liger", "quack"], str | None]:
+    """Choose the fused CE backend for the current CUDA device."""
+    if not torch.cuda.is_available():
+        return "liger", "CUDA is unavailable"
+
+    major, minor = torch.cuda.get_device_capability()
+    if major < 9:
+        return "liger", (
+            "quack-kernels fused cross-entropy requires CUDA compute capability >= 9.0 "
+            f"(sm90+); current device is sm_{major}{minor}"
+        )
+
+    try:
+        importlib.import_module("quack.linear_cross_entropy")
+    except ImportError:
+        return "liger", "quack-kernels is not installed"
+
+    return "quack", None
 
 
 class PrimeLmOutput(TypedDict, total=False):
@@ -286,7 +307,7 @@ def inject_prime_lm_head(
         fused_cross_entropy: Controls fused lm_head + CE loss. Accepts:
             - False: no fusion
             - True or "liger": Liger kernel fusion
-            - "quack": quack-kernels fusion (chunked linear + CE with CuTe DSL kernels)
+            - "quack": quack-kernels fusion (chunked linear + CE with CuTe DSL kernels, requires sm90+)
     """
     # Guards so we have nicer error messages when a non-standard model is used
     assert hasattr(model, "model"), f"model doesnt have backbone in model.model:\n{model}"
@@ -298,6 +319,11 @@ def inject_prime_lm_head(
     )
 
     logger = get_logger()
+
+    if fused_cross_entropy == "quack":
+        fused_cross_entropy, fallback_reason = resolve_fused_cross_entropy_backend()
+        if fallback_reason is not None:
+            logger.warning(f"Falling back to Liger fused cross-entropy: {fallback_reason}")
 
     # Check for Gemma-style softcapping - dispatch to specialized implementation
     final_logit_softcapping = getattr(model.config, "final_logit_softcapping", None)

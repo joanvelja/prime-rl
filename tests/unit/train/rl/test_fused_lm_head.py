@@ -4,7 +4,12 @@ from transformers import AutoModelForCausalLM
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from prime_rl.trainer.models import cast_float_and_contiguous
-from prime_rl.trainer.models.layers.lm_head import FusedOutputLinear, VanillaOutputLinear, inject_prime_lm_head
+from prime_rl.trainer.models.layers.lm_head import (
+    FusedOutputLinear,
+    VanillaOutputLinear,
+    inject_prime_lm_head,
+    resolve_fused_cross_entropy_backend,
+)
 from prime_rl.trainer.models.llama import LlamaForCausalLM as PrimeRLLlamaForCausalLM
 from prime_rl.trainer.rl.loss import compute_entropy, selective_log_softmax, shift_tensor_left, shift_tensor_right
 from prime_rl.utils.utils import default_dtype
@@ -75,6 +80,69 @@ def test_fused_lm_head_requires_labels():
 
     with pytest.raises(AssertionError, match="FusedOutputLinear requires labels"):
         lm(hidden, labels=None, temperature=temperature)
+
+
+def test_resolve_fused_cross_entropy_backend_falls_back_without_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    backend, reason = resolve_fused_cross_entropy_backend()
+
+    assert backend == "liger"
+    assert reason == "CUDA is unavailable"
+
+
+def test_resolve_fused_cross_entropy_backend_falls_back_on_pre_hopper(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (8, 0))
+
+    backend, reason = resolve_fused_cross_entropy_backend()
+
+    assert backend == "liger"
+    assert reason is not None
+    assert "compute capability >= 9.0" in reason
+    assert "sm_80" in reason
+
+
+def test_resolve_fused_cross_entropy_backend_falls_back_without_quack(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name: str, package: str | None = None):
+        if name == "quack.linear_cross_entropy":
+            raise ImportError("missing quack")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+    backend, reason = resolve_fused_cross_entropy_backend()
+
+    assert backend == "liger"
+    assert reason == "quack-kernels is not installed"
+
+
+def test_resolve_fused_cross_entropy_backend_prefers_quack(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (9, 0))
+
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name: str, package: str | None = None):
+        if name == "quack.linear_cross_entropy":
+            return object()
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+    backend, reason = resolve_fused_cross_entropy_backend()
+
+    assert backend == "quack"
+    assert reason is None
 
 
 def test_vanilla_lm_head_returns_logits():

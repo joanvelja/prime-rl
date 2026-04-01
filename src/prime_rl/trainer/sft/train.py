@@ -46,7 +46,7 @@ from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
-from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX
+from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX, resolve_fused_cross_entropy_backend
 
 from torchtitan.distributed.utils import clip_grad_norm_
 
@@ -119,12 +119,9 @@ def train(config: SFTConfig):
     loading_from_ckpt_later = config.ckpt and checkpoint_step is not None
     fused_cross_entropy: bool | str = False
     if config.loss_impl == "fused":
-        try:
-            from quack.linear_cross_entropy import chunked_linear_cross_entropy  # noqa: F401
-        except ImportError:
-            fused_cross_entropy = "liger"
-        else:
-            fused_cross_entropy = "quack"
+        fused_cross_entropy, fallback_reason = resolve_fused_cross_entropy_backend()
+        if fallback_reason is not None:
+            logger.warning(f"Falling back to Liger fused cross-entropy: {fallback_reason}")
     model = setup_model(config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=fused_cross_entropy)
 
     if parallel_dims.cp_enabled:

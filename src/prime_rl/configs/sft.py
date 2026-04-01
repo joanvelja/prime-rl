@@ -237,7 +237,8 @@ class SFTConfig(BaseConfig):
         Field(
             description="Cross entropy loss mode. "
             "'standard' uses the standard Liger cross-entropy kernel. "
-            "'fused' prefers quack-kernels fused lm_head + CE and falls back to Liger."
+            "'fused' prefers quack-kernels fused lm_head + CE and falls back to Liger "
+            "when quack-kernels is unavailable or the GPU does not support it."
         ),
     ] = "fused"
 
