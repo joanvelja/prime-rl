@@ -619,6 +619,22 @@ def reshard_module(model: nn.Module):
             module.reshard()
 
 
+def get_default_activation_checkpoint_config(resolved_impl: str) -> ActivationCheckpointConfig | None:
+    if resolved_impl == "custom":
+        return ActivationCheckpointConfig(mode="selective")
+    return None
+
+
+def get_effective_activation_checkpoint_config(
+    config: ModelConfig, model: nn.Module
+) -> ActivationCheckpointConfig | None:
+    if config.ac is not None:
+        return config.ac
+
+    resolved_impl = "custom" if isinstance(model, PreTrainedModelPrimeRL) else "hf"
+    return get_default_activation_checkpoint_config(resolved_impl)
+
+
 def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
     logger = get_logger()
     language_model = get_language_model(model)
@@ -646,19 +662,12 @@ def apply_ac(model: nn.Module, ac_config: ActivationCheckpointConfig):
 
     if ac_config.mode == "selective":
         unsupported_targets = frozenset(target_list) - model_supported_targets
-        allow_norm_only_full_fallback = selective_layers == 0 and frozenset(target_list) == frozenset({"norm"})
-
-        if unsupported_targets and not allow_norm_only_full_fallback:
+        if unsupported_targets:
             raise ValueError(
                 f"Selective activation checkpoint targets {sorted(unsupported_targets)} are not supported "
                 f"by the selected model layers. Supported targets across the model: {sorted(model_supported_targets)}"
             )
-        if allow_norm_only_full_fallback:
-            logger.warning(
-                "The selected model does not expose selective activation checkpointing hooks; "
-                "falling back to full checkpointing for all selected layers."
-            )
-        elif fallback_layer_types:
+        if fallback_layer_types:
             logger.warning(
                 "Selective activation checkpointing is not supported for layer types "
                 f"{sorted(fallback_layer_types)}; falling back to full checkpointing for those layers."
@@ -804,8 +813,14 @@ def setup_model(
             freeze_all_except_lora_and_specified(model, config.lora)
 
     # the right order is AC -> Compile -> FSDP
-    if config.ac is not None:
-        apply_ac(model, config.ac)
+    effective_ac_config = get_effective_activation_checkpoint_config(config, model)
+    if effective_ac_config is not None:
+        if config.ac is None:
+            logger.info(
+                "Defaulting activation checkpointing to selective mode "
+                "(freq=1, targets=['norm']) for the custom implementation."
+            )
+        apply_ac(model, effective_ac_config)
     if config.compile is not None:
         apply_compile(model, config.compile)
 

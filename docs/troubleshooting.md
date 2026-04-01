@@ -11,8 +11,8 @@ ulimit -n 32000
 > I'm getting CUDA out of memory errors.
 
 Assuming this is happening on the RL or SFT trainer, you can try the following:
-- Trainer configs already use selective activation checkpointing with `targets = ["norm"]` by default.
-- If you still OOM, switch to full activation checkpointing (`--model.ac.mode full`) or add more selective targets as described in `docs/memory_usage.md`.
+- Supported custom implementations already default to selective activation checkpointing with `targets = ["norm"]`.
+- If you still OOM, enable full activation checkpointing with `--model.ac` or, on custom implementations, add more selective targets as described in `docs/memory_usage.md`.
 - Reduce the the micro batch size (`--data.micro-batch-size`) and sequence length (`--data.seq-len`)
 - (*Experimental*) Use context parallelism with `--model.cp`
 

@@ -156,22 +156,12 @@ def test_removed_fused_lm_head_chunk_size_field_is_rejected():
         TrainerModelConfig.model_validate({"fused_lm_head_chunk_size": "auto"})
 
 
-def test_activation_checkpointing_defaults_to_selective_norm():
+def test_activation_checkpointing_is_disabled_in_config_by_default():
     config = TrainerModelConfig.model_validate({})
 
-    assert config.ac is not None
-    assert config.ac.mode == "selective"
-    assert config.ac.targets == ["norm"]
+    assert config.ac is None
 
 
-def test_hf_impl_allows_default_selective_activation_checkpointing():
-    config = TrainerModelConfig.model_validate({"impl": "hf"})
-
-    assert config.ac is not None
-    assert config.ac.mode == "selective"
-    assert config.ac.targets == ["norm"]
-
-
-def test_nondefault_selective_activation_checkpointing_requires_custom_impl():
-    with pytest.raises(ValidationError, match="Selective activation checkpointing with model.impl=.*only supports"):
-        TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective", "targets": ["attn_proj"]}})
+def test_selective_activation_checkpointing_requires_custom_impl():
+    with pytest.raises(ValidationError, match="Selective activation checkpointing requires model.impl='custom'"):
+        TrainerModelConfig.model_validate({"impl": "hf", "ac": {"mode": "selective"}})

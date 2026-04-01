@@ -1,7 +1,6 @@
 import torch.nn as nn
 
-from prime_rl.configs.trainer import ActivationCheckpointConfig
-from prime_rl.trainer.model import apply_ac
+from prime_rl.trainer.model import get_default_activation_checkpoint_config
 from prime_rl.trainer.models.layers.checkpointing import (
     get_supported_targets,
     set_selective_activation_checkpointing,
@@ -106,26 +105,13 @@ def test_routed_experts_subsumes_moe_act_checkpointing():
     assert not hasattr(layer.mlp.experts, _PATCHED_METHODS_ATTR)
 
 
-class DummyUnsupportedLayer(nn.Module):
-    def forward(self, hidden_states):
-        return hidden_states
+def test_custom_impl_gets_default_selective_activation_checkpointing():
+    config = get_default_activation_checkpoint_config("custom")
+
+    assert config is not None
+    assert config.mode == "selective"
+    assert config.targets == ["norm"]
 
 
-class DummyLanguageModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layers = nn.ModuleList([DummyUnsupportedLayer()])
-
-
-class DummyModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = DummyLanguageModel()
-
-
-def test_default_norm_selective_ac_falls_back_to_full_checkpointing():
-    model = DummyModel()
-
-    apply_ac(model, ActivationCheckpointConfig(mode="selective", targets=["norm"]))
-
-    assert hasattr(model.model.layers[0], "_checkpoint_wrapped_module")
+def test_hf_impl_has_no_default_activation_checkpointing():
+    assert get_default_activation_checkpoint_config("hf") is None

@@ -29,7 +29,7 @@ max_inflight_activations = 1
 
 Activation checkpointing discards intermediate activations during the forward pass and recomputes them during the backward pass, trading compute for memory.
 
-Trainer configs now enable activation checkpointing by default with selective AC on the cheapest target:
+If `trainer.model.ac` is unset, supported custom implementations default to selective AC on the cheapest target:
 
 ```toml
 [trainer.model.ac]
@@ -38,11 +38,16 @@ targets = ["norm"]
 freq = 1
 ```
 
-You do not need to add this section unless you want to override the defaults.
+HF or other non-custom implementations do not auto-enable activation checkpointing when `trainer.model.ac` is unset.
 
-`freq` controls how often layers are checkpointed: every `freq` layers. Lower values yield lower memory usage (e.g. `freq = 1` checkpoints every layer).
+To explicitly enable full-layer checkpointing, use:
 
-To force full-layer checkpointing instead of the default selective AC, use:
+```toml
+[trainer.model.ac]
+freq = 1
+```
+
+This is equivalent to:
 
 ```toml
 [trainer.model.ac]
@@ -50,15 +55,16 @@ mode = "full"
 freq = 1
 ```
 
-If a model or layer does not expose selective AC hooks, prime-rl falls back to full layer checkpointing. The default `targets = ["norm"]` is chosen so this fallback stays safe.
-
 ## Selective activation checkpointing tuning
 
-Selective AC lets you add memory savings incrementally before switching all the way to `mode = "full"`.
+Selective AC is only supported with the custom model implementation. It lets you add memory savings incrementally before switching all the way to `mode = "full"`.
 
 The orders below are rough tuning heuristics from best memory-saved/recompute tradeoff to worst. Start on the left and add targets as needed. The runtime treats `targets` as a set, so the order in your config file does not matter.
 
 ```toml
+[trainer.model]
+impl = "custom"
+
 [trainer.model.ac]
 mode = "selective"
 targets = ["norm", "attn_proj", "moe_act"]
@@ -86,9 +92,28 @@ When selective tuning is not enough, switch to `mode = "full"`.
 
 Activation offloading offloads the activations to CPU to reduce the memory usage of the trainer. It can be used in combination with activation checkpointing.
 
-The default selective AC config is already enabled, so to add activation offloading use:
+If you set `trainer.model.ac_offloading` without `trainer.model.ac`, prime-rl also enables explicit full-layer activation checkpointing.
+
+To use activation offloading with the custom-model selective setup, configure both explicitly:
 
 ```toml
+[trainer.model]
+impl = "custom"
+
+[trainer.model.ac]
+mode = "selective"
+targets = ["norm"]
+
+[trainer.model.ac_offloading]
+max_inflight_activations = 5
+```
+
+To use activation offloading with full AC, use:
+
+```toml
+[trainer.model.ac]
+freq = 1
+
 [trainer.model.ac_offloading]
 max_inflight_activations = 5
 ```

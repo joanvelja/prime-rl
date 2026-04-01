@@ -48,9 +48,9 @@ class ActivationCheckpointConfig(BaseConfig):
     mode: Annotated[
         Literal["full", "selective"],
         Field(
-            description="Whether to checkpoint whole transformer blocks (`full`) or selected subcomponents inside supported decoder layers (`selective`). Defaults to `selective`.",
+            description="Whether to checkpoint whole transformer blocks (`full`) or selected subcomponents inside supported custom decoder layers (`selective`).",
         ),
-    ] = "selective"
+    ] = "full"
 
     freq: Annotated[
         int,
@@ -197,9 +197,13 @@ class ModelConfig(BaseModelConfig):
     ac: Annotated[
         ActivationCheckpointConfig | None,
         Field(
-            description='Activation checkpointing config. Defaults to selective activation checkpointing with `targets = ["norm"]`. Set to None to disable activation checkpointing.',
+            description=(
+                "Activation checkpointing config. If None, supported custom implementations default to "
+                'selective activation checkpointing with `targets = ["norm"]`; other '
+                "implementations leave activation checkpointing disabled."
+            ),
         ),
-    ] = ActivationCheckpointConfig(mode="selective")
+    ] = None
 
     ac_offloading: Annotated[
         ActivationOffloadingConfig | None,
@@ -385,14 +389,8 @@ class ModelConfig(BaseModelConfig):
 
     @model_validator(mode="after")
     def selective_ac_only_with_custom_impl(self):
-        if self.ac is None or self.ac.mode != "selective" or self.impl in ("custom", "auto"):
-            return self
-
-        if frozenset(self.ac.targets) != frozenset({"norm"}):
-            raise ValueError(
-                "Selective activation checkpointing with model.impl='hf' only supports model.ac.targets=['norm']; "
-                "use model.impl='custom' or 'auto', switch to full AC, or disable AC."
-            )
+        if self.ac is not None and self.ac.mode == "selective" and self.impl not in ("custom", "auto"):
+            raise ValueError("Selective activation checkpointing requires model.impl='custom' or 'auto'")
         return self
 
     @model_validator(mode="after")
