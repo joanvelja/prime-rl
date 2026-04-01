@@ -751,27 +751,16 @@ def monkey_patch_dp_engine_core_pause_resume_deadlock():
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
+            elif not self.engines_running and self.scheduler.pause_state == PauseState.UNPAUSED:
                 self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+                self.output_queue.put_nowait((-1, EngineCoreOutputs(start_wave=self.current_wave)))
 
     def _patched_handle_client_request(self, request_type, request):
         if request_type == EngineCoreRequestType.START_DP_WAVE:
             new_wave, exclude_eng_index = request
-            if (
-                exclude_eng_index != self.engine_index
-                and new_wave >= self.current_wave
-            ):
+            if exclude_eng_index != self.engine_index and new_wave >= self.current_wave:
                 self.current_wave = new_wave
-                if (
-                    not self.engines_running
-                    and self.scheduler.pause_state == PauseState.UNPAUSED
-                ):
+                if not self.engines_running and self.scheduler.pause_state == PauseState.UNPAUSED:
                     self.engines_running = True
         else:
             _base_handle_client_request(self, request_type, request)
