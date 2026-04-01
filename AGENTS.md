@@ -31,6 +31,7 @@ Namespaces are one honking great idea -- let's do more of those!
 
 - **Always use uv**: run code with `uv run` or `uv run <command>`, never raw `python`.
 - **Adding dependencies**: add to `pyproject.toml` and run `uv sync --all-extras` to install and lock them.
+- **Git dependency pins**: when pinning git dependencies in `pyproject.toml`, always use a small (7-char) commit hash for the `rev` field.
 
 ## Skills
 
@@ -44,5 +45,10 @@ Write tests as plain functions with pytest fixtures. Don't use class-based tests
 
 ## Git
 
-Branch prefixes: `feat/`, `fix/`, `chore/`
+- **Branch prefixes**: use the following prefixes for branches: `feat/`, `fix/`, `chore/`
+
+## GitHub
+
+- **Draft PRs**: always create PRs as drafts (`gh pr create --draft`) to avoid triggering CI unnecessarily.
+- **Pull requests**: do not include a "test plan" section in PR descriptions unless you actually ran tests to verify the changes or the user explicitly asked for one.
 

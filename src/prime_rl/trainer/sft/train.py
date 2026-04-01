@@ -45,6 +45,7 @@ from prime_rl.trainer.world import get_world
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.wandb_monitor import WandbMonitor
 from prime_rl.utils.config import cli
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
 from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
@@ -59,7 +60,6 @@ def train(config: SFTConfig):
     world = get_world()
     logger = setup_logger(
         config.log.level,
-        log_file=config.output_dir / "logs" / "trainer" / f"rank_{world.rank}.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
     logger.info(f"Starting SFT trainer in {world}")
@@ -538,6 +538,7 @@ def train(config: SFTConfig):
 
 
 def main():
+    set_proc_title("SFTTrainer")
     train(cli(SFTConfig))
 
 

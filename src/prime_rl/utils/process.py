@@ -2,6 +2,21 @@ import subprocess
 from subprocess import Popen
 from threading import Event, Thread
 
+import setproctitle
+
+PRIME_RL_PROC_PREFIX = "PRIME-RL"
+
+
+def set_proc_title(name: str) -> None:
+    """Set the process title for visibility in tools like ``ps`` and ``htop``.
+
+    Args:
+        name: A short, descriptive label (e.g. ``Trainer``, ``Orchestrator``).
+              The process title is set to ``{PRIME_RL_PROC_PREFIX}::{name}``.
+    """
+    title = f"{PRIME_RL_PROC_PREFIX}::{name}"
+    setproctitle.setproctitle(title)
+
 
 def cleanup_threads(threads: list[Thread]):
     """Cleanup a list of threads"""

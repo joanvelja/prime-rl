@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prime_rl.configs.shared import (
     HeartbeatConfig,
-    LogConfig,
     SlurmConfig,
+    TrainerLogConfig,
     WandbConfig,
 )
 from prime_rl.configs.trainer import (
@@ -183,7 +183,7 @@ class SFTConfig(BaseConfig):
     ckpt: CheckpointConfig | None = None
 
     # The logging configuration
-    log: LogConfig = LogConfig()
+    log: TrainerLogConfig = TrainerLogConfig()
 
     # The wandb configuration
     wandb: WandbConfig | None = None
