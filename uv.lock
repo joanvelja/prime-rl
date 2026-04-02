@@ -2817,7 +2817,7 @@ requires-dist = [
     { name = "uvloop", specifier = ">=0.21.0" },
     { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=adf8138" },
     { name = "vllm", specifier = ">=0.17.0" },
-    { name = "vllm-router", marker = "platform_machine == 'x86_64' and extra == 'disagg'", url = "https://github.com/PrimeIntellect-ai/router/releases/download/v0.1.14/vllm_router-0.1.14-cp38-abi3-linux_x86_64.whl" },
+    { name = "vllm-router", marker = "platform_machine == 'x86_64' and extra == 'disagg'", url = "https://github.com/samsja/flash-attn-builds/releases/download/v0.3/vllm_router-0.1.11-cp38-abi3-linux_x86_64.whl" },
     { name = "wandb", specifier = ">=0.24.2" },
     { name = "wiki-search", marker = "extra == 'envs'", index = "https://hub.primeintellect.ai/primeintellect/simple/" },
 ]
@@ -4210,8 +4210,8 @@ wheels = [
 
 [[package]]
 name = "vllm-router"
-version = "0.1.14"
-source = { url = "https://github.com/PrimeIntellect-ai/router/releases/download/v0.1.14/vllm_router-0.1.14-cp38-abi3-linux_x86_64.whl" }
+version = "0.1.11"
+source = { url = "https://github.com/samsja/flash-attn-builds/releases/download/v0.3/vllm_router-0.1.11-cp38-abi3-linux_x86_64.whl" }
 dependencies = [
     { name = "aiohttp", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "fastapi", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -4221,7 +4221,7 @@ dependencies = [
     { name = "uvicorn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/PrimeIntellect-ai/router/releases/download/v0.1.14/vllm_router-0.1.14-cp38-abi3-linux_x86_64.whl", hash = "sha256:92935a8be0dd642aa8f328388211f7e45385d0cef6e1a851ef6d15e4153f2cae" },
+    { url = "https://github.com/samsja/flash-attn-builds/releases/download/v0.3/vllm_router-0.1.11-cp38-abi3-linux_x86_64.whl", hash = "sha256:43c96cebde3d59f88c0e84fe735bba5ccb6a308d3305c80ffc3723194a5f7230" },
 ]
 
 [package.metadata]
