@@ -127,9 +127,7 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     probs_diff = trainer_probs - inference_probs
     dppo_invalid_mask_high = probs_diff > loss_config.dppo_mask_high
     dppo_invalid_mask_low = probs_diff < -loss_config.dppo_mask_low
-    dppo_invalid_mask = torch.where(
-        advantages > 0, dppo_invalid_mask_high, dppo_invalid_mask_low
-    )
+    dppo_invalid_mask = torch.where(advantages > 0, dppo_invalid_mask_high, dppo_invalid_mask_low)
 
     is_masked = dppo_invalid_mask
     is_masked_high = (advantages > 0) & dppo_invalid_mask_high
