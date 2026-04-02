@@ -57,6 +57,8 @@ SESSION=$(tmux display-message -p '#S')
 tmux send-keys -t "$SESSION:Launcher" 'your command here' Enter
 ```
 
+After a restart, verify that all processes are back up and healthy before resuming periodic check-ins. Check the process tree and tail the logs to confirm the run is making progress again.
+
 ---
 
 ## Reference
