@@ -448,6 +448,7 @@ async def orchestrate(config: OrchestratorConfig):
             save_ckpt_start_time = time.perf_counter()
             ckpt_manager.save(progress, buffer, step=progress.step)
             save_ckpt_time = time.perf_counter() - save_ckpt_start_time
+            logger.debug(f"Saved checkpoint at step {progress.step} in {save_ckpt_time:.2f}s")
 
         # Break if we have reached the maximum number of steps
         if config.max_steps and progress.step >= config.max_steps:
@@ -649,6 +650,10 @@ async def orchestrate(config: OrchestratorConfig):
             step=progress.step,
         )
 
+        logger.info(
+            f"Sending training batch (step={progress.step}, examples={len(train_examples)}, "
+            f"tokens={num_prefill_tokens + num_decode_tokens})"
+        )
         training_batch_sender.send(training_batch)
 
         # Await and process val results
@@ -840,11 +845,45 @@ async def orchestrate(config: OrchestratorConfig):
         )
 
         reward_mean = by_example.reward.mean().mean()
-        val_reward_str = ""
+
+        # Build per-env reward summary
+        per_env_parts = []
+        for env, env_df in results_df.groupby("task"):
+            env_reward = env_df.groupby("example_id").reward.mean().mean()
+            per_env_parts.append(f"{env}={env_reward:.4f} (n={len(env_df)})")
+        per_env_str = ", ".join(per_env_parts)
+
+        # Build val reward line
+        val_line = ""
         if val_results_df is not None:
             val_reward_mean = val_results_df.groupby("example_id").reward.mean().mean()
-            val_reward_str = f" Val. Reward: {val_reward_mean:.4f} |"
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} |{val_reward_str} Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
+            val_line = f"\n  Val reward: {val_reward_mean:.4f}"
+
+        # Build rollout issues summary from scheduler counters (before they are reset)
+        issue_parts = []
+        total_empty = to_log.get("empty_rollouts/all", 0)
+        total_errored = to_log.get("errored_rollouts/all", 0)
+        cancelled = to_log.get("scheduler/cancelled_rollouts", 0)
+        if total_empty:
+            issue_parts.append(f"empty={total_empty:.1%}")
+        if total_errored:
+            issue_parts.append(f"errored={total_errored:.1%}")
+        if cancelled:
+            issue_parts.append(f"cancelled={cancelled}")
+        issues_str = ", ".join(issue_parts) if issue_parts else "none"
+
+        step_message = (
+            f"Step {progress.step} complete ({step_time:.2f}s)\n"
+            f"  Reward: {reward_mean:.4f} (solve_none={solve_none:.1%}, solve_all={solve_all:.1%}, eff_batch={effective_batch_size:.1%})\n"
+            f"  Per-env: {per_env_str}{val_line}\n"
+            f"  Seq length: mean={by_example.seq_len.mean().mean():.0f}, prefill={by_example.prefill_len.mean().mean():.0f}, decode={by_example.decode_len.mean().mean():.0f}\n"
+            f"  Timing: generate={generate_completions_time:.1f}s, preprocess={parallel_preprocess_time:.1f}s, ckpt={save_ckpt_time:.1f}s"
+            + (f", teacher={teacher_logprobs_time:.1f}s" if teacher_logprobs_time > 0 else "")
+            + f"\n"
+            f"  Scheduler: async_level={scheduler.async_level}, inflight={scheduler.inflight_rollout_count}, off_policy_max={scheduler.max_off_policy_level}\n"
+            f"  Buffer: pool=easy:{to_log.get('pool/easy', 0):.0%}/normal:{to_log.get('pool/normal', 0):.0%}/hard:{to_log.get('pool/hard', 0):.0%}\n"
+            f"  Rollout issues: {issues_str}"
+        )
         logger.success(step_message)
 
         # Increment step

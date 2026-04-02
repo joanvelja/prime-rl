@@ -167,7 +167,7 @@ def reset_logger():
 
 
 class ProgressTracker:
-    """Progress tracker that uses tqdm or logs progress when JSON logging is enabled."""
+    """Progress tracker that logs progress periodically (no tqdm dependency)."""
 
     def __init__(
         self,
@@ -186,25 +186,12 @@ class ProgressTracker:
         self._last_logged_percent = -log_every_percent
         self._postfix: dict[str, Any] = {}
 
-        if self.json_logging:
-            self._pbar = None
-            # Don't log 0% on init - only log on actual progress
-        else:
-            from tqdm import tqdm
-
-            self._pbar = tqdm(total=total, desc=desc)
-
     def update(self, n: int = 1):
         self.current += n
-        if self._pbar is not None:
-            self._pbar.update(n)
-        else:
-            self._log_progress()
+        self._log_progress()
 
     def set_postfix(self, postfix: dict[str, Any]):
         self._postfix = postfix
-        if self._pbar is not None:
-            self._pbar.set_postfix(postfix)
 
     def _log_progress(self):
         percent = int(100 * self.current / self.total) if self.total > 0 else 0
@@ -213,21 +200,23 @@ class ProgressTracker:
             self._last_logged_percent = percent
 
     def _emit_progress(self, percent: int):
-        """Emit progress as structured JSON through loguru (only called in JSON logging mode)."""
-        get_logger().bind(
-            _progress=True,
-            desc=self.desc,
-            current=self.current,
-            total=self.total,
-            percent=percent,
-            step=self.step,
-            postfix=self._postfix if self._postfix else None,
-        ).info("progress")
+        """Emit progress through loguru — structured JSON or plain INFO."""
+        logger = get_logger()
+        if self.json_logging:
+            logger.bind(
+                _progress=True,
+                desc=self.desc,
+                current=self.current,
+                total=self.total,
+                percent=percent,
+                step=self.step,
+                postfix=self._postfix if self._postfix else None,
+            ).info("progress")
+        else:
+            logger.info(f"{self.desc}: {self.current}/{self.total} ({percent}%)")
 
     def close(self):
-        if self._pbar is not None:
-            self._pbar.close()
-        elif self.current > 0 and self.current < self.total:
+        if self.current > 0 and self.current < self.total:
             percent = int(100 * self.current / self.total)
             if percent > self._last_logged_percent:
                 self._emit_progress(percent)

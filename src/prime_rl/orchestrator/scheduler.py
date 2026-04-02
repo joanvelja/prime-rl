@@ -15,7 +15,7 @@ from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
-from prime_rl.utils.logger import ProgressTracker, get_logger
+from prime_rl.utils.logger import get_logger
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     get_broadcast_dir,
@@ -121,6 +121,9 @@ class Scheduler:
         self.errored_rollouts_by_task: dict[str, int] = defaultdict(int)
         self.total_rollouts_by_task: dict[str, int] = defaultdict(int)
         self.last_batch_generation_time = 0.0
+        self._batch_progress = 0
+        self._batch_target = 0
+        self._stats_interval = 10.0
 
     @property
     def uses_token_batching(self) -> bool:
@@ -272,15 +275,13 @@ class Scheduler:
                 f"Orchestrator resumed: checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)"
             )
 
-        self.logger.debug(
-            f"Got new policy with step {next_ckpt_step}. Updating weights and cancelling old rollout requests."
-        )
+        self.logger.info(f"Updating weights to checkpoint {next_ckpt_step}")
 
         update_weights_start_time = time.perf_counter()
         weights_path = get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step)
         await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
         self.update_weights_time = time.perf_counter() - update_weights_start_time
-        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
+        self.logger.debug(f"Updated weights to checkpoint {next_ckpt_step} in {self.update_weights_time:.2f}s")
 
         self.ckpt_step = next_ckpt_step
         if self.lora_name is not None:
@@ -289,6 +290,7 @@ class Scheduler:
 
         self.checkpoint_ready.set()
         await self._update_off_policy()
+        self._log_stats()
 
     async def _get_or_start_policy_update_task(self, next_ckpt_step: int) -> asyncio.Task:
         async with self.policy_update_lock:
@@ -361,6 +363,24 @@ class Scheduler:
         await env_for_task.rubric.score_group(cast(list[vf.State], completed_rollouts))
         return completed_rollouts
 
+    def _log_stats(self):
+        """Log aggregate scheduler state at INFO level."""
+        batch_pct = int(100 * self._batch_progress / self._batch_target) if self._batch_target > 0 else 0
+        unit = "tokens" if self.uses_token_batching else "rollouts"
+        self.logger.info(
+            f"Scheduler: batch={self._batch_progress}/{self._batch_target} {unit} ({batch_pct}%), "
+            f"inflight={self.inflight_rollout_count}/{self.max_inflight_rollouts}, "
+            f"groups={len(self.groups)}, "
+            f"off_policy=max:{self.max_off_policy_level}/mean:{self.mean_off_policy_level:.1f}, "
+            f"ckpt_step={self.ckpt_step}"
+        )
+
+    async def _periodic_stats_loop(self):
+        """Background task that logs scheduler stats every _stats_interval seconds."""
+        while True:
+            await asyncio.sleep(self._stats_interval)
+            self._log_stats()
+
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""
         self.step = step
@@ -380,13 +400,14 @@ class Scheduler:
 
         batch_start_time = time.perf_counter()
 
-        self.logger.debug("Starting to generate batch rollouts")
+        unit = "tokens" if self.uses_token_batching else "rollouts"
+        self.logger.info(f"Generating training batch (step={step}, target={self.batch_target} {unit})")
 
         batch_rollouts: list[vf.RolloutOutput] = []
         batch_progress = 0
-        pbar = ProgressTracker(
-            total=self.batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
-        )
+        self._batch_progress = 0
+        self._batch_target = self.batch_target
+        stats_task = asyncio.create_task(self._periodic_stats_loop())
 
         while batch_progress < self.batch_target:
             await self._fill_inflight_requests()
@@ -420,14 +441,14 @@ class Scheduler:
                     if len(rollout["trajectory"]) == 0:
                         self.empty_rollouts_by_task[task] += 1
                         should_reschedule = True
-                        self.logger.warning(
+                        self.logger.debug(
                             f"Empty trajectory in group {group_id} ({task}), re-scheduling "
                             f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                         )
                     if rollout["error"] is not None:
                         self.errored_rollouts_by_task[task] += 1
                         should_reschedule = True
-                        self.logger.warning(
+                        self.logger.debug(
                             f"Rollout error in group {group_id} ({task}), re-scheduling "
                             f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
                             f"{rollout['error']['error_chain_repr']}"
@@ -457,13 +478,30 @@ class Scheduler:
                 batch_rollouts.extend(accepted_rollouts)
                 progress_increment = self.get_batch_progress_increment(accepted_rollouts)
                 batch_progress += progress_increment
-                pbar.update(progress_increment)
+                self._batch_progress = batch_progress
 
         await self._fill_inflight_requests()
 
         batch_rollouts = self.finalize_batch_rollouts(batch_rollouts)
-        pbar.close()
+        await safe_cancel(stats_task)
         self.last_batch_generation_time = time.perf_counter() - batch_start_time
+
+        # Log aggregate rollout issues for this batch
+        total_empty = sum(self.empty_rollouts_by_task.values())
+        total_errored = sum(self.errored_rollouts_by_task.values())
+        if total_empty or total_errored:
+            parts = []
+            if total_empty:
+                by_task = ", ".join(f"{t}={c}" for t, c in sorted(self.empty_rollouts_by_task.items()))
+                parts.append(f"empty={total_empty} ({by_task})")
+            if total_errored:
+                by_task = ", ".join(f"{t}={c}" for t, c in sorted(self.errored_rollouts_by_task.items()))
+                parts.append(f"errored={total_errored} ({by_task})")
+            self.logger.warning(f"Batch rollout issues (rescheduled): {'; '.join(parts)}")
+
+        self.logger.debug(
+            f"Batch generation complete: {len(batch_rollouts)} rollouts in {self.last_batch_generation_time:.2f}s"
+        )
         return batch_rollouts
 
     async def stop(self) -> None:
