@@ -232,13 +232,6 @@ class MultiPacker(BasePacker):
         selected: list[tuple[int, TrainingSample, int]] = []
         tokens_collected = 0
 
-        buffer_lens = {
-            self.multi_run_manager.idx_2_id[
-                idx
-            ]: f"{len(self.buffers[idx])} {self.multi_run_manager.progress[idx].step}"
-            for idx in self.multi_run_manager.used_idxs
-        }
-        self.logger.debug(f"Buffer lengths: {buffer_lens}, round_robin_position: {self._round_robin_position}")
         while tokens_collected < token_budget:
             # Round-robin until we find a run with work for the current step
             for _ in range(len(self.buffers)):
