@@ -55,6 +55,22 @@ _SAMPLE_SCHEMA = pa.schema(
 )
 
 
+def _get_rollout_token_counts(rollout: vf.RolloutOutput) -> tuple[int, int]:
+    token_usage = rollout.get("token_usage")
+    if not isinstance(token_usage, dict):
+        return 0, 0
+
+    input_tokens = token_usage.get("input_tokens", 0)
+    output_tokens = token_usage.get("output_tokens", 0)
+
+    if not isinstance(input_tokens, (int, float)):
+        input_tokens = 0
+    if not isinstance(output_tokens, (int, float)):
+        output_tokens = 0
+
+    return int(input_tokens), int(output_tokens)
+
+
 class PrimeMonitor(Monitor):
     """Logs to Prime Intellect API."""
 
@@ -316,6 +332,8 @@ class PrimeMonitor(Monitor):
                 for ts in trajectory
             ]
 
+            num_input_tokens, num_output_tokens = _get_rollout_token_counts(rollout)
+
             rows.append(
                 {
                     "run_id": self.run_id,
@@ -333,8 +351,8 @@ class PrimeMonitor(Monitor):
                     "advantage": rollout.get("advantage"),
                     "metrics": _json(rollout.get("metrics")),
                     "timing": _json(rollout.get("timing")),
-                    "num_input_tokens": 0,
-                    "num_output_tokens": 0,
+                    "num_input_tokens": num_input_tokens,
+                    "num_output_tokens": num_output_tokens,
                     "created_at": now,
                 }
             )

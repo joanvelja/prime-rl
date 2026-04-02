@@ -31,6 +31,7 @@ def _build_rollout(*, example_id: int, reward: float, task: str) -> dict:
         "advantage": reward / 2,
         "metrics": {"accuracy": reward},
         "timing": {"generation_ms": 12.5},
+        "token_usage": {"input_tokens": 123.0, "output_tokens": 45.0},
     }
 
 
@@ -56,6 +57,8 @@ def test_rollouts_to_parquet_bytes_preserves_all_rollouts_and_ids():
     assert [row["sample_id"] for row in rows] == [0, 1]
     assert all(row["run_id"] == "run-123" for row in rows)
     assert all(row["step"] == 7 for row in rows)
+    assert all(row["num_input_tokens"] == 123 for row in rows)
+    assert all(row["num_output_tokens"] == 45 for row in rows)
     assert json.loads(rows[0]["prompt"])[0]["content"] == "prompt-101"
     assert json.loads(rows[1]["completion"])[0]["content"] == "completion-202"
 
