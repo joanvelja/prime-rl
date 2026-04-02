@@ -6,8 +6,8 @@ import torch.nn as nn
 
 from prime_rl.configs.trainer import LoRAConfig
 from prime_rl.trainer.models.layers.lora import MultiLoRALinear, MultiLoRAModule
-from prime_rl.trainer.models.layers.lora.fused_moe import MultiLoRAPERFTE
 from prime_rl.trainer.models.layers.lora.multi_moe import MultiLoRAGroupedExperts
+from prime_rl.trainer.models.layers.lora.multi_perfte import MultiLoRAPERFTE
 from prime_rl.trainer.models.layers.moe import GroupedExperts
 from prime_rl.trainer.runs import get_multi_run_manager
 from prime_rl.utils.logger import get_logger
