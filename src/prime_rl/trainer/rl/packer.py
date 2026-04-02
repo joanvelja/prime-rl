@@ -288,6 +288,13 @@ class MultiPacker(BasePacker):
         self.multi_run_manager.progress[run_idx].total_tokens += num_tokens
         self.multi_run_manager.progress[run_idx].total_samples += num_samples
 
+    def get_buffer_stats(self) -> tuple[dict[str, int], int]:
+        """Return per-run buffer lengths and round-robin position for metrics."""
+        buffer_lens = {
+            self.multi_run_manager.idx_2_id[idx]: len(self.buffers[idx]) for idx in self.multi_run_manager.used_idxs
+        }
+        return buffer_lens, self._round_robin_position
+
     def pack(self):
         """Pack samples from buffers using round-robin fair scheduling."""
         self._get_batch()

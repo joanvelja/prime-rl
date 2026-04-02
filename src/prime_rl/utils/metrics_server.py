@@ -143,8 +143,16 @@ class MetricsServer(HealthServer):
             ["run"],
             registry=self._registry,
         )
+        # Packer metrics
+        self._packer_buffer_length = Gauge(
+            "trainer_packer_buffer_length", "Number of samples in packer buffer", ["run"], registry=self._registry
+        )
+        self._packer_round_robin_position = Gauge(
+            "trainer_packer_round_robin_position", "Current round-robin index in packer", registry=self._registry
+        )
         # Track known run labels for cleanup
         self._known_runs: set[str] = set()
+        self._known_packer_runs: set[str] = set()
 
     def _make_handler(self) -> type[BaseHTTPRequestHandler]:
         """Create handler with /metrics and /health endpoints."""
@@ -256,3 +264,21 @@ class MetricsServer(HealthServer):
             self._run_ready.labels(run=run.run_id).set(1 if run.ready else 0)
 
         self._known_runs = current_runs
+
+    def update_packer(self, buffer_lengths: dict[str, int], round_robin_position: int) -> None:
+        """Update packer buffer metrics.
+
+        Args:
+            buffer_lengths: Mapping of run_id to number of buffered samples
+            round_robin_position: Current round-robin index
+        """
+        self._packer_round_robin_position.set(round_robin_position)
+
+        current_runs = set(buffer_lengths.keys())
+        for run_id in self._known_packer_runs - current_runs:
+            self._packer_buffer_length.remove(run_id)
+
+        for run_id, length in buffer_lengths.items():
+            self._packer_buffer_length.labels(run=run_id).set(length)
+
+        self._known_packer_runs = current_runs

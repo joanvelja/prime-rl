@@ -17,6 +17,7 @@ from prime_rl.trainer.optim import setup_optimizer, setup_multi_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
+from prime_rl.trainer.rl.packer import MultiPacker
 from prime_rl.utils.cp import (
     gather_for_cp,
     gather_for_cp_wo_grad,
@@ -596,6 +597,9 @@ def train(config: TrainerConfig):
                 runs_max=multi_run_manager.max_runs,
                 run_stats=run_stats,
             )
+            if isinstance(dataloader, DataLoader) and isinstance(dataloader.packer, MultiPacker):
+                buffer_lengths, rr_pos = dataloader.packer.get_buffer_stats()
+                metrics_server.update_packer(buffer_lengths, rr_pos)
 
         progress.step += 1
         is_first_step = False
