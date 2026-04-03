@@ -95,6 +95,24 @@ class RepetitionFilter:
         return FilterResult(detected=False)
 
 
+@dataclass
+class ZeroAdvantageFilter:
+    """Flags rollouts with zero advantage.
+
+    This filter is applied after advantages are computed and checks if the
+    rollout's advantage field is zero.
+    """
+
+    name: str
+    enforce: bool = True
+
+    def check(self, rollout: vf.RolloutOutput) -> FilterResult:
+        advantage = rollout.get("advantage")
+        if advantage is not None and advantage == 0.0:
+            return FilterResult(detected=True)
+        return FilterResult(detected=False)
+
+
 def setup_filter(config: FilterConfig, vocab_size: int) -> RolloutFilter:
     """Create a RolloutFilter from a filter config."""
     if config.type == "gibberish":

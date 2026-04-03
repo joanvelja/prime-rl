@@ -573,6 +573,18 @@ async def orchestrate(config: OrchestratorConfig):
             config.advantage,
         )
 
+        # Store advantages on rollouts for filtering
+        for rollout, advantage in zip(train_rollouts, advantages):
+            rollout["advantage"] = advantage
+
+        # Apply zero advantage filter if configured
+        if config.filter_zero_advantages:
+            from prime_rl.orchestrator.filters import ZeroAdvantageFilter
+
+            zero_advantage_filter = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
+            zero_advantage_metrics = apply_filters([zero_advantage_filter], train_rollouts)
+            filter_metrics.update(zero_advantage_metrics)
+
         # Convert rollouts to training samples
         parallel_preprocess_start = time.perf_counter()
 
