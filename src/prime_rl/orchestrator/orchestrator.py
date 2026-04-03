@@ -1,7 +1,5 @@
 import asyncio
-import atexit
 import gc
-import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -52,10 +50,6 @@ from prime_rl.orchestrator.vf_utils import (
     get_completion_len,
     get_seq_len,
     intercept_vf_logging,
-    resolve_num_workers,
-    setup_env_client,
-    spawn_env_server,
-    wait_for_env_servers,
 )
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -72,7 +66,6 @@ from prime_rl.utils.utils import (
     get_env_ids_to_install,
     install_env,
     resolve_latest_ckpt_step,
-    strip_env_version,
     to_col_format,
 )
 
@@ -174,127 +167,29 @@ async def orchestrate(config: OrchestratorConfig):
     train_envs = Envs(config.train_envs)
     logger.info(f"Loaded {len(train_envs)} training environment(s): {', '.join(train_envs.names)}")
 
-    # train_env_deferred_group_scoring_tasks = (
-    #     {name for name in train_env_names if task_uses_group_scoring(train_envs.get_env(name), name)}
-    #     if verification_enabled
-    #     else set()
-    # )
-    # for train_env_name, env_cfg in zip(train_env_names, config.env):
-    #     # Disable server-side scoring for envs with deferred group scoring (scored client-side after group completes)
-    #     if train_env_name in train_env_deferred_group_scoring_tasks:
-    #         env_cfg.extra_env_kwargs["score_rollouts"] = False
-    # if not verification_enabled:
-    #     logger.info("Verification disabled; all training envs will skip scoring.")
-    # elif train_env_deferred_group_scoring_tasks:
-    #     deferred_tasks = ", ".join(sorted(train_env_deferred_group_scoring_tasks))
-    #     logger.info(
-    #         f"Deferred group scoring enabled for training tasks: {deferred_tasks}. "
-    #         "Rollouts run individually and are scored once each group completes."
-    #     )
-
-    train_env_addresses = []
-    env_processes: list[mp.Process] = []
-
-    def _cleanup_env_processes():
-        if not env_processes:
-            return
-        logger.info(f"Shutting down {len(env_processes)} env server(s), waiting for sandbox cleanup...")
-        for proc in env_processes:
-            proc.terminate()
-        for proc in env_processes:
-            proc.join(timeout=25)
-            if proc.is_alive():
-                logger.warning(f"Env server {proc.pid} did not exit after 25s, force killing")
-                proc.kill()
-                proc.join(timeout=5)
-
-    atexit.register(_cleanup_env_processes)
-
-    for env_cfg, env_name in zip(train_envs.configs, train_envs.names):
-        if env_cfg.address is None:
-            env_id = strip_env_version(env_cfg.id)
-            num_workers = resolve_num_workers(env_cfg.num_workers, config.max_inflight_rollouts)
-            log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "train" / env_name).as_posix()
-            address, process = spawn_env_server(
-                env_id=env_id,
-                env_args=env_cfg.args,
-                extra_env_kwargs=env_cfg.extra_env_kwargs,
-                num_workers=num_workers,
-                log_level=config.log.vf_level,
-                log_dir=log_dir,
-                json_logging=config.log.json_logging,
-            )
-            logger.info(f"Spawned env server for {env_name} with {num_workers} worker(s)")
-            env_processes.append(process)
-        else:
-            address = env_cfg.address
-        logger.info(f"Connecting train environment {env_name} to server at {address}")
-        train_env_addresses.append(address)
-    train_env_clients = [
-        setup_env_client(address=address, name=name) for name, address in zip(train_envs.names, train_env_addresses)
-    ]
-
-    logger.info("Waiting for train environment servers to be ready")
-    await wait_for_env_servers(train_env_clients)
-    logger.success("Train environment servers ready")
-
-    # this puts all train envs into server mode
-    # all calls to run_rollout and run_group will be routed to the server via the env client
-    for name, env_client in zip(train_envs.names, train_env_clients):
-        train_envs.get_env(name).env_client = env_client
+    train_envs.spawn(
+        log_dir=get_log_dir(config.output_dir.parent) / "envs" / "train",
+        max_concurrent=config.max_inflight_rollouts,
+        log_level=config.log.vf_level,
+        json_logging=config.log.json_logging,
+    )
+    await train_envs.connect()
+    logger.success("Train environments ready")
 
     if config.eval:
-        eval_envs = Envs(config.eval.env)
-        eval_env_names = eval_envs.names
-        eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
-        eval_env_addresses = []
+        logger.info("Loading eval environments")
+        eval_envs = Envs(config.eval_envs)
+        logger.info(f"Loaded {len(eval_envs)} eval environment(s): {', '.join(eval_envs.names)}")
 
-        for env_cfg, eval_env_name in zip(config.eval.env, eval_env_names):
-            if env_cfg.address is None:
-                env_id = strip_env_version(env_cfg.id)
-                num_examples = env_cfg.num_examples
-                rollouts_per_example = env_cfg.rollouts_per_example
-                if num_examples == -1:
-                    max_concurrent = 1024
-                    logger.warning(
-                        f"Eval env '{eval_env_name}' uses all examples (num_examples=-1). "
-                        f"Defaulting max_concurrent={max_concurrent} for worker scaling."
-                    )
-                else:
-                    max_concurrent = num_examples * rollouts_per_example
-                num_workers = resolve_num_workers(env_cfg.num_workers, max_concurrent)
-                log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "eval" / eval_env_name).as_posix()
-                address, process = spawn_env_server(
-                    env_id=env_id,
-                    env_args=env_cfg.args,
-                    extra_env_kwargs=env_cfg.extra_env_kwargs,
-                    num_workers=num_workers,
-                    log_level=config.log.vf_level,
-                    log_dir=log_dir,
-                    json_logging=config.log.json_logging,
-                )
-                logger.info(f"Spawned eval env server for {eval_env_name} with {num_workers} worker(s)")
-                env_processes.append(process)
-            else:
-                address = env_cfg.address
-            logger.info(f"Connecting eval environment {eval_env_name} to server at {address}")
-            eval_env_addresses.append(address)
-
-        eval_env_clients = [
-            setup_env_client(address=address, name=name) for name, address in zip(eval_env_names, eval_env_addresses)
-        ]
-
-        logger.info("Waiting for eval environment servers to be ready")
-        await wait_for_env_servers(eval_env_clients)
-        logger.success("Eval environment servers ready")
-
-        # this puts all eval envs into server mode
-        for name, eval_env_client in zip(eval_env_names, eval_env_clients):
-            eval_envs.get_env(name).env_client = eval_env_client
+        eval_envs.spawn(
+            log_dir=get_log_dir(config.output_dir.parent) / "envs" / "eval",
+            log_level=config.log.vf_level,
+            json_logging=config.log.json_logging,
+        )
+        await eval_envs.connect()
+        logger.success("Eval environments ready")
     else:
         eval_envs = None
-        eval_env_names: list[str] = []
-        eval_sampling_args = {}
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
@@ -322,7 +217,6 @@ async def orchestrate(config: OrchestratorConfig):
         tasks_per_minute=config.tasks_per_minute,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
-        deferred_group_scoring_tasks=set(),
         config=config,
     )
     scheduler.model_name = rollout_model_name
@@ -448,7 +342,6 @@ async def orchestrate(config: OrchestratorConfig):
                 eval_base_model=config.eval.eval_base_model,
             )
 
-        if eval_ckpt_step is not None:
             last_eval_step = ckpt_step
             if eval_ckpt_step != ckpt_step:
                 logger.info(f"Running evals for interval step {eval_ckpt_step} (current ckpt_step={ckpt_step})")
@@ -464,6 +357,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
+            eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
             results = await asyncio.gather(
                 *[
                     evaluate_env(
@@ -478,8 +372,9 @@ async def orchestrate(config: OrchestratorConfig):
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
-                    for eval_env_name, eval_env_config in zip(eval_env_names, config.eval.env)
-                    for eval_env in [eval_env_set.get_env(eval_env_name)]
+                    for eval_env, eval_env_name, eval_env_config in zip(
+                        eval_envs.envs.values(), eval_envs.names, eval_envs.configs
+                    )
                 ]
             )
 
@@ -792,8 +687,9 @@ async def orchestrate(config: OrchestratorConfig):
         if heart is not None:
             heart.beat()
 
-    if config.eval:
+    if config.eval and eval_envs is not None:
         logger.info("Running final evals")
+        eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
         results = await asyncio.gather(
             *[
                 evaluate_env(
@@ -802,14 +698,15 @@ async def orchestrate(config: OrchestratorConfig):
                     get_client=inference_pool.get_next_client,
                     model_name=scheduler.model_name,
                     sampling_args=eval_sampling_args,
-                    num_examples=eval_env_config.num_examples or config.eval.num_examples,
-                    rollouts_per_example=eval_env_config.rollouts_per_example or config.eval.rollouts_per_example,
+                    num_examples=eval_env_config.num_examples,
+                    rollouts_per_example=eval_env_config.rollouts_per_example,
                     max_retries=eval_env_config.max_retries,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
-                for eval_env_name, eval_env_config in zip(eval_env_names, config.eval.env)
-                for eval_env in [eval_env_set.get_env(eval_env_name)]
+                for eval_env, eval_env_name, eval_env_config in zip(
+                    eval_envs.envs.values(), eval_envs.names, eval_envs.configs
+                )
             ]
         )
 
@@ -841,8 +738,9 @@ async def orchestrate(config: OrchestratorConfig):
     event_loop_lag_monitor_task.cancel()
 
     # Shutdown env processes (also registered as atexit handler for crash safety)
-    atexit.unregister(_cleanup_env_processes)
-    _cleanup_env_processes()
+    train_envs.shutdown()
+    if eval_envs is not None:
+        eval_envs.shutdown()
 
     logger.success("Orchestrator finished.")
 

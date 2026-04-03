@@ -307,13 +307,6 @@ class EnvConfig(BaseConfig):
         ),
     ] = True
 
-    max_concurrent: Annotated[
-        int | None,
-        Field(
-            description="Maximum number of concurrent rollouts for this environment. If None, will not limit concurrency.",
-        ),
-    ] = None
-
     ratio: Annotated[
         float | None,
         Field(

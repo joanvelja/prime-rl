@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 import verifiers as vf
 from aiolimiter import AsyncLimiter
@@ -13,7 +13,7 @@ from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet as Buffer
 from prime_rl.orchestrator.envs import Envs
 from prime_rl.orchestrator.utils import get_sampling_args
-from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
+from prime_rl.orchestrator.vf_utils import get_seq_len, run_group, run_rollout, task_uses_group_scoring
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import ProgressTracker, get_logger
@@ -69,7 +69,6 @@ class Scheduler:
         tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
-        deferred_group_scoring_tasks: set[str] | None = None,
     ):
         self.logger = get_logger()
         if tasks_per_minute is not None:
@@ -98,10 +97,15 @@ class Scheduler:
         self.inference_pool = inference_pool
 
         self.max_retries_by_task = {env.resolved_name: env.max_retries for env in config.env}
-        self.deferred_group_scoring_tasks = set(deferred_group_scoring_tasks or ())
-        if self.deferred_group_scoring_tasks:
-            task_list = ", ".join(sorted(self.deferred_group_scoring_tasks))
-            self.logger.info(f"Deferred group scoring active for task(s): {task_list}")
+
+        # Detect envs with group rubrics — these use run_group instead of individual run_rollout
+        self.group_scoring_tasks: set[str] = set()
+        for name in envs.names:
+            if task_uses_group_scoring(envs.get_env(name), name):
+                self.group_scoring_tasks.add(name)
+        if self.group_scoring_tasks:
+            task_list = ", ".join(sorted(self.group_scoring_tasks))
+            self.logger.info(f"Group rollout scoring active for task(s): {task_list}")
 
         # Track in-flight requests: task -> info
         self.inflight_requests: dict[asyncio.Task, InflightRolloutInfo] = {}
@@ -186,14 +190,17 @@ class Scheduler:
         await safe_cancel_all(tasks_to_cancel)
         return len(tasks_to_cancel)
 
+    def _uses_group_scoring(self, env_name: str) -> bool:
+        return env_name in self.group_scoring_tasks
+
     async def schedule_rollout(self, group_id: int):
-        """Asynchronously schedules a rollout request."""
+        """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
         if self.rate_limiter:
             await self.rate_limiter.acquire()
         group = self.groups.get(group_id)
         if group is None or group.rollouts_to_schedule <= 0:
             return
-        group.rollouts_to_schedule -= 1
+
         if group.pinned_client is not None:
             client_config = group.pinned_client
         else:
@@ -201,19 +208,37 @@ class Scheduler:
             if group_id not in self.groups:
                 return
             group.pinned_client = client_config
+
         env_name = group.example["env_name"]
         env = self.envs.get_env(env_name)
-        run_rollout_task = asyncio.create_task(
-            run_rollout(
-                env=env,
-                client=client_config,
-                example=group.example,
-                model_name=self.model_name,
-                sampling_args=self.sampling_args,
-                max_retries=self.max_retries_by_task.get(env_name, 0),
+
+        if self._uses_group_scoring(env_name):
+            # Schedule all rollouts as a single group request (generates + scores together)
+            group.rollouts_to_schedule = 0
+            task = asyncio.create_task(
+                run_group(
+                    env=env,
+                    client=client_config,
+                    example=group.example,
+                    model_name=self.model_name,
+                    rollouts_per_example=self.rollouts_per_example,
+                    sampling_args=self.sampling_args,
+                    max_retries=self.max_retries_by_task.get(env_name, 0),
+                )
             )
-        )
-        self.inflight_requests[run_rollout_task] = InflightRolloutInfo(
+        else:
+            group.rollouts_to_schedule -= 1
+            task = asyncio.create_task(
+                run_rollout(
+                    env=env,
+                    client=client_config,
+                    example=group.example,
+                    model_name=self.model_name,
+                    sampling_args=self.sampling_args,
+                    max_retries=self.max_retries_by_task.get(env_name, 0),
+                )
+            )
+        self.inflight_requests[task] = InflightRolloutInfo(
             off_policy_steps=0, client_config=client_config, env_name=env_name, group_id=group_id
         )
 
@@ -351,19 +376,6 @@ class Scheduler:
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
 
-    def _should_defer_group_scoring(self, env_name: str) -> bool:
-        return env_name in self.deferred_group_scoring_tasks and self.config.verification.enabled
-
-    async def _score_group_if_deferred(self, completed_rollouts: list[vf.RolloutOutput]) -> list[vf.RolloutOutput]:
-        if not completed_rollouts:
-            return completed_rollouts
-        env_name = completed_rollouts[0]["env_name"]
-        if not self._should_defer_group_scoring(env_name):
-            return completed_rollouts
-        env = self.envs.get_env(env_name)
-        await env.rubric.score_group(cast(list[vf.State], completed_rollouts))
-        return completed_rollouts
-
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""
         self.step = step
@@ -410,41 +422,50 @@ class Scheduler:
                     continue
 
                 group_id = rollout_info.group_id
+                env_name = rollout_info.env_name
 
                 try:
                     group = self.groups.get(group_id)
                     if group is None:
                         continue
-                    rollout = finished_task.result()
 
-                    env_name = rollout_info.env_name
-                    self.total_rollouts_by_task[env_name] += 1
-                    should_reschedule = False
-                    if len(rollout["trajectory"]) == 0:
-                        self.empty_rollouts_by_task[env_name] += 1
-                        should_reschedule = True
-                        self.logger.warning(
-                            f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
-                            f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
-                        )
-                    if rollout["error"] is not None:
-                        self.errored_rollouts_by_task[env_name] += 1
-                        should_reschedule = True
-                        self.logger.warning(
-                            f"Rollout error in group {group_id} ({env_name}), re-scheduling "
-                            f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
-                            f"{rollout['error']['error_chain_repr']}"
-                        )
-                    if should_reschedule:
-                        group.rollouts_to_schedule += 1
-                        continue
+                    if self._uses_group_scoring(env_name):
+                        # run_group returns all rollouts at once, already scored
+                        group_rollouts: list[vf.RolloutOutput] = finished_task.result()
+                        self.total_rollouts_by_task[env_name] += len(group_rollouts)
+                        for rollout in group_rollouts:
+                            rollout["env_name"] = env_name
+                        completed_rollouts = group_rollouts
+                        self.groups.pop(group_id, None)
+                    else:
+                        rollout = finished_task.result()
+                        self.total_rollouts_by_task[env_name] += 1
+                        should_reschedule = False
+                        if len(rollout["trajectory"]) == 0:
+                            self.empty_rollouts_by_task[env_name] += 1
+                            should_reschedule = True
+                            self.logger.warning(
+                                f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
+                                f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
+                            )
+                        if rollout["error"] is not None:
+                            self.errored_rollouts_by_task[env_name] += 1
+                            should_reschedule = True
+                            self.logger.warning(
+                                f"Rollout error in group {group_id} ({env_name}), re-scheduling "
+                                f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
+                                f"{rollout['error']['error_chain_repr']}"
+                            )
+                        if should_reschedule:
+                            group.rollouts_to_schedule += 1
+                            continue
 
-                    rollout["env_name"] = env_name
-                    group.completed_rollouts.append(rollout)
-                    if len(group.completed_rollouts) < self.rollouts_per_example:
-                        continue
-                    completed_rollouts = self.groups.pop(group_id).completed_rollouts
-                    completed_rollouts = await self._score_group_if_deferred(completed_rollouts)
+                        rollout["env_name"] = env_name
+                        group.completed_rollouts.append(rollout)
+                        if len(group.completed_rollouts) < self.rollouts_per_example:
+                            continue
+                        completed_rollouts = self.groups.pop(group_id).completed_rollouts
+
                 except asyncio.CancelledError:
                     if group_id is not None:
                         await self.drop_group(group_id)
