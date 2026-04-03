@@ -127,8 +127,9 @@ class BufferSet:
             f"in {len(self.env_names)} environment(s)"
         )
 
-        if config.env_ratios is not None:
-            env_ratio = mean_normalize(config.env_ratios)
+        env_ratios = [env.ratio for env in envs.configs]
+        if any(r is not None for r in env_ratios):
+            env_ratio = mean_normalize(env_ratios)
             self.env_probs = dict(zip(self.env_names, env_ratio))
             self.logger.debug(
                 f"Sampling buffer according to provided environment ratios "

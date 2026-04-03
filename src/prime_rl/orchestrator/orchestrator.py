@@ -3,7 +3,6 @@ import atexit
 import gc
 import multiprocessing as mp
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
@@ -34,7 +33,7 @@ import pandas as pd
 import verifiers as vf
 from transformers import AutoProcessor, AutoTokenizer
 
-from prime_rl.configs.orchestrator import BufferConfig, OrchestratorConfig
+from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.envs import Envs
@@ -50,7 +49,6 @@ from prime_rl.orchestrator.utils import (
     setup_external_rollout_model,
 )
 from prime_rl.orchestrator.vf_utils import (
-    generate,
     get_completion_len,
     get_seq_len,
     intercept_vf_logging,
@@ -229,16 +227,11 @@ async def orchestrate(config: OrchestratorConfig):
             logger.info(f"Spawned env server for {env_name} with {num_workers} worker(s)")
             env_processes.append(process)
         else:
-            if env_name in train_env_deferred_group_scoring_tasks:
-                logger.warning(
-                    f"Training env {env_name} uses external server at {env_cfg.server.address}. "
-                    "Ensure that server was started with score_rollouts=False."
-                )
-            address = env_cfg.server.address
+            address = env_cfg.address
         logger.info(f"Connecting train environment {env_name} to server at {address}")
         train_env_addresses.append(address)
     train_env_clients = [
-        setup_env_client(address=address, name=name) for name, address in zip(train_env_names, train_env_addresses)
+        setup_env_client(address=address, name=name) for name, address in zip(train_envs.names, train_env_addresses)
     ]
 
     logger.info("Waiting for train environment servers to be ready")
@@ -247,7 +240,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # this puts all train envs into server mode
     # all calls to run_rollout and run_group will be routed to the server via the env client
-    for name, env_client in zip(train_env_names, train_env_clients):
+    for name, env_client in zip(train_envs.names, train_env_clients):
         train_envs.get_env(name).env_client = env_client
 
     if config.eval:
@@ -257,7 +250,7 @@ async def orchestrate(config: OrchestratorConfig):
         eval_env_addresses = []
 
         for env_cfg, eval_env_name in zip(config.eval.env, eval_env_names):
-            if env_cfg.server.address is None:
+            if env_cfg.address is None:
                 env_id = strip_env_version(env_cfg.id)
                 num_examples = env_cfg.num_examples
                 rollouts_per_example = env_cfg.rollouts_per_example
@@ -269,7 +262,7 @@ async def orchestrate(config: OrchestratorConfig):
                     )
                 else:
                     max_concurrent = num_examples * rollouts_per_example
-                num_workers = resolve_num_workers(env_cfg.server.num_workers, max_concurrent)
+                num_workers = resolve_num_workers(env_cfg.num_workers, max_concurrent)
                 log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "eval" / eval_env_name).as_posix()
                 address, process = spawn_env_server(
                     env_id=env_id,
@@ -283,7 +276,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info(f"Spawned eval env server for {eval_env_name} with {num_workers} worker(s)")
                 env_processes.append(process)
             else:
-                address = env_cfg.server.address
+                address = env_cfg.address
             logger.info(f"Connecting eval environment {eval_env_name} to server at {address}")
             eval_env_addresses.append(address)
 
@@ -306,11 +299,6 @@ async def orchestrate(config: OrchestratorConfig):
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
     buffer = BufferSet(train_envs, config.buffer)
-    if config.val is not None:
-        val_buffer_config = BufferConfig(env_ratios=config.buffer.env_ratios)
-        val_buffer = BufferSet(train_envs, val_buffer_config, eval=True)
-    else:
-        val_buffer = None
 
     # Get checkpoint manager
     logger.info(f"Initializing checkpoint manager ({config.ckpt})")
@@ -334,7 +322,7 @@ async def orchestrate(config: OrchestratorConfig):
         tasks_per_minute=config.tasks_per_minute,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
-        deferred_group_scoring_tasks=train_env_deferred_group_scoring_tasks,
+        deferred_group_scoring_tasks=set(),
         config=config,
     )
     scheduler.model_name = rollout_model_name
@@ -508,30 +496,6 @@ async def orchestrate(config: OrchestratorConfig):
         scheduler.set_sampling_args(sampling_args)
         train_task = asyncio.create_task(scheduler.generate_batch(step=progress.step))
 
-        # Schedule running validation at the specified interval
-        if val_buffer and config.val and progress.step % config.val.interval == 0:
-            logger.info(f"Running validation for step {progress.step}")
-            val_examples = val_buffer.sample_examples(config.val.num_examples)
-            # Group val examples by env_name so each generate() call uses the correct env
-            val_examples_by_env: dict[str, list[dict]] = defaultdict(list)
-            for ex in val_examples:
-                val_examples_by_env[ex["env_name"]].append(ex)
-            val_tasks = [
-                generate(
-                    env=train_env_set.get_env(env_name),
-                    model_name=scheduler.model_name,
-                    examples=env_examples,
-                    rollouts_per_example=config.val.rollouts_per_example,
-                    sampling_args=sampling_args,
-                    clients=inference_pool.clients,
-                    pbar_description=f"Generating rollouts (val/{env_name})",
-                )
-                for env_name, env_examples in val_examples_by_env.items()
-            ]
-            val_task = asyncio.create_task(asyncio.gather(*val_tasks))
-        else:
-            val_task = asyncio.create_task(asyncio.sleep(0))  # Dummy task
-
         # Await train rollouts
         await train_task
         generate_completions_time = scheduler.last_batch_generation_time
@@ -649,15 +613,6 @@ async def orchestrate(config: OrchestratorConfig):
 
         training_batch_sender.send(training_batch)
 
-        # Await and process val results
-        await val_task
-        val_result = val_task.result()
-        # val_result is either a list of lists (from gather) or None-like (from sleep)
-        if isinstance(val_result, list):
-            val_outputs = [output for outputs in val_result for output in outputs]
-        else:
-            val_outputs = None
-
         step_time = time.perf_counter() - step_start_time
 
         # Gather metrics in dataframes
@@ -680,18 +635,6 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Separate DataFrame for env reward function metrics to avoid column name collisions
         metrics_df = pd.DataFrame([rollout["metrics"] for rollout in train_rollouts])
-
-        val_results_df = (
-            pd.DataFrame(
-                {
-                    "example_id": [rollout["example_id"] for rollout in val_outputs],
-                    "env_name": [rollout["env_name"] for rollout in val_outputs],
-                    "reward": [rollout["reward"] for rollout in val_outputs],
-                }
-            )
-            if val_outputs is not None
-            else None
-        )
 
         # Update progress metrics
         num_tokens = int(results_df.seq_len.sum())
@@ -815,18 +758,6 @@ async def orchestrate(config: OrchestratorConfig):
             for metric in metrics_df.columns:
                 to_log[f"metrics/{env}/{metric}"] = env_metrics_df.groupby(env_df["example_id"])[metric].mean().mean()
 
-        # Optionally, add val metrics
-        if val_results_df is not None:
-            val_by_example = val_results_df.groupby("example_id")
-            to_log["val/reward/all/mean"] = val_by_example.reward.mean().mean()
-            to_log["val/reward/all/max"] = val_by_example.reward.mean().max()
-            to_log["val/reward/all/min"] = val_by_example.reward.mean().min()
-            for env, env_df in val_results_df.groupby("env_name"):
-                env_by_example = env_df.groupby("example_id")
-                to_log[f"val/reward/{env}/mean"] = env_by_example.reward.mean().mean()
-                to_log[f"val/reward/{env}/max"] = env_by_example.reward.mean().max()
-                to_log[f"val/reward/{env}/min"] = env_by_example.reward.mean().min()
-
         # Log metrics to monitor(s)
         monitor.log(to_log, step=progress.step)
 
@@ -843,11 +774,7 @@ async def orchestrate(config: OrchestratorConfig):
         )
 
         reward_mean = by_example.reward.mean().mean()
-        val_reward_str = ""
-        if val_results_df is not None:
-            val_reward_mean = val_results_df.groupby("example_id").reward.mean().mean()
-            val_reward_str = f" Val. Reward: {val_reward_mean:.4f} |"
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} |{val_reward_str} Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
         logger.success(step_message)
 
         # Increment step
@@ -856,7 +783,7 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Free large per-step objects to prevent memory accumulation
         del train_rollouts, train_examples, training_batch, vlm_cache
-        del results_df, metrics_df, val_results_df
+        del results_df, metrics_df
         gc.collect()
 
         event_loop_lag_monitor.reset()

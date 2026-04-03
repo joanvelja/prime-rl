@@ -5,7 +5,7 @@ import pytest
 import verifiers as vf
 from datasets import Dataset
 
-from prime_rl.configs.orchestrator import BufferConfig
+from prime_rl.configs.orchestrator import BufferConfig, EnvConfig
 from prime_rl.orchestrator.buffer import BufferSet
 from prime_rl.orchestrator.envs import Envs
 
@@ -49,6 +49,7 @@ def dummy_envs(mock_openai_client, dummy_dataset) -> Envs:
     )
     result = Envs.__new__(Envs)
     result.envs = {"env_a": env_a, "env_b": env_b}
+    result.configs = [EnvConfig(id="env_a", name="env_a"), EnvConfig(id="env_b", name="env_b")]
     return result
 
 
@@ -145,8 +146,14 @@ def test_buffer_save_load_with_conversion(dummy_envs, make_rollouts, tmp_path):
     assert get_normal_count(new_buffer) == 8
 
 
-def test_buffer_env_ratios(dummy_envs):
-    buffer = BufferSet(dummy_envs, BufferConfig(env_ratios=[0.8, 0.2]))
+def test_buffer_env_ratios(mock_openai_client, dummy_dataset):
+    env_a = vf.SingleTurnEnv(client=mock_openai_client, model="test-model", dataset=dummy_dataset, rubric=vf.Rubric())
+    env_b = vf.SingleTurnEnv(client=mock_openai_client, model="test-model", dataset=dummy_dataset, rubric=vf.Rubric())
+    envs = Envs.__new__(Envs)
+    envs.envs = {"env_a": env_a, "env_b": env_b}
+    envs.configs = [EnvConfig(id="env_a", name="env_a", ratio=0.8), EnvConfig(id="env_b", name="env_b", ratio=0.2)]
+
+    buffer = BufferSet(envs, BufferConfig())
     assert buffer.env_buffers["env_a"].num_normal == 5
     assert buffer.env_buffers["env_b"].num_normal == 5
 
@@ -156,11 +163,16 @@ def test_buffer_env_ratios(dummy_envs):
 
 
 def test_buffer_env_ratios_validation():
-    """BufferConfig validates that all env_ratios are positive."""
+    """Validates that env ratios must be positive and all-or-nothing."""
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match="All env_ratios must be positive"):
-        BufferConfig(env_ratios=[0.5, -0.3, 0.2])
+    from prime_rl.configs.orchestrator import TrainEnvsConfig
+
+    with pytest.raises(ValidationError):
+        EnvConfig(id="env_a", ratio=-0.3)
+
+    with pytest.raises(ValidationError, match="mix of set and unset"):
+        TrainEnvsConfig(env=[EnvConfig(id="a", ratio=0.5), EnvConfig(id="b")])
 
 
 def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
@@ -174,6 +186,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
     )
     original_env_set = Envs.__new__(Envs)
     original_env_set.envs = {"env_a": original_env}
+    original_env_set.configs = [EnvConfig(id="env_a", name="env_a")]
 
     buffer = BufferSet(original_env_set, BufferConfig(easy_threshold=1.0))
     eb = buffer.env_buffers["env_a"]
@@ -191,6 +204,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
     )
     new_env_set = Envs.__new__(Envs)
     new_env_set.envs = {"env_b": new_env}
+    new_env_set.configs = [EnvConfig(id="env_b", name="env_b")]
 
     new_buffer = BufferSet(new_env_set, BufferConfig())
     new_buffer.load(tmp_path / "buffer")

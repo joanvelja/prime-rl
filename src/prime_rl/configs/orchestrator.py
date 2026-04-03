@@ -314,6 +314,14 @@ class EnvConfig(BaseConfig):
         ),
     ] = None
 
+    ratio: Annotated[
+        float | None,
+        Field(
+            gt=0,
+            description="Sampling ratio for this environment in the buffer. If None for all envs, samples uniformly across all available problems. If set, ratios across all envs must sum to 1.",
+        ),
+    ] = None
+
     max_retries: Annotated[
         int,
         Field(
@@ -367,6 +375,15 @@ class TrainEnvsConfig(BaseConfig):
             raise ValueError(
                 f"Duplicate training environment names: {set(duplicates)}. Each env must have a unique name."
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_env_ratios(self):
+        ratios = [env.ratio for env in self.env]
+        if all(r is None for r in ratios):
+            return self
+        if any(r is None for r in ratios):
+            raise ValueError("Either all envs must have a ratio or none of them. Got a mix of set and unset ratios.")
         return self
 
 
@@ -490,16 +507,6 @@ class BufferConfig(BaseConfig):
         ),
     ] = None
 
-    env_ratios: Annotated[
-        list[float] | None,
-        Field(
-            description=(
-                "Ratios for sampling from each environment. "
-                "If None, samples uniformly across all available problems (not environments)."
-            ),
-        ),
-    ] = None
-
     easy_threshold: Annotated[
         float | None,
         Field(
@@ -551,12 +558,6 @@ class BufferConfig(BaseConfig):
     def validate_thresholds(self):
         if self.easy_threshold is not None and self.hard_threshold is not None:
             assert self.easy_threshold > self.hard_threshold, "easy_threshold must be greater than hard_threshold."
-        return self
-
-    @model_validator(mode="after")
-    def validate_env_ratios(self):
-        if self.env_ratios is not None:
-            assert all(ratio > 0 for ratio in self.env_ratios), "All env_ratios must be positive."
         return self
 
 
@@ -784,9 +785,6 @@ class OrchestratorConfig(TrainEnvsConfig):
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
 
-    # The validation configuration
-    val: ValConfig | None = None
-
     weight_broadcast: WeightBroadcastConfig = FileSystemWeightBroadcastConfig()
 
     rollout_transport: TransportConfig = FileSystemTransportConfig()
@@ -983,12 +981,6 @@ class OrchestratorConfig(TrainEnvsConfig):
 
         if self.max_inflight_rollouts is not None and self.max_inflight_rollouts < self.rollouts_per_example:
             raise ValueError("max_inflight_rollouts must be at least the number of rollouts per example")
-        return self
-
-    @model_validator(mode="after")
-    def validate_env_ratios(self):
-        if self.buffer.env_ratios is not None:
-            assert len(self.buffer.env_ratios) == len(self.env), "env_ratios length must match number of environments"
         return self
 
     @model_validator(mode="after")
