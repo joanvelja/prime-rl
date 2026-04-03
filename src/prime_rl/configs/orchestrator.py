@@ -754,6 +754,14 @@ class OrchestratorConfig(BaseConfig):
     # The advantage configuration
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
 
+    # Filter zero advantages
+    filter_zero_advantages: Annotated[
+        bool,
+        Field(
+            description="Whether to filter out training samples with zero advantage. If True, samples with advantage == 0.0 are not sent to the trainer.",
+        ),
+    ] = False
+
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]
 

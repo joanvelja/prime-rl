@@ -644,6 +644,14 @@ async def orchestrate(config: OrchestratorConfig):
             teacher_logprobs_time = time.perf_counter() - teacher_logprobs_start_time
             logger.debug(f"Computed teacher logprobs in {teacher_logprobs_time:.2f}s")
 
+        # Filter out samples with zero advantage if configured
+        if config.filter_zero_advantages:
+            num_before = len(train_examples)
+            train_examples = [sample for sample in train_examples if sample.advantage != 0.0]
+            num_filtered = num_before - len(train_examples)
+            if num_filtered > 0:
+                logger.debug(f"Filtered out {num_filtered} samples with zero advantage")
+
         training_batch = TrainingBatch(
             examples=train_examples,
             step=progress.step,
