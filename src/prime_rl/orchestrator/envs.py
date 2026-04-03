@@ -33,13 +33,11 @@ class Env:
         self.max_retries: int = config.max_retries
         self.ratio: float | None = config.ratio
         self.uses_group_scoring: bool = task_uses_group_scoring(self.vf_env, self.name)
+        self.sampling_args: dict = {}
         self._process: mp.Process | None = None
 
     def get_dataset(self, seed: int | None = None):
         return self.vf_env.get_dataset(seed=seed)
-
-    def get_eval_dataset(self, seed: int | None = None):
-        return self.vf_env.get_eval_dataset(seed=seed)
 
     def spawn(
         self,
@@ -69,6 +67,10 @@ class Env:
 
     async def connect(self) -> None:
         """Connect an env client to the server and assign it."""
+        if self.config.address is None:
+            raise RuntimeError(
+                f"Env {self.name} has no address configured. Call spawn() first or set address in config."
+            )
         logger = get_logger()
         logger.info(f"Connecting env {self.name} to server at {self.config.address}")
         client = setup_env_client(address=self.config.address, name=self.name)
@@ -80,14 +82,13 @@ class Env:
         client: vf.ClientConfig,
         example: dict,
         model_name: str,
-        sampling_args: dict,
     ) -> vf.RolloutOutput:
         return await run_rollout(
             env=self.vf_env,
             client=client,
             example=example,
             model_name=model_name,
-            sampling_args=sampling_args,
+            sampling_args=self.sampling_args,
             max_retries=self.max_retries,
         )
 
@@ -97,7 +98,6 @@ class Env:
         example: dict,
         model_name: str,
         rollouts_per_example: int,
-        sampling_args: dict,
     ) -> list[vf.RolloutOutput]:
         return await run_group(
             env=self.vf_env,
@@ -105,7 +105,7 @@ class Env:
             example=example,
             model_name=model_name,
             rollouts_per_example=rollouts_per_example,
-            sampling_args=sampling_args,
+            sampling_args=self.sampling_args,
             max_retries=self.max_retries,
         )
 
@@ -122,8 +122,12 @@ class Env:
         self._process = None
 
 
+class TrainEnv(Env):
+    """Env for training."""
+
+
 class EvalEnv(Env):
-    """Env subclass for evaluation with num_examples and rollouts_per_example."""
+    """Env for evaluation — dataset comes from the eval split."""
 
     config: EvalEnvConfig
 
@@ -131,6 +135,9 @@ class EvalEnv(Env):
         super().__init__(config)
         self.num_examples: int = config.num_examples
         self.rollouts_per_example: int = config.rollouts_per_example
+
+    def get_dataset(self, seed: int | None = None):
+        return self.vf_env.get_eval_dataset(seed=seed)
 
     async def evaluate(
         self,
@@ -155,7 +162,7 @@ class Envs:
     def __init__(self, configs: Sequence[EnvConfig]):
         self._envs: dict[str, Env] = {}
         for config in configs:
-            env = EvalEnv(config) if isinstance(config, EvalEnvConfig) else Env(config)
+            env = EvalEnv(config) if isinstance(config, EvalEnvConfig) else TrainEnv(config)
             self._envs[env.name] = env
 
     @property
@@ -168,6 +175,10 @@ class Envs:
 
     def get(self, name: str) -> Env:
         return self._envs[name]
+
+    def set_sampling_args(self, sampling_args: dict) -> None:
+        for env in self:
+            env.sampling_args = sampling_args
 
     def __iter__(self):
         return iter(self._envs.values())

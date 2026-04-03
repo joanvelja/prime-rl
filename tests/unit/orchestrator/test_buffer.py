@@ -7,24 +7,25 @@ from datasets import Dataset
 
 from prime_rl.configs.orchestrator import BufferConfig, EnvConfig
 from prime_rl.orchestrator.buffer import BufferSet
-from prime_rl.orchestrator.envs import Env, Envs
+from prime_rl.orchestrator.envs import Envs, TrainEnv
 
 
-def make_env(name: str, vf_env: vf.Environment, **config_kwargs) -> Env:
-    """Create an Env without calling vf.load_environment."""
+def make_env(name: str, vf_env: vf.Environment, **config_kwargs) -> TrainEnv:
+    """Create a TrainEnv without calling vf.load_environment."""
     config = EnvConfig(id=name, name=name, **config_kwargs)
-    env = Env.__new__(Env)
+    env = TrainEnv.__new__(TrainEnv)
     env.config = config
     env.vf_env = vf_env
-    env.name = name
+    env.name = config.resolved_name
     env.max_retries = config.max_retries
     env.ratio = config.ratio
     env.uses_group_scoring = False
+    env.sampling_args = {}
     env._process = None
     return env
 
 
-def make_envs(env_dict: dict[str, Env]) -> Envs:
+def make_envs(env_dict: dict[str, TrainEnv]) -> Envs:
     """Create an Envs container from a dict of Env instances."""
     envs = Envs.__new__(Envs)
     envs._envs = env_dict

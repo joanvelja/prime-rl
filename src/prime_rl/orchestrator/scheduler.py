@@ -12,12 +12,10 @@ from aiolimiter import AsyncLimiter
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet as Buffer
 from prime_rl.orchestrator.envs import Envs
-from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import ProgressTracker, get_logger
-from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     get_broadcast_dir,
     get_latest_ckpt_step,
@@ -87,9 +85,6 @@ class Scheduler:
         self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
         self.lora_name = lora_name
-        initial_temp = compute_temperature(step=0, sampling_config=config.sampling, max_steps=config.max_steps)
-        is_vllm = config.teacher_rollout_model is None
-        self.sampling_args = get_sampling_args(config.sampling, temperature=initial_temp, is_vllm=is_vllm)
         self.model_name = self.config.model.name
         self.json_logging = config.log.json_logging
 
@@ -141,10 +136,6 @@ class Scheduler:
         if self.batch_size is None:
             return rollouts
         return rollouts[: self.batch_size]
-
-    def set_sampling_args(self, sampling_args: dict) -> None:
-        """Update sampling args for future rollout requests."""
-        self.sampling_args = sampling_args
 
     async def cancel_inflight_rollouts(self):
         """Cancel all in-flight rollout requests."""
@@ -210,7 +201,6 @@ class Scheduler:
                     example=group.example,
                     model_name=self.model_name,
                     rollouts_per_example=self.rollouts_per_example,
-                    sampling_args=self.sampling_args,
                 )
             )
         else:
@@ -220,7 +210,6 @@ class Scheduler:
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
-                    sampling_args=self.sampling_args,
                 )
             )
         self.inflight_requests[task] = InflightRolloutInfo(

@@ -39,7 +39,6 @@ from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
-    get_sampling_args,
     get_weight_dir,
     print_benchmark,
     set_semaphore,
@@ -59,7 +58,6 @@ from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.process import set_proc_title
-from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     clean_exit,
     get_env_ids_to_install,
@@ -163,7 +161,11 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Load environments
     logger.info("Loading training environments")
+    from prime_rl.orchestrator.utils import get_sampling_args
+
+    is_vllm = config.teacher_rollout_model is None
     train_envs = Envs(config.train_envs)
+    train_envs.set_sampling_args(get_sampling_args(config.sampling, is_vllm=is_vllm))
     logger.info(f"Loaded {len(train_envs)} training environment(s): {', '.join(train_envs.names)}")
 
     train_envs.spawn(
@@ -379,10 +381,6 @@ async def orchestrate(config: OrchestratorConfig):
         prev_ckpt_step = ckpt_step
 
         # Schedule generating the training batch
-        temperature = compute_temperature(progress.step, config.sampling, config.max_steps)
-        is_vllm = config.teacher_rollout_model is None
-        sampling_args = get_sampling_args(config.sampling, temperature=temperature, is_vllm=is_vllm)
-        scheduler.set_sampling_args(sampling_args)
         train_task = asyncio.create_task(scheduler.generate_batch(step=progress.step))
 
         # Await train rollouts
@@ -588,7 +586,7 @@ async def orchestrate(config: OrchestratorConfig):
             "reward/all/mean": by_example.reward.mean().mean(),
             "reward/all/max": by_example.reward.mean().max(),
             "reward/all/min": by_example.reward.mean().min(),
-            "sampling/temperature": temperature,
+            "sampling/temperature": config.sampling.temperature,
             # Solve / batch metrics
             "solve_none/all": solve_none,
             "solve_all/all": solve_all,

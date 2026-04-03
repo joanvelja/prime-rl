@@ -106,7 +106,7 @@ class EnvBuffer:
 class BufferSet:
     """Manages multiple EnvBuffers with env-ratio-aware sampling."""
 
-    def __init__(self, envs: Envs, config: BufferConfig, eval: bool = False):
+    def __init__(self, envs: Envs, config: BufferConfig):
         self.config = config
         self.logger = get_logger()
 
@@ -115,7 +115,7 @@ class BufferSet:
 
         self.env_buffers: dict[str, EnvBuffer] = {}
         for env in envs:
-            ds = env.get_eval_dataset(seed=config.seed) if eval else env.get_dataset(seed=config.seed)
+            ds = env.get_dataset(seed=config.seed)
             if "example_id" not in ds.column_names:
                 ds = ds.map(lambda ex, idx: {**ex, "example_id": idx}, with_indices=True)
             self.env_buffers[env.name] = EnvBuffer(env.name, ds, config)
