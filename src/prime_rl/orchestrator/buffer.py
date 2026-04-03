@@ -127,7 +127,7 @@ class BufferSet:
             f"in {len(self.env_names)} environment(s)"
         )
 
-        env_ratios = [env.ratio for env in envs]
+        env_ratios = [env.config.ratio for env in envs]
         if any(r is not None for r in env_ratios):
             env_ratio = mean_normalize(env_ratios)
             self.env_probs = dict(zip(self.env_names, env_ratio))

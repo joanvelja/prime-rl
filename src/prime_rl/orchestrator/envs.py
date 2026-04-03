@@ -7,7 +7,7 @@ from pathlib import Path
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, EvalSamplingConfig, SamplingConfig, TrainEnvConfig
 from prime_rl.orchestrator.vf_utils import (
     evaluate,
     resolve_num_workers,
@@ -30,8 +30,6 @@ class Env:
         self.config = config
         self.vf_env: vf.Environment = vf.load_environment(env_id, **config.args)
         self.name: str = config.resolved_name
-        self.max_retries: int = config.max_retries
-        self.ratio: float | None = config.ratio
         self.uses_group_scoring: bool = task_uses_group_scoring(self.vf_env, self.name)
         self.sampling_args: dict = {}
         self._process: mp.Process | None = None
@@ -89,7 +87,7 @@ class Env:
             example=example,
             model_name=model_name,
             sampling_args=self.sampling_args,
-            max_retries=self.max_retries,
+            max_retries=self.config.max_retries,
         )
 
     async def generate_group(
@@ -106,7 +104,7 @@ class Env:
             model_name=model_name,
             rollouts_per_example=rollouts_per_example,
             sampling_args=self.sampling_args,
-            max_retries=self.max_retries,
+            max_retries=self.config.max_retries,
         )
 
     def shutdown(self) -> None:
@@ -123,23 +121,21 @@ class Env:
 
 
 class TrainEnv(Env):
-    """Env for training."""
-
-    config: TrainEnvConfig
-
-    def __init__(self, config: TrainEnvConfig):
+    def __init__(self, config: TrainEnvConfig, sampling_config: SamplingConfig, is_vllm: bool = True):
         super().__init__(config)
+        from prime_rl.orchestrator.utils import get_sampling_args
+
+        self.sampling_args = get_sampling_args(sampling_config, is_vllm=is_vllm)
 
 
 class EvalEnv(Env):
-    """Env for evaluation — dataset comes from the eval split."""
-
-    config: EvalEnvConfig
-
-    def __init__(self, config: EvalEnvConfig):
+    def __init__(self, config: EvalEnvConfig, sampling_config: EvalSamplingConfig):
         super().__init__(config)
+        from prime_rl.orchestrator.eval_utils import get_eval_sampling_args
+
         self.num_examples: int = config.num_examples
         self.rollouts_per_example: int = config.rollouts_per_example
+        self.sampling_args = get_eval_sampling_args(sampling_config)
 
     def get_dataset(self, seed: int | None = None):
         return self.vf_env.get_eval_dataset(seed=seed)
@@ -147,28 +143,23 @@ class EvalEnv(Env):
     async def evaluate(
         self,
         model_name: str,
-        sampling_args: dict,
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
     ) -> list[vf.RolloutOutput]:
         return await evaluate(
             env=self.vf_env,
             model_name=model_name,
-            sampling_args=sampling_args,
+            sampling_args=self.sampling_args,
             num_examples=self.num_examples,
             rollouts_per_example=self.rollouts_per_example,
             get_client=get_client,
-            max_retries=self.max_retries,
+            max_retries=self.config.max_retries,
         )
 
 
 class Envs:
-    """Holds a set of Env instances."""
+    """Base container for a set of Env instances."""
 
-    def __init__(self, configs: Sequence[EnvConfig]):
-        self._envs: dict[str, Env] = {}
-        for config in configs:
-            env = EvalEnv(config) if isinstance(config, EvalEnvConfig) else TrainEnv(config)
-            self._envs[env.name] = env
+    _envs: dict[str, Env]
 
     @property
     def names(self) -> list[str]:
@@ -180,10 +171,6 @@ class Envs:
 
     def get(self, name: str) -> Env:
         return self._envs[name]
-
-    def set_sampling_args(self, sampling_args: dict) -> None:
-        for env in self:
-            env.sampling_args = sampling_args
 
     def __iter__(self):
         return iter(self._envs.values())
@@ -230,3 +217,23 @@ class Envs:
         logger.info(f"Shutting down {len(processes)} env server(s), waiting for sandbox cleanup...")
         for env in self:
             env.shutdown()
+
+
+class TrainEnvs(Envs):
+    """Collection of training environments."""
+
+    def __init__(self, configs: Sequence[TrainEnvConfig], sampling_config: SamplingConfig, is_vllm: bool = True):
+        self._envs: dict[str, Env] = {}
+        for config in configs:
+            env = TrainEnv(config, sampling_config, is_vllm=is_vllm)
+            self._envs[env.name] = env
+
+
+class EvalEnvs(Envs):
+    """Collection of evaluation environments."""
+
+    def __init__(self, configs: Sequence[EvalEnvConfig], sampling_config: EvalSamplingConfig):
+        self._envs: dict[str, Env] = {}
+        for config in configs:
+            env = EvalEnv(config, sampling_config)
+            self._envs[env.name] = env

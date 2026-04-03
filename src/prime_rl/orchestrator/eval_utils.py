@@ -91,7 +91,6 @@ def compute_pass_at_k(rewards: list[float]) -> dict[str, float]:
 async def evaluate_and_log(
     eval_env,
     model_name: str,
-    sampling_args: dict,
     get_client: Callable[[], Awaitable[vf.ClientConfig]],
     ckpt_step: int,
     step: int,
@@ -110,7 +109,6 @@ async def evaluate_and_log(
     total_inputs = len(eval_env.vf_env._get_eval_inputs(num_examples, rollouts_per_example))
     outputs = await eval_env.evaluate(
         model_name=model_name,
-        sampling_args=sampling_args,
         get_client=get_client,
     )
     eval_time = time.perf_counter() - eval_start_time
