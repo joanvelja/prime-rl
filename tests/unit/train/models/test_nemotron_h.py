@@ -84,6 +84,7 @@ def test_nemotron_h_mamba_moe_only():
         if isinstance(layer, NemotronHAttentionLayer):
             layer.forward = lambda hidden_states, **kwargs: hidden_states
 
+    torch.manual_seed(42)
     with torch.device("cuda"), default_dtype(torch.float32):
         input_ids = torch.randint(0, 256, (1, 32))
         position_ids = torch.arange(0, 32).unsqueeze(0)
@@ -161,16 +162,11 @@ def test_nemotron_h():
 
     hf_output = hf_model(input_ids, position_ids=position_ids)
     prime_output = prime_model(input_ids, position_ids=position_ids)
-    hf_output.logits.sum().backward()
-    prime_output["logits"].sum().backward()
-
     # Slightly larger tolerance due to different SDPA attention implementations
     logits_diff = prime_output["logits"] - hf_output.logits
     assert torch.allclose(logits_diff, torch.zeros_like(logits_diff), atol=5e-2), (
         f"Max logits diff: {logits_diff.abs().max()}"
     )
-    grad_diff = hf_model.model.embeddings.weight.grad - prime_model.model.embed_tokens.weight.grad
-    assert torch.allclose(grad_diff, torch.zeros_like(grad_diff), atol=10), f"Max grad diff: {grad_diff.abs().max()}"
 
 
 def test_nemotron_h_backward():

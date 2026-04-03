@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -14,8 +15,8 @@ import tomli_w
 from prime_rl.configs.rl import RLConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
-from prime_rl.utils.pathing import validate_output_dir
-from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process
+from prime_rl.utils.pathing import format_log_message, validate_output_dir
+from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process, set_proc_title
 from prime_rl.utils.utils import (
     get_free_port,
     get_log_dir,
@@ -94,7 +95,6 @@ def rl_local(config: RLConfig):
 
     logger = setup_logger(
         config.log.level or "info",
-        log_file=config.output_dir / "logs" / "rl.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
 
@@ -169,14 +169,22 @@ def rl_local(config: RLConfig):
     error_queue: list[Exception] = []
     stop_events: dict[str, Event] = {}
 
+    def sigterm_handler(signum, frame):
+        logger.warning("Received SIGTERM, terminating all processes...")
+        cleanup_threads(monitor_threads)
+        cleanup_processes(processes)
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     try:
         # Optionally, start inference process
         if config.inference:
-            inference_cmd = ["uv", "run", "inference", "@", (config_dir / INFERENCE_TOML).as_posix()]
+            inference_cmd = ["inference", "@", (config_dir / INFERENCE_TOML).as_posix()]
             logger.info(f"Starting inference on GPU(s) {' '.join(map(str, infer_gpu_ids))}")
             logger.debug(f"Inference start command: {' '.join(inference_cmd)}")
             # If we don't log stdout, the server hangs
-            with open(log_dir / "inference.stdout", "w") as log_file:
+            with open(log_dir / "inference.log", "w") as log_file:
                 inference_process = Popen(
                     inference_cmd,
                     env={
@@ -217,10 +225,10 @@ def rl_local(config: RLConfig):
                     "or omit teacher_inference and configure orchestrator.teacher_model to use an existing server."
                 )
 
-            teacher_inference_cmd = ["uv", "run", "inference", "@", (config_dir / TEACHER_INFERENCE_TOML).as_posix()]
+            teacher_inference_cmd = ["inference", "@", (config_dir / TEACHER_INFERENCE_TOML).as_posix()]
             logger.info(f"Starting teacher inference process on GPU(s) {' '.join(map(str, teacher_gpu_ids))}")
             logger.debug(f"Teacher inference start command: {' '.join(teacher_inference_cmd)}")
-            with open(log_dir / "teacher_inference.stdout", "w") as log_file:
+            with open(log_dir / "teacher_inference.log", "w") as log_file:
                 teacher_inference_process = Popen(
                     teacher_inference_cmd,
                     env={
@@ -252,15 +260,13 @@ def rl_local(config: RLConfig):
 
         # Start orchestrator process
         orchestrator_cmd = [
-            "uv",
-            "run",
             "orchestrator",
             "@",
             (config_dir / ORCHESTRATOR_TOML).as_posix(),
         ]
         logger.info("Starting orchestrator process")
         logger.debug(f"Orchestrator start command: {' '.join(orchestrator_cmd)}")
-        with open(log_dir / "orchestrator.stdout", "w") as log_file:
+        with open(log_dir / "orchestrator.log", "w") as log_file:
             orchestrator_process = Popen(
                 orchestrator_cmd,
                 stdout=log_file,
@@ -289,17 +295,12 @@ def rl_local(config: RLConfig):
 
         # Start training process
         trainer_cmd = [
-            "uv",
-            "run",
-            "env",
-            "PYTHONUNBUFFERED=1",
-            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
             "torchrun",
             f"--rdzv-endpoint=localhost:{get_free_port()}",
             f"--rdzv-id={uuid.uuid4().hex}",
             # Pipe all logs to file, and only master rank logs to stdout
-            f"--log-dir={config.output_dir / 'torchrun'}",
-            "--local-ranks-filter=0",
+            f"--log-dir={log_dir / 'trainer' / 'torchrun'}",
+            f"--local-ranks-filter={','.join(map(str, config.trainer.log.ranks_filter))}",
             "--redirect=3",
             "--tee=3",
             f"--nproc-per-node={len(trainer_gpu_ids)}",
@@ -310,7 +311,7 @@ def rl_local(config: RLConfig):
         ]
         logger.info(f"Starting trainer on GPU(s) {' '.join(map(str, trainer_gpu_ids))}")
         logger.debug(f"Training start command: {' '.join(trainer_cmd)}")
-        with open(log_dir / "trainer.stdout", "w") as log_file:
+        with open(log_dir / "trainer.log", "w") as log_file:
             trainer_process = Popen(
                 trainer_cmd,
                 env={
@@ -318,6 +319,7 @@ def rl_local(config: RLConfig):
                     **wandb_shared_env,
                     "WANDB_SHARED_LABEL": "trainer",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, trainer_gpu_ids)),
+                    "PYTHONUNBUFFERED": "1",
                     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                     "LOGURU_FORCE_COLORS": "1",
                     "WANDB_PROGRAM": "uv run rl",
@@ -340,7 +342,7 @@ def rl_local(config: RLConfig):
         # Monitor all processes for failures
         logger.success("Startup complete. Showing trainer logs...")
 
-        tail_process = Popen(["tail", "-F", log_dir / "trainer.stdout"])
+        tail_process = Popen(["tail", "-F", log_dir / "trainer.log"])
         processes.append(tail_process)
 
         # Check for errors from monitor threads
@@ -419,6 +421,8 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             num_infer_replicas=config.deployment.num_infer_replicas,
             num_prefill_nodes=infer_deploy.num_prefill_nodes,
             num_decode_nodes=infer_deploy.num_decode_nodes,
+            num_prefill_replicas=infer_deploy.num_prefill_replicas,
+            num_decode_replicas=infer_deploy.num_decode_replicas,
             gpus_per_node=config.deployment.gpus_per_node,
             router_port=infer_deploy.router_port,
             prefill_port=infer_deploy.prefill_port,
@@ -426,8 +430,11 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             inference_tp=config.inference.parallel.tp,
             inference_data_parallel_rpc_port=config.inference.data_parallel_rpc_port,
             use_deep_gemm=config.inference.use_deep_gemm,
+            prefill_env_overrides=infer_deploy.prefill_env_overrides,
+            decode_env_overrides=infer_deploy.decode_env_overrides,
             use_nccl_broadcast=config.weight_broadcast is not None and config.weight_broadcast.type == "nccl",
             wandb_shared=config.wandb is not None and config.wandb.shared,
+            ranks_filter=",".join(map(str, config.trainer.log.ranks_filter)),
         )
     else:
         script = template.render(
@@ -449,42 +456,11 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
             inference_data_parallel_rpc_port=config.inference.data_parallel_rpc_port if config.inference else 29600,
             use_nccl_broadcast=config.weight_broadcast is not None and config.weight_broadcast.type == "nccl",
             wandb_shared=config.wandb is not None and config.wandb.shared,
+            ranks_filter=",".join(map(str, config.trainer.log.ranks_filter)),
         )
 
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(script)
-
-
-def format_log_message(
-    trainer_log: str,
-    orchestrator_log: str | None,
-    inference_log: str | None,
-    env_log_dir: Path,
-    train_env_names: list[str],
-    eval_env_names: list[str],
-) -> str:
-    col = 18
-    i1 = " " * 2
-    i2 = " " * 3
-    i3 = " " * 4
-    max_name = col - 4
-
-    log_lines = [f"{i1}{'Trainer:':<{col}}tail -F {trainer_log}"]
-    if orchestrator_log:
-        log_lines.append(f"{i1}{'Orchestrator:':<{col}}tail -F {orchestrator_log}")
-    if inference_log:
-        log_lines.append(f"{i1}{'Inference:':<{col}}tail -F {inference_log}")
-    log_lines.append(f"{i1}{'Envs:':<{col}}tail -F {env_log_dir}/*/*/*.log")
-    log_lines.append(f"{i2}{'Train:':<{col - 1}}tail -F {env_log_dir}/train/*/*.log")
-    for name in train_env_names:
-        short = name if len(name) <= max_name else name[: max_name - 3] + "..."
-        log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/train/{name}/*.log")
-    if eval_env_names:
-        log_lines.append(f"{i2}{'Eval:':<{col - 1}}tail -F {env_log_dir}/eval/*/*.log")
-        for name in eval_env_names:
-            short = name if len(name) <= max_name else name[: max_name - 3] + "..."
-            log_lines.append(f"{i3}{f'{short}:':<{col - 2}}tail -F {env_log_dir}/eval/{name}/*.log")
-    return "Logs:\n" + "\n".join(log_lines)
 
 
 def rl_slurm(config: RLConfig):
@@ -493,20 +469,20 @@ def rl_slurm(config: RLConfig):
     logger = setup_logger(config.log.level or "info", json_logging=config.log.json_logging)
 
     config_dir = config.output_dir / "configs"
+    log_dir = get_log_dir(config.output_dir)
+
     if config.deployment.type == "single_node":
         write_config(config, config_dir, exclude={"slurm", "dry_run", "clean_output_dir"})
         logger.info(f"Wrote config to {config_dir / RL_TOML}")
 
-        log_dir = get_log_dir(config.output_dir)
-        env_log_dir = get_log_dir(config.output_dir) / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         log_message = format_log_message(
-            trainer_log=f"{log_dir}/trainer.stdout",
-            orchestrator_log=f"{log_dir}/orchestrator.stdout",
-            inference_log=f"{log_dir}/inference.stdout",
-            env_log_dir=env_log_dir,
+            log_dir=log_dir,
+            trainer=True,
+            orchestrator=True,
+            inference=True,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
         )
@@ -514,19 +490,19 @@ def rl_slurm(config: RLConfig):
         write_subconfigs(config, config_dir)
         logger.info(f"Wrote subconfigs to {config_dir}")
 
-        slurm_log_dir = config.output_dir / "slurm"
-        env_log_dir = get_log_dir(config.output_dir) / "envs"
         train_env_names = [env.resolved_name for env in config.orchestrator.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         has_infer = config.deployment.num_infer_nodes > 0
         log_message = format_log_message(
-            trainer_log=f"{slurm_log_dir}/latest_train_node_rank_0.log",
-            orchestrator_log=f"{slurm_log_dir}/latest_orchestrator.log" if has_infer else None,
-            inference_log=f"{slurm_log_dir}/latest_infer_node_rank_0.log" if has_infer else None,
-            env_log_dir=env_log_dir,
+            log_dir=log_dir,
+            trainer=True,
+            orchestrator=has_infer,
+            inference=has_infer,
             train_env_names=train_env_names,
             eval_env_names=eval_env_names,
+            num_train_nodes=config.deployment.num_train_nodes,
+            num_infer_nodes=config.deployment.total_infer_nodes if has_infer else 0,
         )
 
     script_path = config.output_dir / RL_SBATCH
@@ -562,6 +538,7 @@ def rl(config: RLConfig):
 
 
 def main():
+    set_proc_title("Launcher")
     rl(cli(RLConfig))
 
 

@@ -2,7 +2,6 @@ import asyncio
 import atexit
 import gc
 import multiprocessing as mp
-import random
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -68,6 +67,7 @@ from prime_rl.utils.config import cli
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.monitor import setup_monitor
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
     clean_exit,
@@ -84,7 +84,6 @@ async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
     logger = setup_logger(
         config.log.level,
-        log_file=config.output_dir / "logs" / "orchestrator.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
     intercept_vf_logging(logger="verifiers.serve", level=config.log.vf_level)  # show logs from env clients
@@ -199,10 +198,15 @@ async def orchestrate(config: OrchestratorConfig):
     env_processes: list[mp.Process] = []
 
     def _cleanup_env_processes():
+        if not env_processes:
+            return
+        logger.info(f"Shutting down {len(env_processes)} env server(s), waiting for sandbox cleanup...")
         for proc in env_processes:
             proc.terminate()
-            proc.join(timeout=5)
+        for proc in env_processes:
+            proc.join(timeout=25)
             if proc.is_alive():
+                logger.warning(f"Env server {proc.pid} did not exit after 25s, force killing")
                 proc.kill()
                 proc.join(timeout=5)
 
@@ -729,7 +733,6 @@ async def orchestrate(config: OrchestratorConfig):
             "decode_len/all/min": by_example.decode_len.mean().min(),
             "is_truncated/all/mean": by_example.is_truncated.mean().mean(),
             "is_truncated/all/max": by_example.is_truncated.mean().max(),
-            "is_truncated/all/min": by_example.is_truncated.mean().min(),
             "stop_condition/all/generation_truncated": (
                 results_df.is_truncated & (results_df.stop_condition != "prompt_too_long")
             ).mean(),
@@ -794,7 +797,8 @@ async def orchestrate(config: OrchestratorConfig):
             for col in per_env_columns:
                 to_log[f"{col}/{env}/mean"] = env_by_example[col].mean().mean()
                 to_log[f"{col}/{env}/max"] = env_by_example[col].mean().max()
-                to_log[f"{col}/{env}/min"] = env_by_example[col].mean().min()
+                if col != "is_truncated":
+                    to_log[f"{col}/{env}/min"] = env_by_example[col].mean().min()
             to_log[f"reward/{env}/mean"] = env_by_example.reward.mean().mean()
             to_log[f"reward/{env}/max"] = env_by_example.reward.mean().max()
             to_log[f"reward/{env}/min"] = env_by_example.reward.mean().min()
@@ -826,9 +830,8 @@ async def orchestrate(config: OrchestratorConfig):
         # Log metrics to monitor(s)
         monitor.log(to_log, step=progress.step)
 
-        # Log samples to monitor(s) if enabled
-        subset_train_rollouts = random.sample(train_rollouts, min(8, len(train_rollouts)))
-        monitor.log_samples(subset_train_rollouts, step=progress.step)
+        # Log samples to monitor(s) if enabled.
+        monitor.log_samples(train_rollouts, step=progress.step)
 
         # Log distributions (rewards, advantages) if enabled
         monitor.log_distributions(
@@ -923,7 +926,7 @@ async def orchestrate(config: OrchestratorConfig):
 
 def main():
     """Main entry-point for orchestrator. Run using `uv run orchestrator`"""
-
+    set_proc_title("Orchestrator")
     asyncio.run(orchestrate(cli(OrchestratorConfig)))
 
 

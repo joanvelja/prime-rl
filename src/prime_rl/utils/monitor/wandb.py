@@ -14,7 +14,7 @@ from wandb.errors import CommError
 from prime_rl.configs.shared import WandbConfig, WandbWithExtrasConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
-from prime_rl.utils.monitor.base import Monitor
+from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
 
 
 class WandbMonitor(Monitor):
@@ -102,6 +102,11 @@ class WandbMonitor(Monitor):
                 )
                 self.tokenizer = tokenizer
                 self.samples = []
+                self.eval_samples_cols = ["step", "env", "task", "example_id", "completion", "reward"]
+                self.eval_samples_table = wandb.Table(
+                    columns=self.eval_samples_cols,
+                    log_mode="INCREMENTAL",
+                )
 
     def _maybe_overwrite_wandb_command(self) -> None:
         """Overwrites sys.argv with the start command if it is set in the environment variables."""
@@ -132,11 +137,18 @@ class WandbMonitor(Monitor):
             # Do not log samples if not enabled or not log interval step
             return
 
+        rollouts = sample_items_for_logging(
+            rollouts,
+            self.config.log_extras.sample_ratio,
+        )
+        if not rollouts:
+            return
+
         assert self.tokenizer is not None, "Tokenizer is required for sample logging"
         assert self.last_log_samples_step <= step, "Step must be greater than last logged step"
         assert self.logger is not None, "Logger is required for sample logging"
 
-        self.logger.info(f"Logging samples to W&B table at step {step}")
+        self.logger.info(f"Logging {len(rollouts)} samples to W&B table at step {step}")
         start_time = time.perf_counter()
 
         for rollout in rollouts:
@@ -164,6 +176,36 @@ class WandbMonitor(Monitor):
         wandb.log({"samples": self.samples_table, "step": step})
         self.last_log_samples_step = step
         self.logger.debug(f"Logged samples at step {step} to W&B table in {time.perf_counter() - start_time:.2f}s")
+
+    def log_eval_samples(self, rollouts: list[vf.RolloutOutput], env_name: str, step: int) -> None:
+        """Logs eval rollouts to a separate W&B table."""
+        if not self.is_master:
+            return
+        if (
+            not self.config
+            or not isinstance(self.config, WandbWithExtrasConfig)
+            or not self.config.log_extras
+            or not self.config.log_extras.samples
+        ):
+            return
+
+        for rollout in rollouts:
+            completion = rollout.get("completion")
+            if not completion:
+                continue
+            if isinstance(completion, list):
+                completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
+            sample = {
+                "step": step,
+                "env": env_name,
+                "task": rollout.get("task"),
+                "example_id": rollout["example_id"],
+                "completion": completion,
+                "reward": rollout["reward"],
+            }
+            self.eval_samples_table.add_data(*sample.values())
+
+        wandb.log({"eval/samples": self.eval_samples_table, "step": step})
 
     def log_final_samples(self) -> None:
         """Log final samples to W&B table."""
