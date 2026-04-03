@@ -100,6 +100,41 @@ tmux send-keys -t "$SESSION_NAME:Claude" \
 You are running inside tmux session \"${SESSION_NAME}\". The Launcher window (window 0) is where the user runs launch commands. You can read its contents with: tmux capture-pane -t ${SESSION_NAME}:Launcher -p
 Help the user monitor and debug this run.'" C-m
 
+# Window 3: vLLM Metrics TUI (if installed)
+# Discovers inference server URLs from log filenames in the output directory.
+# Node logs are named node_N.log; port is inferred from the ROLE line in each log.
+if command -v vllm-metrics-tui &>/dev/null; then
+  METRICS_URLS=""
+  INFERENCE_LOG_DIR="${LOG_DIR}/inference"
+  if [[ -d "$INFERENCE_LOG_DIR" ]]; then
+    for node_log in "$INFERENCE_LOG_DIR"/node_*.log; do
+      [[ -f "$node_log" ]] || continue
+      # Extract host:port from the "Starting inference on http://..." line
+      url=$(grep -m1 "Starting inference on" "$node_log" 2>/dev/null | grep -oP 'http://[^ ]+' | sed 's|/v1||')
+      if [[ -n "$url" ]]; then
+        # Replace 0.0.0.0 with the hostname from orchestrator connection logs
+        if [[ "$url" == *"0.0.0.0"* ]]; then
+          port=$(echo "$url" | grep -oP ':\d+$')
+          # Try to find the real hostname from orchestrator logs
+          host=$(grep -oP "ltc-[a-z0-9-]+${port}" "${LOG_DIR}/orchestrator.log" 2>/dev/null | head -1)
+          if [[ -n "$host" ]]; then
+            url="http://${host}"
+          else
+            continue
+          fi
+        fi
+        METRICS_URLS="$METRICS_URLS $url"
+      fi
+    done
+  fi
+
+  if [[ -n "$METRICS_URLS" ]]; then
+    tmux new-window -t "$SESSION_NAME" -n "Metrics"
+    tmux send-keys -t "$SESSION_NAME:Metrics" \
+      "vllm-metrics-tui $METRICS_URLS" C-m
+  fi
+fi
+
 # Pane title styling
 tmux set-option -t "$SESSION_NAME" -g pane-border-status top
 tmux set-option -t "$SESSION_NAME" -g pane-border-format " #{pane_title} "
