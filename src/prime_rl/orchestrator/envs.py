@@ -7,7 +7,7 @@ from pathlib import Path
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.vf_utils import (
     evaluate,
     resolve_num_workers,
@@ -124,6 +124,11 @@ class Env:
 
 class TrainEnv(Env):
     """Env for training."""
+
+    config: TrainEnvConfig
+
+    def __init__(self, config: TrainEnvConfig):
+        super().__init__(config)
 
 
 class EvalEnv(Env):
