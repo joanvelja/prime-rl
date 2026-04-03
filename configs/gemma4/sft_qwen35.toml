@@ -1,0 +1,19 @@
+# Qwen3.5 MoE text-only SFT test (proving VLM bug)
+# Usage: uv run sft @ configs/gemma4/sft_qwen35.toml
+output_dir = "outputs/qwen35-moe-sft"
+max_steps = 5
+
+[slurm]
+job_name = "qwen35-moe-sft"
+
+[model]
+name = "Qwen/Qwen3.5-35B-A3B"
+
+[wandb]
+project = "gemma4-test"
+name = "sft-qwen35"
+
+[data]
+name = "PrimeIntellect/Reverse-Text-SFT"
+batch_size = 4
+seq_len = 2048

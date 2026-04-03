@@ -1,0 +1,29 @@
+# Gemma4 31B dense SFT test
+# Usage: uv run sft @ configs/gemma4/sft_dense.toml
+output_dir = "outputs/gemma4-dense-sft"
+max_steps = 10
+
+[slurm]
+job_name = "gemma4-dense-sft"
+
+[deployment]
+type = "single_node"
+num_gpus = 8
+
+[model]
+name = "google/gemma-4-31B-it"
+attn = "flash_attention_2"
+
+[model.ac]
+
+[wandb]
+project = "gemma4-test"
+name = "sft-dense"
+
+[data]
+name = "PrimeIntellect/Reverse-Text-SFT"
+batch_size = 8
+seq_len = 2048
+
+[data.chat_template_kwargs]
+enable_thinking = true

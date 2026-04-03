@@ -1,0 +1,43 @@
+# Gemma4 26B-A4B MoE RL test (reverse-text)
+output_dir = "outputs/gemma4-moe-rl"
+max_steps = 5
+seq_len = 2048
+
+[slurm]
+job_name = "gemma4-moe-rl"
+
+[deployment]
+type = "single_node"
+num_train_gpus = 4
+num_infer_gpus = 4
+
+[model]
+name = "google/gemma-4-26B-A4B-it"
+
+[wandb]
+project = "gemma4-test"
+name = "rl-moe"
+
+[orchestrator]
+batch_size = 128
+rollouts_per_example = 16
+
+[orchestrator.sampling]
+max_tokens = 128
+
+[[orchestrator.env]]
+id = "reverse-text"
+
+[trainer.model]
+attn = "flash_attention_2"
+
+[trainer.model.ac]
+
+[trainer.optim]
+lr = 3e-6
+
+[inference]
+gpu_memory_utilization = 0.7
+
+[inference.model]
+max_model_len = 2048

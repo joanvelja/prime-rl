@@ -1,0 +1,18 @@
+# Qwen3 0.6B SFT sanity check
+output_dir = "outputs/qwen3-sft"
+max_steps = 5
+
+[slurm]
+job_name = "qwen3-sft"
+
+[model]
+name = "PrimeIntellect/Qwen3-0.6B"
+
+[wandb]
+project = "gemma4-test"
+name = "sft-qwen3"
+
+[data]
+name = "PrimeIntellect/Reverse-Text-SFT"
+batch_size = 4
+seq_len = 1024

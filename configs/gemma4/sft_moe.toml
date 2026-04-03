@@ -1,0 +1,29 @@
+# Gemma4 26B-A4B MoE SFT test
+# Usage: uv run sft @ configs/gemma4/sft_moe.toml
+output_dir = "outputs/gemma4-moe-sft"
+max_steps = 10
+
+[slurm]
+job_name = "gemma4-moe-sft"
+
+[deployment]
+type = "single_node"
+num_gpus = 8
+
+[model]
+name = "google/gemma-4-26B-A4B-it"
+attn = "flash_attention_2"
+
+[model.ac]
+
+[wandb]
+project = "gemma4-test"
+name = "sft-moe"
+
+[data]
+name = "PrimeIntellect/Reverse-Text-SFT"
+batch_size = 8
+seq_len = 2048
+
+[data.chat_template_kwargs]
+enable_thinking = true

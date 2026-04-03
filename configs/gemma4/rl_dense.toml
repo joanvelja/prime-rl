@@ -1,0 +1,39 @@
+# Gemma4 31B dense RL test (reverse-text)
+output_dir = "outputs/gemma4-dense-rl"
+max_steps = 5
+seq_len = 2048
+
+[slurm]
+job_name = "gemma4-dense-rl"
+
+[deployment]
+type = "single_node"
+num_train_gpus = 4
+num_infer_gpus = 4
+
+[model]
+name = "google/gemma-4-31B-it"
+
+[wandb]
+project = "gemma4-test"
+name = "rl-dense"
+
+[orchestrator]
+batch_size = 128
+rollouts_per_example = 16
+
+[orchestrator.sampling]
+max_tokens = 128
+
+[[orchestrator.env]]
+id = "reverse-text"
+
+[trainer.model]
+attn = "flash_attention_2"
+
+[trainer.model.ac]
+
+[trainer.optim]
+lr = 3e-6
+
+[inference]
