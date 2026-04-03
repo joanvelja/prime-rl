@@ -1179,7 +1179,7 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.8.0"
+version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -1192,9 +1192,9 @@ dependencies = [
     { name = "typer", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "typing-extensions", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/2a/a847fd02261cd051da218baf99f90ee7c7040c109a01833db4f838f25256/huggingface_hub-1.8.0.tar.gz", hash = "sha256:c5627b2fd521e00caf8eff4ac965ba988ea75167fad7ee72e17f9b7183ec63f3", size = 735839, upload-time = "2026-03-25T16:01:28.152Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/bb/62c7aa86f63a05e2f9b96642fdef9b94526a23979820b09f5455deff4983/huggingface_hub-1.9.0.tar.gz", hash = "sha256:0ea5be7a56135c91797cae6ad726e38eaeb6eb4b77cefff5c9d38ba0ecf874f7", size = 750326, upload-time = "2026-04-03T08:35:55.888Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/ae/8a3a16ea4d202cb641b51d2681bdd3d482c1c592d7570b3fa264730829ce/huggingface_hub-1.8.0-py3-none-any.whl", hash = "sha256:d3eb5047bd4e33c987429de6020d4810d38a5bef95b3b40df9b17346b7f353f2", size = 625208, upload-time = "2026-03-25T16:01:26.603Z" },
+    { url = "https://files.pythonhosted.org/packages/73/37/0d15d16150e1829f3e90962c99f28257f6de9e526a680b4c6f5acdb54fd2/huggingface_hub-1.9.0-py3-none-any.whl", hash = "sha256:2999328c058d39fd19ab748dd09bd4da2fbaa4f4c1ddea823eab103051e14a1f", size = 637355, upload-time = "2026-04-03T08:35:53.897Z" },
 ]
 
 [[package]]
@@ -2664,6 +2664,15 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "deep-ep", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "deep-gemm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nixl", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nixl-cu12", version = "0.10.1", source = { url = "https://github.com/samsja/flash-attn-builds/releases/download/v0.2/nixl_cu12-0.10.1-cp312-cp312-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "quack-kernels", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "vllm-router", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 disagg = [
     { name = "deep-ep", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "deep-gemm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -2743,6 +2752,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "openai", specifier = ">=1.106.1" },
     { name = "prime", specifier = ">=0.5.37" },
+    { name = "prime-rl", extras = ["disagg"], marker = "extra == 'all'" },
+    { name = "prime-rl", extras = ["flash-attn"], marker = "extra == 'all'" },
+    { name = "prime-rl", extras = ["quack"], marker = "extra == 'all'" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = ">=1.10.13" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?branch=main" },
@@ -2762,13 +2774,13 @@ requires-dist = [
     { name = "torchtitan", git = "https://github.com/pytorch/torchtitan?rev=a1fdd7e" },
     { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=c1c3424" },
     { name = "uvloop", specifier = ">=0.21.0" },
-    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=adf8138" },
+    { name = "verifiers", git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=d3c830c" },
     { name = "vllm", specifier = ">=0.19.0" },
     { name = "vllm-router", marker = "platform_machine == 'x86_64' and extra == 'disagg'", url = "https://github.com/PrimeIntellect-ai/router/releases/download/v0.1.14/vllm_router-0.1.14-cp38-abi3-linux_x86_64.whl" },
     { name = "wandb", specifier = ">=0.24.2" },
     { name = "wiki-search", marker = "extra == 'envs'", index = "https://hub.primeintellect.ai/primeintellect/simple/" },
 ]
-provides-extras = ["flash-attn", "flash-attn-3", "flash-attn-cute", "envs", "disagg", "quack"]
+provides-extras = ["flash-attn", "flash-attn-3", "flash-attn-cute", "envs", "disagg", "quack", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3999,8 +4011,8 @@ wheels = [
 
 [[package]]
 name = "verifiers"
-version = "0.1.12.dev1"
-source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=adf8138#adf81382fedcc5a137db6eb8c7a1d73865246f9e" }
+version = "0.1.12.dev2"
+source = { git = "https://github.com/PrimeIntellect-ai/verifiers.git?rev=d3c830c#d3c830c61aa7cf087b62c1b0bff61a1fc3748c7e" }
 dependencies = [
     { name = "aiolimiter", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "anthropic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
