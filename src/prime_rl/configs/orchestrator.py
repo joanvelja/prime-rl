@@ -760,7 +760,7 @@ class OrchestratorConfig(BaseConfig):
         Field(
             description="Whether to filter out training samples with zero advantage. If True, samples with advantage == 0.0 are not sent to the trainer.",
         ),
-    ] = False
+    ] = True
 
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]
