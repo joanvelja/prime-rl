@@ -13,7 +13,7 @@ from rich.table import Table
 from verifiers.utils.async_utils import maybe_semaphore
 from verifiers.utils.client_utils import setup_openai_client
 
-from prime_rl.configs.orchestrator import OrchestratorConfig, SamplingConfig
+from prime_rl.configs.orchestrator import EvalSamplingConfig, OrchestratorConfig, SamplingConfig
 from prime_rl.transport import TrainingSample
 from prime_rl.utils.utils import (
     format_time,
@@ -36,7 +36,7 @@ async def get_semaphore() -> AsyncContextManager:
     return SEMAPHORE
 
 
-def get_sampling_args(sampling_config: SamplingConfig, is_vllm: bool = True) -> dict:
+def get_train_sampling_args(sampling_config: SamplingConfig, is_vllm: bool = True) -> dict:
     # Convert SamplingConfig to vLLM OAI sampling args
     # https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters_2
     sampling_args = dict(sampling_config)
@@ -60,6 +60,35 @@ def get_sampling_args(sampling_config: SamplingConfig, is_vllm: bool = True) -> 
 
     if extra_body:
         sampling_args["extra_body"] = extra_body
+
+    return sampling_args
+
+
+def get_eval_sampling_args(sampling_config: EvalSamplingConfig) -> dict[str, Any]:
+    """Get sampling args for evaluation."""
+    sampling_args: dict[str, Any] = {}
+
+    if sampling_config.temperature is not None:
+        sampling_args["temperature"] = sampling_config.temperature
+    if sampling_config.max_tokens is not None:
+        sampling_args["max_tokens"] = sampling_config.max_tokens
+    if sampling_config.top_p is not None:
+        sampling_args["top_p"] = sampling_config.top_p
+    if sampling_config.reasoning_effort is not None:
+        sampling_args["reasoning_effort"] = sampling_config.reasoning_effort
+
+    extra_body: dict[str, Any] = sampling_config.extra_body.copy()
+
+    if sampling_config.top_k is not None:
+        extra_body["top_k"] = sampling_config.top_k
+    if sampling_config.min_p is not None:
+        extra_body["min_p"] = sampling_config.min_p
+    if sampling_config.min_tokens is not None:
+        extra_body["min_tokens"] = sampling_config.min_tokens
+    if sampling_config.repetition_penalty is not None:
+        extra_body["repetition_penalty"] = sampling_config.repetition_penalty
+
+    sampling_args["extra_body"] = extra_body
 
     return sampling_args
 

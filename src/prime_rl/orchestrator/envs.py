@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import multiprocessing as mp
 from collections.abc import Awaitable, Callable, Sequence
@@ -8,18 +9,18 @@ from pathlib import Path
 import verifiers as vf
 
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, EvalSamplingConfig, SamplingConfig, TrainEnvConfig
+from prime_rl.orchestrator.utils import get_eval_sampling_args, get_train_sampling_args
 from prime_rl.orchestrator.vf_utils import (
     evaluate,
     resolve_num_workers,
-    run_group,
-    run_rollout,
     setup_env_client,
     spawn_env_server,
-    task_uses_group_scoring,
     wait_for_env_servers,
 )
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import strip_env_version
+
+REQUIRED_STATE_COLUMNS = ["trajectory", "sampling_args"]
 
 
 class Env:
@@ -28,14 +29,20 @@ class Env:
     def __init__(self, config: EnvConfig):
         env_id = strip_env_version(config.id)
         self.config = config
-        self.vf_env: vf.Environment = vf.load_environment(env_id, **config.args)
-        self.name: str = config.resolved_name
-        self.uses_group_scoring: bool = task_uses_group_scoring(self.vf_env, self.name)
+        self._env: vf.Environment = vf.load_environment(env_id, **config.args)
         self.sampling_args: dict = {}
         self._process: mp.Process | None = None
 
+    @property
+    def name(self) -> str:
+        return self.config.resolved_name
+
+    @property
+    def uses_group_scoring(self) -> bool:
+        return any(self._env.rubric._is_group_func(func) for func in self._env.rubric._get_reward_funcs())
+
     def get_dataset(self, seed: int | None = None):
-        return self.vf_env.get_dataset(seed=seed)
+        return self._env.get_dataset(seed=seed)
 
     def spawn(
         self,
@@ -73,7 +80,7 @@ class Env:
         logger.info(f"Connecting env {self.name} to server at {self.config.address}")
         client = setup_env_client(address=self.config.address, name=self.name)
         await wait_for_env_servers([client])
-        self.vf_env.env_client = client
+        self._env.env_client = client
 
     async def generate_rollout(
         self,
@@ -81,13 +88,14 @@ class Env:
         example: dict,
         model_name: str,
     ) -> vf.RolloutOutput:
-        return await run_rollout(
-            env=self.vf_env,
+        rollout_input = vf.RolloutInput(**example)
+        return await self._env.run_rollout(
+            rollout_input,
             client=client,
-            example=example,
-            model_name=model_name,
+            model=model_name,
             sampling_args=self.sampling_args,
             max_retries=self.config.max_retries,
+            state_columns=REQUIRED_STATE_COLUMNS,
         )
 
     async def generate_group(
@@ -97,14 +105,14 @@ class Env:
         model_name: str,
         rollouts_per_example: int,
     ) -> list[vf.RolloutOutput]:
-        return await run_group(
-            env=self.vf_env,
+        group_inputs = [vf.RolloutInput(**example) for _ in range(rollouts_per_example)]
+        return await self._env.run_group(
+            group_inputs,
             client=client,
-            example=example,
-            model_name=model_name,
-            rollouts_per_example=rollouts_per_example,
+            model=model_name,
             sampling_args=self.sampling_args,
             max_retries=self.config.max_retries,
+            state_columns=REQUIRED_STATE_COLUMNS,
         )
 
     def shutdown(self) -> None:
@@ -121,24 +129,22 @@ class Env:
 
 
 class TrainEnv(Env):
+    config: TrainEnvConfig
+
     def __init__(self, config: TrainEnvConfig, sampling_config: SamplingConfig, is_vllm: bool = True):
         super().__init__(config)
-        from prime_rl.orchestrator.utils import get_sampling_args
-
-        self.sampling_args = get_sampling_args(sampling_config, is_vllm=is_vllm)
+        self.sampling_args = get_train_sampling_args(sampling_config, is_vllm=is_vllm)
 
 
 class EvalEnv(Env):
+    config: EvalEnvConfig
+
     def __init__(self, config: EvalEnvConfig, sampling_config: EvalSamplingConfig):
         super().__init__(config)
-        from prime_rl.orchestrator.eval_utils import get_eval_sampling_args
-
-        self.num_examples: int = config.num_examples
-        self.rollouts_per_example: int = config.rollouts_per_example
         self.sampling_args = get_eval_sampling_args(sampling_config)
 
     def get_dataset(self, seed: int | None = None):
-        return self.vf_env.get_eval_dataset(seed=seed)
+        return self._env.get_eval_dataset(seed=seed)
 
     async def evaluate(
         self,
@@ -146,11 +152,11 @@ class EvalEnv(Env):
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
     ) -> list[vf.RolloutOutput]:
         return await evaluate(
-            env=self.vf_env,
+            env=self._env,
             model_name=model_name,
             sampling_args=self.sampling_args,
-            num_examples=self.num_examples,
-            rollouts_per_example=self.rollouts_per_example,
+            num_examples=self.config.num_examples,
+            rollouts_per_example=self.config.rollouts_per_example,
             get_client=get_client,
             max_retries=self.config.max_retries,
         )
@@ -196,17 +202,8 @@ class Envs:
         atexit.register(self.shutdown)
 
     async def connect(self) -> None:
-        """Connect all env clients to their servers and wait for health."""
-        clients = []
-        logger = get_logger()
-        for env in self:
-            logger.info(f"Connecting env {env.name} to server at {env.config.address}")
-            clients.append(setup_env_client(address=env.config.address, name=env.name))
-
-        await wait_for_env_servers(clients)
-
-        for env, client in zip(self, clients):
-            env.vf_env.env_client = client
+        """Connect all env clients to their servers and wait for health (in parallel)."""
+        await asyncio.gather(*(env.connect() for env in self))
 
     def shutdown(self) -> None:
         """Terminate all spawned env server processes."""

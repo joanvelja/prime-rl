@@ -1,12 +1,10 @@
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import EvalSamplingConfig
 from prime_rl.orchestrator.vf_utils import get_completion_len
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor import get_monitor
@@ -37,38 +35,6 @@ def compute_eval_ckpt_step(
         else:
             return highest_interval_step
     return None
-
-
-def get_eval_sampling_args(sampling_config: EvalSamplingConfig) -> dict[str, Any]:
-    """Get sampling args for evaluation."""
-    # Initialize sampling args
-    sampling_args: dict[str, Any] = {}
-
-    # Apply sampling arguments, if specified
-    if sampling_config.temperature is not None:
-        sampling_args["temperature"] = sampling_config.temperature
-    if sampling_config.max_tokens is not None:
-        sampling_args["max_tokens"] = sampling_config.max_tokens
-    if sampling_config.top_p is not None:
-        sampling_args["top_p"] = sampling_config.top_p
-    if sampling_config.reasoning_effort is not None:
-        sampling_args["reasoning_effort"] = sampling_config.reasoning_effort
-
-    extra_body: dict[str, Any] = sampling_config.extra_body.copy()
-
-    # Apply vLLM-specific sampling arguments, if specified
-    if sampling_config.top_k is not None:
-        extra_body["top_k"] = sampling_config.top_k
-    if sampling_config.min_p is not None:
-        extra_body["min_p"] = sampling_config.min_p
-    if sampling_config.min_tokens is not None:
-        extra_body["min_tokens"] = sampling_config.min_tokens
-    if sampling_config.repetition_penalty is not None:
-        extra_body["repetition_penalty"] = sampling_config.repetition_penalty
-
-    sampling_args["extra_body"] = extra_body
-
-    return sampling_args
 
 
 def _pass_at_k(n: int, c: int, k: int) -> float:
@@ -106,7 +72,7 @@ async def evaluate_and_log(
     logger = get_logger()
     logger.info(f"Evaluating {env_name} ({num_examples=}, {rollouts_per_example=})")
     eval_start_time = time.perf_counter()
-    total_inputs = len(eval_env.vf_env._get_eval_inputs(num_examples, rollouts_per_example))
+    total_inputs = len(eval_env._env._get_eval_inputs(num_examples, rollouts_per_example))
     outputs = await eval_env.evaluate(
         model_name=model_name,
         get_client=get_client,
