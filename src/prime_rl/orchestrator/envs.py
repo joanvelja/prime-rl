@@ -7,15 +7,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import verifiers as vf
+from verifiers.serve import ZMQEnvClient, ZMQEnvServer
+from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
-from prime_rl.orchestrator.vf_utils import (
-    evaluate,
-    resolve_num_workers,
-    setup_env_client,
-    spawn_env_server,
-    wait_for_env_servers,
-)
+from prime_rl.orchestrator.vf_utils import evaluate, resolve_num_workers
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import strip_env_version
 
@@ -29,17 +25,12 @@ class Env:
         env_id = strip_env_version(config.id)
         self.config = config
         self._env: vf.Environment = vf.load_environment(env_id, **config.args)
+        self.name: str = config.resolved_name
+        self.uses_group_scoring: bool = any(
+            self._env.rubric._is_group_func(func) for func in self._env.rubric._get_reward_funcs()
+        )
         self.sampling_args: dict = {}
         self._process: mp.Process | None = None
-
-    @property
-    def name(self) -> str:
-        return self.config.resolved_name
-
-    @property
-    def uses_group_scoring(self) -> bool:
-        all_funcs = self._env.rubric._get_reward_funcs()
-        return any(self._env.rubric._is_group_func(func) for func in all_funcs)
 
     def get_dataset(self, seed: int | None = None):
         return self._env.get_dataset(seed=seed)
@@ -54,21 +45,29 @@ class Env:
         """Spawn an env server if no explicit address is configured."""
         if self.config.address is not None:
             return
-        logger = get_logger()
         num_workers = resolve_num_workers(self.config.num_workers, max_concurrent)
-        env_log_dir = (log_dir / self.name).as_posix()
-        address, process = spawn_env_server(
-            env_id=strip_env_version(self.config.id),
-            env_args=self.config.args,
-            extra_env_kwargs=self.config.extra_env_kwargs,
-            num_workers=num_workers,
-            log_level=log_level,
-            log_dir=env_log_dir,
-            json_logging=json_logging,
+        address = f"tcp://127.0.0.1:{get_free_port()}"
+        process = mp.get_context("spawn").Process(
+            target=ZMQEnvServer.run_server,
+            args=(
+                strip_env_version(self.config.id),
+                self.config.args,
+                self.config.extra_env_kwargs,
+                log_level,
+                (log_dir / self.name).as_posix(),
+            ),
+            kwargs=dict(
+                address=address,
+                json_logging=json_logging,
+                console_logging=False,
+                num_workers=num_workers,
+            ),
+            daemon=False,
         )
+        process.start()
         self.config.address = address
         self._process = process
-        logger.info(f"Spawned env server for {self.name} with {num_workers} worker(s)")
+        get_logger().info(f"Spawned env server for {self.name} with {num_workers} worker(s)")
 
     async def connect(self) -> None:
         """Connect an env client to the server and assign it."""
@@ -76,10 +75,9 @@ class Env:
             raise RuntimeError(
                 f"Env {self.name} has no address configured. Call spawn() first or set address in config."
             )
-        logger = get_logger()
-        logger.info(f"Connecting env {self.name} to server at {self.config.address}")
-        client = setup_env_client(address=self.config.address, name=self.name)
-        await wait_for_env_servers([client])
+        get_logger().info(f"Connecting env {self.name} to server at {self.config.address}")
+        client = ZMQEnvClient(address=self.config.address, name=self.name)
+        await client.wait_for_server_startup()
         self._env.env_client = client
 
     async def run_rollout(

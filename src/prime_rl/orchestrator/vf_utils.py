@@ -1,14 +1,10 @@
 import asyncio
 import logging
 import math
-import multiprocessing as mp
 from collections.abc import Awaitable, Callable
 from itertools import cycle
-from typing import Any
 
 import verifiers as vf
-from verifiers.serve import EnvClient, ZMQEnvClient, ZMQEnvServer
-from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.utils.logger import InterceptHandler, ProgressTracker, get_logger
 
@@ -30,96 +26,6 @@ def resolve_num_workers(num_workers: int | str, max_concurrent: int | None = Non
         assert max_concurrent is not None, "max_concurrent must be set when num_workers='auto'"
         return max(1, math.ceil(max_concurrent / WORKERS_PER_CONCURRENCY))
     return int(num_workers)
-
-
-def spawn_env_server(
-    env_id: str,
-    env_args: dict[str, Any],
-    extra_env_kwargs: dict[str, Any],
-    address: str | None = None,
-    num_workers: int = 1,
-    # logging configs
-    log_level: str | None = None,
-    log_dir: str | None = None,
-    json_logging: bool = False,
-) -> tuple[str, mp.Process]:
-    """
-    Starts a ZMQEnvServer process in a subprocess.
-
-    Mirrors vf.Environment.start_server().
-    """
-    address = address or f"tcp://127.0.0.1:{get_free_port()}"
-    # Use spawn to avoid inheriting file descriptors (e.g. sockets) from
-    # the parent process, which has caused hangs when multiple env server
-    # subprocesses share the same fds.
-    process = mp.get_context("spawn").Process(
-        target=ZMQEnvServer.run_server,
-        args=(
-            env_id,
-            env_args,
-            extra_env_kwargs,
-            log_level,
-            log_dir,
-        ),
-        kwargs=dict(
-            address=address,
-            json_logging=json_logging,
-            console_logging=False,
-            num_workers=num_workers,
-        ),
-        daemon=False,  # cannot run daemon because env server uses subprocesses
-    )
-    process.start()
-
-    return address, process
-
-
-def setup_env_client(
-    address: str,
-    name: str | None = None,
-    # health check configs
-    health_check_interval: float = 5.0,  # 5s (we detect an env server as unhealth after 3 * 5s = 15s of unsuccessful health checks)
-    startup_timeout: float = 600.0,  # 10m
-    recovery_timeout: float = 600.0,  # 10m
-) -> EnvClient:
-    """Sets up a ZMQEnvClient for a given address."""
-    return ZMQEnvClient(
-        address=address,
-        name=name,
-        health_check_interval=health_check_interval,
-        startup_timeout=startup_timeout,
-        recovery_timeout=recovery_timeout,
-    )
-
-
-async def wait_for_env_servers(env_clients: list[EnvClient]) -> None:
-    await asyncio.gather(*[env_client.wait_for_server_startup() for env_client in env_clients])
-
-
-async def run_rollout(
-    env: vf.Environment,
-    client: vf.ClientConfig,
-    model_name: str,
-    example: dict,
-    sampling_args: dict,
-    max_retries: int = DEFAULT_RETRIES,
-    state_columns: list[str] = DEFAULT_STATE_COLUMNS,
-) -> vf.RolloutOutput:
-    """
-    Wrapper for vf.Environment.run_rollout().
-
-    Asynchronously generates and scores one rollout.
-    """
-    state_columns = state_columns + REQUIRED_STATE_COLUMNS
-    rollout_input = vf.RolloutInput(**example)
-    return await env.run_rollout(
-        rollout_input,
-        client=client,
-        model=model_name,
-        sampling_args=sampling_args,
-        max_retries=max_retries,
-        state_columns=state_columns,
-    )
 
 
 async def run_group(
@@ -290,11 +196,6 @@ def get_completion_len(output: vf.RolloutOutput) -> int:
     tokens.
     """
     return get_seq_len(output) - get_prompt_len(output)
-
-
-def task_uses_group_scoring(env: vf.Environment, env_name: str) -> bool:
-    """Check if an env's rubric contains any group-level reward functions."""
-    return any(env.rubric._is_group_func(func) for func in env.rubric._get_reward_funcs())
 
 
 def intercept_vf_logging(logger: str = "verifiers", level: str = "DEBUG", prefix: str | None = None):
