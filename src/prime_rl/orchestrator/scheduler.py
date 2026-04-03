@@ -13,7 +13,7 @@ from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet as Buffer
 from prime_rl.orchestrator.envs import Envs
 from prime_rl.orchestrator.utils import get_sampling_args
-from prime_rl.orchestrator.vf_utils import get_seq_len, run_group, run_rollout, task_uses_group_scoring
+from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import ProgressTracker, get_logger
@@ -96,16 +96,9 @@ class Scheduler:
         # Inference pool - used for admin operations (adapter sync) and metrics
         self.inference_pool = inference_pool
 
-        self.max_retries_by_task = {env.resolved_name: env.max_retries for env in config.env}
-
-        # Detect envs with group rubrics — these use run_group instead of individual run_rollout
-        self.group_scoring_tasks: set[str] = set()
-        for name in envs.names:
-            if task_uses_group_scoring(envs.get_env(name), name):
-                self.group_scoring_tasks.add(name)
-        if self.group_scoring_tasks:
-            task_list = ", ".join(sorted(self.group_scoring_tasks))
-            self.logger.info(f"Group rollout scoring active for task(s): {task_list}")
+        group_scoring_tasks = [env.name for env in envs if env.uses_group_scoring]
+        if group_scoring_tasks:
+            self.logger.info(f"Group rollout scoring active for task(s): {', '.join(group_scoring_tasks)}")
 
         # Track in-flight requests: task -> info
         self.inflight_requests: dict[asyncio.Task, InflightRolloutInfo] = {}
@@ -190,9 +183,6 @@ class Scheduler:
         await safe_cancel_all(tasks_to_cancel)
         return len(tasks_to_cancel)
 
-    def _uses_group_scoring(self, env_name: str) -> bool:
-        return env_name in self.group_scoring_tasks
-
     async def schedule_rollout(self, group_id: int):
         """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
         if self.rate_limiter:
@@ -210,32 +200,27 @@ class Scheduler:
             group.pinned_client = client_config
 
         env_name = group.example["env_name"]
-        env = self.envs.get_env(env_name)
+        env = self.envs.get(env_name)
 
-        if self._uses_group_scoring(env_name):
-            # Schedule all rollouts as a single group request (generates + scores together)
+        if env.uses_group_scoring:
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
-                run_group(
-                    env=env,
+                env.generate_group(
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
                     rollouts_per_example=self.rollouts_per_example,
                     sampling_args=self.sampling_args,
-                    max_retries=self.max_retries_by_task.get(env_name, 0),
                 )
             )
         else:
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
-                run_rollout(
-                    env=env,
+                env.generate_rollout(
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
                     sampling_args=self.sampling_args,
-                    max_retries=self.max_retries_by_task.get(env_name, 0),
                 )
             )
         self.inflight_requests[task] = InflightRolloutInfo(
@@ -429,7 +414,8 @@ class Scheduler:
                     if group is None:
                         continue
 
-                    if self._uses_group_scoring(env_name):
+                    env = self.envs.get(env_name)
+                    if env.uses_group_scoring:
                         # run_group returns all rollouts at once, already scored
                         group_rollouts: list[vf.RolloutOutput] = finished_task.result()
                         self.total_rollouts_by_task[env_name] += len(group_rollouts)

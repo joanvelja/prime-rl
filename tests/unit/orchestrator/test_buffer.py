@@ -7,7 +7,28 @@ from datasets import Dataset
 
 from prime_rl.configs.orchestrator import BufferConfig, EnvConfig
 from prime_rl.orchestrator.buffer import BufferSet
-from prime_rl.orchestrator.envs import Envs
+from prime_rl.orchestrator.envs import Env, Envs
+
+
+def make_env(name: str, vf_env: vf.Environment, **config_kwargs) -> Env:
+    """Create an Env without calling vf.load_environment."""
+    config = EnvConfig(id=name, name=name, **config_kwargs)
+    env = Env.__new__(Env)
+    env.config = config
+    env.vf_env = vf_env
+    env.name = name
+    env.max_retries = config.max_retries
+    env.ratio = config.ratio
+    env.uses_group_scoring = False
+    env._process = None
+    return env
+
+
+def make_envs(env_dict: dict[str, Env]) -> Envs:
+    """Create an Envs container from a dict of Env instances."""
+    envs = Envs.__new__(Envs)
+    envs._envs = env_dict
+    return envs
 
 
 @pytest.fixture(autouse=True)
@@ -47,10 +68,12 @@ def dummy_envs(mock_openai_client, dummy_dataset) -> Envs:
         dataset=dummy_dataset,
         rubric=vf.Rubric(),
     )
-    result = Envs.__new__(Envs)
-    result.envs = {"env_a": env_a, "env_b": env_b}
-    result.configs = [EnvConfig(id="env_a", name="env_a"), EnvConfig(id="env_b", name="env_b")]
-    return result
+    return make_envs(
+        {
+            "env_a": make_env("env_a", env_a),
+            "env_b": make_env("env_b", env_b),
+        }
+    )
 
 
 @pytest.fixture
@@ -149,9 +172,12 @@ def test_buffer_save_load_with_conversion(dummy_envs, make_rollouts, tmp_path):
 def test_buffer_env_ratios(mock_openai_client, dummy_dataset):
     env_a = vf.SingleTurnEnv(client=mock_openai_client, model="test-model", dataset=dummy_dataset, rubric=vf.Rubric())
     env_b = vf.SingleTurnEnv(client=mock_openai_client, model="test-model", dataset=dummy_dataset, rubric=vf.Rubric())
-    envs = Envs.__new__(Envs)
-    envs.envs = {"env_a": env_a, "env_b": env_b}
-    envs.configs = [EnvConfig(id="env_a", name="env_a", ratio=0.8), EnvConfig(id="env_b", name="env_b", ratio=0.2)]
+    envs = make_envs(
+        {
+            "env_a": make_env("env_a", env_a, ratio=0.8),
+            "env_b": make_env("env_b", env_b, ratio=0.2),
+        }
+    )
 
     buffer = BufferSet(envs, BufferConfig())
     assert buffer.env_buffers["env_a"].num_normal == 5
@@ -184,9 +210,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
         dataset=original_dataset,
         rubric=vf.Rubric(),
     )
-    original_env_set = Envs.__new__(Envs)
-    original_env_set.envs = {"env_a": original_env}
-    original_env_set.configs = [EnvConfig(id="env_a", name="env_a")]
+    original_env_set = make_envs({"env_a": make_env("env_a", original_env)})
 
     buffer = BufferSet(original_env_set, BufferConfig(easy_threshold=1.0))
     eb = buffer.env_buffers["env_a"]
@@ -202,9 +226,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
         dataset=new_dataset,
         rubric=vf.Rubric(),
     )
-    new_env_set = Envs.__new__(Envs)
-    new_env_set.envs = {"env_b": new_env}
-    new_env_set.configs = [EnvConfig(id="env_b", name="env_b")]
+    new_env_set = make_envs({"env_b": make_env("env_b", new_env)})
 
     new_buffer = BufferSet(new_env_set, BufferConfig())
     new_buffer.load(tmp_path / "buffer")

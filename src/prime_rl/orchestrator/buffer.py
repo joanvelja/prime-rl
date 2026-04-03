@@ -114,11 +114,11 @@ class BufferSet:
             random.seed(config.seed)
 
         self.env_buffers: dict[str, EnvBuffer] = {}
-        for name, env in envs.items():
+        for env in envs:
             ds = env.get_eval_dataset(seed=config.seed) if eval else env.get_dataset(seed=config.seed)
             if "example_id" not in ds.column_names:
                 ds = ds.map(lambda ex, idx: {**ex, "example_id": idx}, with_indices=True)
-            self.env_buffers[name] = EnvBuffer(name, ds, config)
+            self.env_buffers[env.name] = EnvBuffer(env.name, ds, config)
         self.env_names = envs.names
 
         total = sum(eb.num_total for eb in self.env_buffers.values())
@@ -127,7 +127,7 @@ class BufferSet:
             f"in {len(self.env_names)} environment(s)"
         )
 
-        env_ratios = [env.ratio for env in envs.configs]
+        env_ratios = [env.ratio for env in envs]
         if any(r is not None for r in env_ratios):
             env_ratio = mean_normalize(env_ratios)
             self.env_probs = dict(zip(self.env_names, env_ratio))

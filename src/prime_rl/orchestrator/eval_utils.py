@@ -7,7 +7,7 @@ import pandas as pd
 import verifiers as vf
 
 from prime_rl.configs.orchestrator import EvalSamplingConfig
-from prime_rl.orchestrator.vf_utils import evaluate, get_completion_len
+from prime_rl.orchestrator.vf_utils import get_completion_len
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
@@ -88,30 +88,30 @@ def compute_pass_at_k(rewards: list[float]) -> dict[str, float]:
     return {f"pass@{k}": _pass_at_k(n, c, k) for k in ks}
 
 
-async def evaluate_env(
-    env: vf.Environment,
-    env_name: str,
+async def evaluate_and_log(
+    eval_env,
     model_name: str,
     sampling_args: dict,
-    num_examples: int,
-    rollouts_per_example: int,
-    max_retries: int,
+    get_client: Callable[[], Awaitable[vf.ClientConfig]],
     ckpt_step: int,
     step: int,
-    get_client: Callable[[], Awaitable[vf.ClientConfig]],
 ):
+    """Run evaluation on an EvalEnv and log results to monitor."""
+    from prime_rl.orchestrator.envs import EvalEnv
+
+    assert isinstance(eval_env, EvalEnv)
+    env_name = eval_env.name
+    rollouts_per_example = eval_env.rollouts_per_example
+    num_examples = eval_env.num_examples
+
     logger = get_logger()
     logger.info(f"Evaluating {env_name} ({num_examples=}, {rollouts_per_example=})")
     eval_start_time = time.perf_counter()
-    total_inputs = len(env._get_eval_inputs(num_examples, rollouts_per_example))
-    outputs = await evaluate(
-        env=env,
+    total_inputs = len(eval_env.vf_env._get_eval_inputs(num_examples, rollouts_per_example))
+    outputs = await eval_env.evaluate(
         model_name=model_name,
         sampling_args=sampling_args,
-        num_examples=num_examples,
-        rollouts_per_example=rollouts_per_example,
         get_client=get_client,
-        max_retries=max_retries,
     )
     eval_time = time.perf_counter() - eval_start_time
     failed_rollouts = total_inputs - len(outputs)

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import tomli_w
 
 from prime_rl.orchestrator.advantage import compute_advantages
-from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, get_eval_sampling_args
+from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, evaluate_and_log, get_eval_sampling_args
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
@@ -34,8 +34,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
-from prime_rl.orchestrator.envs import Envs
-from prime_rl.orchestrator.eval_utils import evaluate_env
+from prime_rl.orchestrator.envs import Envs, EvalEnv
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
@@ -360,21 +359,16 @@ async def orchestrate(config: OrchestratorConfig):
             eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
             results = await asyncio.gather(
                 *[
-                    evaluate_env(
-                        env=eval_env,
-                        env_name=eval_env_name,
-                        get_client=inference_pool.get_next_client,
+                    evaluate_and_log(
+                        eval_env=eval_env,
                         model_name=scheduler.model_name,
                         sampling_args=eval_sampling_args,
-                        num_examples=eval_env_config.num_examples,
-                        rollouts_per_example=eval_env_config.rollouts_per_example,
-                        max_retries=eval_env_config.max_retries,
+                        get_client=inference_pool.get_next_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
-                    for eval_env, eval_env_name, eval_env_config in zip(
-                        eval_envs.envs.values(), eval_envs.names, eval_envs.configs
-                    )
+                    for eval_env in eval_envs
+                    if isinstance(eval_env, EvalEnv)
                 ]
             )
 
@@ -692,21 +686,16 @@ async def orchestrate(config: OrchestratorConfig):
         eval_sampling_args = get_eval_sampling_args(config.eval.sampling)
         results = await asyncio.gather(
             *[
-                evaluate_env(
-                    env=eval_env,
-                    env_name=eval_env_name,
-                    get_client=inference_pool.get_next_client,
+                evaluate_and_log(
+                    eval_env=eval_env,
                     model_name=scheduler.model_name,
                     sampling_args=eval_sampling_args,
-                    num_examples=eval_env_config.num_examples,
-                    rollouts_per_example=eval_env_config.rollouts_per_example,
-                    max_retries=eval_env_config.max_retries,
+                    get_client=inference_pool.get_next_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
-                for eval_env, eval_env_name, eval_env_config in zip(
-                    eval_envs.envs.values(), eval_envs.names, eval_envs.configs
-                )
+                for eval_env in eval_envs
+                if isinstance(eval_env, EvalEnv)
             ]
         )
 
