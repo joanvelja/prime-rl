@@ -1,6 +1,6 @@
-"""Gemma4 dense custom implementation for PrimeRL training.
+"""Gemma4 custom implementation for PrimeRL training.
 
-Supports the 31B dense variant with:
+Supports both dense (31B) and MoE (26B-A4B) variants, in text-only and VLM modes:
 - Hybrid sliding window + global attention (5:1 pattern)
 - Dual RoPE: theta=10K for sliding, theta=1M + partial_rotary_factor=0.25 for global
 - K=V sharing on global attention layers (no v_proj)
@@ -9,6 +9,9 @@ Supports the 31B dense variant with:
 - Logit softcapping (tanh at 30.0)
 - Per-layer learnable scalar
 - Scaled embeddings (× sqrt(hidden_size))
+
+VLM mode is auto-detected from the config (presence of vision_config). In VLM mode,
+the HF vision tower is used as-is and only the language model uses our custom impl.
 """
 
 from typing import Optional, Union
@@ -16,6 +19,7 @@ from typing import Optional, Union
 import torch
 from torch import Tensor, nn
 from transformers.activations import ACT2FN
+from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -241,7 +245,7 @@ class Gemma4Attention(nn.Module):
         else:
             self._flash_attn_call = self._flash_attn_func
 
-    def _compute_attention(self, q, k, v, cu_seqlens, max_seqlen):
+    def _compute_flash_attention(self, q, k, v, cu_seqlens, max_seqlen):
         args = [q, k, v, cu_seqlens, cu_seqlens]
         if self._flash_attn_version != 4:
             args.extend([max_seqlen, max_seqlen])
@@ -252,6 +256,40 @@ class Gemma4Attention(nn.Module):
         if isinstance(out, tuple):
             out = out[0]
         return out
+
+    def _compute_sdpa_attention(self, q, k, v, cu_seqlens):
+        """SDPA fallback for head_dim > 256 (global attention layers).
+
+        Handles packed sequences by building a block-diagonal causal mask from cu_seqlens.
+        """
+        # q/k/v: [total_tokens, heads, dim] -> [1, heads, total_tokens, dim]
+        q = q.unsqueeze(0).transpose(1, 2)
+        k = k.unsqueeze(0).transpose(1, 2)
+        v = v.unsqueeze(0).transpose(1, 2)
+
+        # GQA: repeat k/v heads to match q heads
+        if k.shape[1] != q.shape[1]:
+            n_rep = q.shape[1] // k.shape[1]
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+
+        # Build block-diagonal causal mask for packed sequences
+        total_len = q.shape[2]
+        if cu_seqlens is not None and len(cu_seqlens) > 2:
+            # Multiple packed sequences — need block-diagonal mask
+            mask = torch.full((total_len, total_len), float("-inf"), device=q.device, dtype=q.dtype)
+            for i in range(len(cu_seqlens) - 1):
+                start, end = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+                seq_len = end - start
+                causal = torch.tril(torch.zeros(seq_len, seq_len, device=q.device, dtype=q.dtype))
+                causal.masked_fill_(torch.triu(torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool), diagonal=1), float("-inf"))
+                mask[start:end, start:end] = causal
+            out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=1.0)
+        else:
+            out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=1.0)
+
+        # [1, heads, total_tokens, dim] -> [total_tokens, heads, dim]
+        return out.transpose(1, 2).squeeze(0)
 
     def forward(
         self,
@@ -287,7 +325,11 @@ class Gemma4Attention(nn.Module):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
-        attn_output = self._compute_attention(query_states[0], key_states[0], value_states[0], cu_seqlens, max_seqlen)
+        # FlashAttention only supports head_dim <= 256; fall back to SDPA for global layers (head_dim=512)
+        if self.head_dim > 256:
+            attn_output = self._compute_sdpa_attention(query_states[0], key_states[0], value_states[0], cu_seqlens)
+        else:
+            attn_output = self._compute_flash_attention(query_states[0], key_states[0], value_states[0], cu_seqlens, max_seqlen)
         attn_output = attn_output.contiguous().view(1, attn_output.shape[0], -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, None
@@ -372,6 +414,30 @@ class Gemma4DecoderLayer(GradientCheckpointingLayer):
 
 
 # ---------------------------------------------------------------------------
+# VLM helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_vlm_keys(state_dict: dict[str, Tensor]) -> bool:
+    return any(k.startswith("model.language_model.") for k in state_dict)
+
+
+def _remap_lm_keys(state_dict: dict[str, Tensor], to_flat: bool = True) -> None:
+    """Remap language model keys between VLM and flat format for weight conversion.
+
+    to_flat=True:  model.language_model.* -> model.*
+    to_flat=False: model.*               -> model.language_model.*
+
+    Vision keys (model.vision_tower.*, model.embed_vision.*) are never touched.
+    """
+    VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.")
+    src = "model.language_model." if to_flat else "model."
+    dst = "model." if to_flat else "model.language_model."
+    for k in [k for k in list(state_dict.keys()) if k.startswith(src) and not any(k.startswith(p) for p in VISION_PREFIXES)]:
+        state_dict[dst + k[len(src):]] = state_dict.pop(k)
+
+
+# ---------------------------------------------------------------------------
 # PreTrained base
 # ---------------------------------------------------------------------------
 
@@ -405,28 +471,48 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
     def convert_to_hf(cls, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4_moe.converting_gemma4_moe import convert_prime_to_hf
 
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=True)
         convert_prime_to_hf(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
     @classmethod
     def convert_to_prime(cls, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4_moe.converting_gemma4_moe import convert_hf_to_prime
 
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_to_prime(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
     @classmethod
     def convert_layer_to_hf(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4_moe.converting_gemma4_moe import convert_prime_layer_to_hf
 
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=True)
         convert_prime_layer_to_hf(state_dict, layer_idx)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
     @classmethod
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4_moe.converting_gemma4_moe import convert_hf_layer_to_prime
 
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_layer_to_prime(state_dict, layer_idx)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
 
@@ -512,21 +598,100 @@ class Gemma4Model(Gemma4PreTrainedModel):
 
 
 # ---------------------------------------------------------------------------
-# Causal LM
+# VLM composite model
+# ---------------------------------------------------------------------------
+
+
+class Gemma4VLMModel(nn.Module):
+    """Composite VLM body: HF vision tower + custom PrimeRL text model."""
+
+    def __init__(self, config: PretrainedConfig):
+        super().__init__()
+        self.config = config
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4MultimodalEmbedder, Gemma4VisionModel
+
+        self.vision_tower = Gemma4VisionModel._from_config(config.vision_config)
+        self.embed_vision = Gemma4MultimodalEmbedder(config.vision_config, config.text_config)
+        self.language_model = Gemma4Model(config.text_config)
+
+    def get_input_embeddings(self):
+        return self.language_model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.language_model.embed_tokens = value
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        **kwargs,
+    ) -> BaseModelOutputWithPast:
+        if inputs_embeds is None:
+            inputs_embeds = self.language_model.embed_tokens(input_ids)
+
+        if pixel_values is not None:
+            pixel_values = pixel_values.type(self.vision_tower.dtype)
+            vision_output = self.vision_tower(pixel_values, return_dict=True)
+            image_features = self.embed_vision(vision_output.last_hidden_state)
+            image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+
+            image_mask = input_ids == self.config.image_token_id
+            image_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features)
+
+        if position_ids is None:
+            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0)
+
+        return self.language_model(
+            inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Causal LM (unified text-only + VLM)
 # ---------------------------------------------------------------------------
 
 
 @auto_docstring
 class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
+    """Unified Gemma4 model for both text-only and VLM configs.
+
+    When config has a vision_config, creates a composite model with HF's frozen
+    vision tower + custom text model. Otherwise creates a text-only model.
+    """
+
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
-    def __init__(self, config: Gemma4TextConfig):
-        super().__init__(config)
-        self.model = Gemma4Model(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.final_logit_softcapping = config.final_logit_softcapping
+    def __init__(self, config, **kwargs):
+        super().__init__(config, **kwargs)
+        self._is_vlm = hasattr(config, "vision_config")
+
+        if self._is_vlm:
+            self.model = Gemma4VLMModel(config)
+            text_config = config.text_config
+            self._tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
+        else:
+            self.model = Gemma4Model(config)
+            text_config = config
+
+        self.vocab_size = text_config.vocab_size
+        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
+        self.final_logit_softcapping = text_config.final_logit_softcapping
         self.post_init()
+
+    def get_input_embeddings(self):
+        if self._is_vlm:
+            return self.model.get_input_embeddings()
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        if self._is_vlm:
+            self.model.set_input_embeddings(value)
+        else:
+            self.model.embed_tokens = value
 
     @can_return_tuple
     @auto_docstring
@@ -538,6 +703,7 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
         labels: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         temperature: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> PrimeLmOutput:
         if position_ids is None:
@@ -546,11 +712,19 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             else:
                 position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
 
-        outputs = self.model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-        )
+        if self._is_vlm:
+            outputs = self.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+                pixel_values=pixel_values,
+            )
+        else:
+            outputs = self.model(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+            )
 
         hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -560,15 +734,25 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             temperature=temperature,
         )
 
+    def _get_text_config(self):
+        return self.config.text_config if self._is_vlm else self.config
+
     def init_buffers_post_meta(self):
+        text_config = self._get_text_config()
+
         # Reinitialize embed_scale (non-persistent buffer)
-        embed_tokens = self.model.embed_tokens
-        embed_tokens.embed_scale.fill_(self.config.hidden_size**0.5)
+        if self._is_vlm:
+            embed_tokens = self.model.language_model.embed_tokens
+            rotary_emb = self.model.language_model.rotary_emb
+        else:
+            embed_tokens = self.model.embed_tokens
+            rotary_emb = self.model.rotary_emb
+
+        embed_tokens.embed_scale.fill_(text_config.hidden_size**0.5)
 
         # Initialize dual RoPE inv_freq buffers
-        rotary_emb = self.model.rotary_emb
         for layer_type in rotary_emb.layer_types:
-            rope_params = self.config.rope_parameters[layer_type]
+            rope_params = text_config.rope_parameters[layer_type]
             rope_type = rope_params["rope_type"]
             if rope_type != "default":
                 rope_init_fn = ROPE_INIT_FUNCTIONS[rope_type]
@@ -579,6 +763,6 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             if layer_type == "full_attention" and rope_type == "proportional":
                 kwargs["head_dim_key"] = "global_head_dim"
 
-            inv_freq, attn_scaling = rope_init_fn(self.config, **kwargs)
+            inv_freq, attn_scaling = rope_init_fn(text_config, **kwargs)
             getattr(rotary_emb, f"{layer_type}_inv_freq").copy_(inv_freq)
             rotary_emb.attention_scaling[layer_type] = attn_scaling

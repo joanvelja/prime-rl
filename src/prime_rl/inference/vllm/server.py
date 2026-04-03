@@ -280,6 +280,8 @@ async def custom_init_app_state(
         serving_chat.__dict__.update(original_chat.__dict__)
         state.openai_serving_chat = serving_chat
         state.openai_serving_chat_with_tokens = serving_chat
+    else:
+        state.openai_serving_chat_with_tokens = None
 
 
 import vllm.entrypoints.openai.api_server

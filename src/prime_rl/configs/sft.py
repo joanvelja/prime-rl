@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -85,6 +85,14 @@ class SFTDataConfig(BaseDataConfig):
 
     # Configuring
     loss_mask: LossMaskConfig = LossMaskConfig()
+
+    chat_template_kwargs: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Extra keyword arguments passed to tokenizer.apply_chat_template(). "
+            "E.g. {'enable_thinking': true} for models with thinking-aware templates (Gemma4, Qwen3)."
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def validate_subsets_and_splits(self):
