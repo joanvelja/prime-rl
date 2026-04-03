@@ -39,6 +39,8 @@ from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
+    get_eval_sampling_args,
+    get_train_sampling_args,
     get_weight_dir,
     print_benchmark,
     set_semaphore,
@@ -162,7 +164,8 @@ async def orchestrate(config: OrchestratorConfig):
     # Load environments
     logger.info("Loading training environments")
     is_vllm = config.teacher_rollout_model is None
-    train_envs = TrainEnvs(config.train_envs, config.sampling, is_vllm=is_vllm)
+    train_envs = TrainEnvs(config.train_envs)
+    train_envs.set_sampling_args(get_train_sampling_args(config.sampling, is_vllm=is_vllm))
     logger.info(f"Loaded {len(train_envs)} training environment(s): {', '.join(train_envs.names)}")
 
     train_envs.spawn(
@@ -176,7 +179,8 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval:
         logger.info("Loading eval environments")
-        eval_envs = EvalEnvs(config.eval_envs, config.eval.sampling)
+        eval_envs = EvalEnvs(config.eval_envs)
+        eval_envs.set_sampling_args(get_eval_sampling_args(config.eval.sampling))
         logger.info(f"Loaded {len(eval_envs)} eval environment(s): {', '.join(eval_envs.names)}")
 
         eval_envs.spawn(

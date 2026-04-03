@@ -8,8 +8,7 @@ from pathlib import Path
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, EvalSamplingConfig, SamplingConfig, TrainEnvConfig
-from prime_rl.orchestrator.utils import get_eval_sampling_args, get_train_sampling_args
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.vf_utils import (
     evaluate,
     resolve_num_workers,
@@ -39,7 +38,8 @@ class Env:
 
     @property
     def uses_group_scoring(self) -> bool:
-        return any(self._env.rubric._is_group_func(func) for func in self._env.rubric._get_reward_funcs())
+        all_funcs = self._env.rubric._get_reward_funcs()
+        return any(self._env.rubric._is_group_func(func) for func in all_funcs)
 
     def get_dataset(self, seed: int | None = None):
         return self._env.get_dataset(seed=seed)
@@ -82,7 +82,7 @@ class Env:
         await wait_for_env_servers([client])
         self._env.env_client = client
 
-    async def generate_rollout(
+    async def run_rollout(
         self,
         client: vf.ClientConfig,
         example: dict,
@@ -98,7 +98,7 @@ class Env:
             state_columns=REQUIRED_STATE_COLUMNS,
         )
 
-    async def generate_group(
+    async def run_group(
         self,
         client: vf.ClientConfig,
         example: dict,
@@ -131,17 +131,15 @@ class Env:
 class TrainEnv(Env):
     config: TrainEnvConfig
 
-    def __init__(self, config: TrainEnvConfig, sampling_config: SamplingConfig, is_vllm: bool = True):
+    def __init__(self, config: TrainEnvConfig):
         super().__init__(config)
-        self.sampling_args = get_train_sampling_args(sampling_config, is_vllm=is_vllm)
 
 
 class EvalEnv(Env):
     config: EvalEnvConfig
 
-    def __init__(self, config: EvalEnvConfig, sampling_config: EvalSamplingConfig):
+    def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
-        self.sampling_args = get_eval_sampling_args(sampling_config)
 
     def get_dataset(self, seed: int | None = None):
         return self._env.get_eval_dataset(seed=seed)
@@ -177,6 +175,10 @@ class Envs:
 
     def get(self, name: str) -> Env:
         return self._envs[name]
+
+    def set_sampling_args(self, sampling_args: dict) -> None:
+        for env in self:
+            env.sampling_args = sampling_args
 
     def __iter__(self):
         return iter(self._envs.values())
@@ -219,18 +221,18 @@ class Envs:
 class TrainEnvs(Envs):
     """Collection of training environments."""
 
-    def __init__(self, configs: Sequence[TrainEnvConfig], sampling_config: SamplingConfig, is_vllm: bool = True):
+    def __init__(self, configs: Sequence[TrainEnvConfig]):
         self._envs: dict[str, Env] = {}
         for config in configs:
-            env = TrainEnv(config, sampling_config, is_vllm=is_vllm)
+            env = TrainEnv(config)
             self._envs[env.name] = env
 
 
 class EvalEnvs(Envs):
     """Collection of evaluation environments."""
 
-    def __init__(self, configs: Sequence[EvalEnvConfig], sampling_config: EvalSamplingConfig):
+    def __init__(self, configs: Sequence[EvalEnvConfig]):
         self._envs: dict[str, Env] = {}
         for config in configs:
-            env = EvalEnv(config, sampling_config)
+            env = EvalEnv(config)
             self._envs[env.name] = env

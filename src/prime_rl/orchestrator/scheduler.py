@@ -196,7 +196,7 @@ class Scheduler:
         if env.uses_group_scoring:
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
-                env.generate_group(
+                env.run_group(
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
@@ -206,7 +206,7 @@ class Scheduler:
         else:
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
-                env.generate_rollout(
+                env.run_rollout(
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
