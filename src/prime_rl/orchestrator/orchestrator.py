@@ -10,6 +10,7 @@ import tomli_w
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, get_eval_sampling_args
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
+from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
     build_vlm_image_cache,
@@ -357,6 +358,14 @@ async def orchestrate(config: OrchestratorConfig):
     await inference_pool.wait_for_ready(rollout_model_name)
 
     logger.success("Inference pool ready")
+
+    # Start inference metrics collector
+    inference_metrics_collector = None
+    if config.collect_inference_metrics:
+        inference_metrics_collector = InferenceMetricsCollector(
+            inference_pool, poll_interval=config.inference_metrics_poll_interval
+        )
+        await inference_metrics_collector.start()
 
     # Check health of teacher inference server if configured
     if config.teacher_model and teacher_inference_pool:
@@ -908,6 +917,10 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Cancel event loop lag monitor task
     event_loop_lag_monitor_task.cancel()
+
+    # Stop inference metrics collector
+    if inference_metrics_collector is not None:
+        await inference_metrics_collector.stop()
 
     # Shutdown env processes (also registered as atexit handler for crash safety)
     atexit.unregister(_cleanup_env_processes)
