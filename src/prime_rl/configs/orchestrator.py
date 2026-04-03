@@ -337,8 +337,6 @@ class EnvConfig(BaseConfig):
 
 
 TrainEnvConfig = EnvConfig
-# class TrainEnvConfig(EnvConfig):
-# """Configures a training environment."""
 
 
 class EvalEnvConfig(EnvConfig):
