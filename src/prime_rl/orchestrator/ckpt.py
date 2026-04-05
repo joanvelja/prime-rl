@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from prime_rl.configs.orchestrator import CheckpointConfig
-from prime_rl.orchestrator.buffer import Buffers
+from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import get_ckpt_dir, get_step_path
 
@@ -33,7 +33,7 @@ class CheckpointManager:
         self,
         ckpt_path: Path,
         progress: Progress,
-        buffer: Buffers,
+        buffer: Buffer,
     ):
         self.logger.debug(f"Saving orchestrator checkpoint to {ckpt_path}")
         start_time = time.perf_counter()
@@ -47,7 +47,7 @@ class CheckpointManager:
 
         self.logger.debug(f"Orchestrator checkpoint saved in {time.perf_counter() - start_time:.2f} seconds")
 
-    def load_from_path(self, ckpt_path: Path, progress: Progress, buffer: Buffers) -> None:
+    def load_from_path(self, ckpt_path: Path, progress: Progress, buffer: Buffer) -> None:
         """Loads a checkpoint from a given path in-place."""
         self.logger.debug(f"Loading checkpoint from {ckpt_path}")
         start_time = time.perf_counter()
@@ -71,7 +71,7 @@ class CheckpointManager:
 
         self.logger.debug(f"Orchestrator checkpoint loaded in {time.perf_counter() - start_time:.2f} seconds")
 
-    def load(self, progress: Progress, buffer: Buffers, step: int) -> None:
+    def load(self, progress: Progress, buffer: Buffer, step: int) -> None:
         """Loads a checkpoint from a given path."""
         ckpt_path = self.get_ckpt_path(step)
         if not ckpt_path.exists():
@@ -81,7 +81,7 @@ class CheckpointManager:
     def save(
         self,
         progress: Progress,
-        buffer: Buffers,
+        buffer: Buffer,
         step: int,
     ) -> None:
         """Saves the full checkpoint state for a specified step."""

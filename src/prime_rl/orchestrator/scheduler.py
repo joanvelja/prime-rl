@@ -10,7 +10,7 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
-from prime_rl.orchestrator.buffer import Buffers
+from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.envs import Envs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -58,7 +58,7 @@ class Scheduler:
         self,
         envs: Envs,
         inference_pool: InferencePool,
-        buffer: Buffers,
+        buffer: Buffer,
         config: OrchestratorConfig,
         max_inflight_rollouts: int,
         max_async_level: int,

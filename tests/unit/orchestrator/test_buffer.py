@@ -6,7 +6,7 @@ import verifiers as vf
 from datasets import Dataset
 
 from prime_rl.configs.orchestrator import BufferConfig, EnvConfig
-from prime_rl.orchestrator.buffer import Buffers
+from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.envs import Envs, TrainEnv
 
 
@@ -77,7 +77,7 @@ def dummy_envs(mock_openai_client, dummy_dataset) -> Envs:
 @pytest.fixture
 def make_rollouts():
     def _make_rollouts(
-        buffer: Buffers, env_name: str, indices: list[int], rewards: list[float]
+        buffer: Buffer, env_name: str, indices: list[int], rewards: list[float]
     ) -> list[vf.RolloutOutput]:
         all_rollouts = []
         eb = buffer.env_buffers[env_name]
@@ -108,12 +108,12 @@ def make_rollouts():
     return _make_rollouts
 
 
-def get_normal_count(buffer: Buffers) -> int:
+def get_normal_count(buffer: Buffer) -> int:
     return sum(eb.num_normal for eb in buffer.env_buffers.values())
 
 
 def test_buffer_init_and_sample(dummy_envs):
-    buffer = Buffers(dummy_envs, BufferConfig())
+    buffer = Buffer(dummy_envs, BufferConfig())
     assert buffer.env_buffers["env_a"].num_normal == 5
     assert buffer.env_buffers["env_b"].num_normal == 5
     samples = buffer.sample_examples(2)
@@ -122,7 +122,7 @@ def test_buffer_init_and_sample(dummy_envs):
 
 def test_buffer_problem_pool_assignment(dummy_envs, make_rollouts):
     """Problems are moved to easy/hard pools based on reward thresholds."""
-    buffer = Buffers(dummy_envs, BufferConfig(easy_threshold=1.0, hard_threshold=0.0))
+    buffer = Buffer(dummy_envs, BufferConfig(easy_threshold=1.0, hard_threshold=0.0))
     buffer.update(make_rollouts(buffer, "env_a", list(range(5)), rewards=[1.0, 1.0, 0.5, 0.5, 0.0]))
 
     assert len(buffer.env_buffers["env_a"].easy_examples) == 2
@@ -133,7 +133,7 @@ def test_buffer_problem_pool_assignment(dummy_envs, make_rollouts):
 
 def test_buffer_online_difficulty_filtering(dummy_envs, make_rollouts):
     """With online_difficulty_filtering=True, only partial reward rollouts are kept."""
-    buffer = Buffers(
+    buffer = Buffer(
         dummy_envs,
         BufferConfig(online_difficulty_filtering=True),
     )
@@ -145,7 +145,7 @@ def test_buffer_online_difficulty_filtering(dummy_envs, make_rollouts):
 
 def test_buffer_no_filtering_by_default(dummy_envs, make_rollouts):
     """With online_difficulty_filtering=False (default), all rollouts are kept."""
-    buffer = Buffers(dummy_envs, BufferConfig())
+    buffer = Buffer(dummy_envs, BufferConfig())
     buffer.update(make_rollouts(buffer, "env_a", list(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
 
     # All 5 problems -> 10 rollouts kept
@@ -154,11 +154,11 @@ def test_buffer_no_filtering_by_default(dummy_envs, make_rollouts):
 
 def test_buffer_save_load_with_conversion(dummy_envs, make_rollouts, tmp_path):
     """Easy/hard problems are partially converted to normal on load."""
-    buffer = Buffers(dummy_envs, BufferConfig(easy_threshold=1.0, hard_threshold=0.0))
+    buffer = Buffer(dummy_envs, BufferConfig(easy_threshold=1.0, hard_threshold=0.0))
     buffer.update(make_rollouts(buffer, "env_a", list(range(5)), rewards=[1.0, 1.0, 0.5, 0.5, 0.0]))
     buffer.save(tmp_path / "buffer")
 
-    new_buffer = Buffers(dummy_envs, BufferConfig(easy_fraction=0.5, hash_keys=["prompt", "env_name"]))
+    new_buffer = Buffer(dummy_envs, BufferConfig(easy_fraction=0.5, hash_keys=["prompt", "env_name"]))
     new_buffer.load(tmp_path / "buffer")
 
     # 1 of 2 easy problems converted to normal
@@ -177,7 +177,7 @@ def test_buffer_env_ratios(mock_openai_client, dummy_dataset):
         }
     )
 
-    buffer = Buffers(envs, BufferConfig())
+    buffer = Buffer(envs, BufferConfig())
     assert buffer.env_buffers["env_a"].num_normal == 5
     assert buffer.env_buffers["env_b"].num_normal == 5
 
@@ -210,7 +210,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
     )
     original_env_set = make_envs({"env_a": make_env("env_a", original_env)})
 
-    buffer = Buffers(original_env_set, BufferConfig(easy_threshold=1.0))
+    buffer = Buffer(original_env_set, BufferConfig(easy_threshold=1.0))
     eb = buffer.env_buffers["env_a"]
     example_id = list(eb.examples.keys())[0]
     example = eb.examples.pop(example_id)
@@ -226,7 +226,7 @@ def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):
     )
     new_env_set = make_envs({"env_b": make_env("env_b", new_env)})
 
-    new_buffer = Buffers(new_env_set, BufferConfig())
+    new_buffer = Buffer(new_env_set, BufferConfig())
     new_buffer.load(tmp_path / "buffer")
 
     assert len(new_buffer.env_buffers["env_b"].easy_examples) == 0

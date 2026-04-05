@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 POOLS = ["easy", "normal", "hard"]
 
 
-class Buffer:
+class _EnvBuffer:
     """Manages examples and difficulty pools for a single env."""
 
     def __init__(self, env: TrainEnv, config: BufferConfig):
@@ -106,7 +106,7 @@ class Buffer:
         return metrics
 
 
-class Buffers:
+class Buffer:
     """Manages multiple Buffers with env-ratio-aware sampling."""
 
     def __init__(self, envs: TrainEnvs, config: BufferConfig):
@@ -116,9 +116,9 @@ class Buffers:
         if config.seed is not None:
             random.seed(config.seed)
 
-        self.env_buffers: dict[str, Buffer] = {}
+        self.env_buffers: dict[str, _EnvBuffer] = {}
         for env in envs:
-            self.env_buffers[env.name] = Buffer(env, config)
+            self.env_buffers[env.name] = _EnvBuffer(env, config)
         self.env_names = envs.names
 
         total = sum(eb.num_total for eb in self.env_buffers.values())
@@ -269,7 +269,7 @@ class Buffers:
             self.rollout_buffer.extend(valid)
             self.logger.debug(f"Loaded {len(valid)} rollout(s) from checkpoint.")
 
-        def convert_to_normal(eb: Buffer, pool: list[dict], fraction: float) -> int:
+        def convert_to_normal(eb: _EnvBuffer, pool: list[dict], fraction: float) -> int:
             if fraction <= 0.0 or not pool:
                 return 0
             num_to_move = round(len(pool) * fraction)
