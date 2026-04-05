@@ -533,20 +533,6 @@ class BufferConfig(BaseConfig):
         return self
 
 
-class VerificationConfig(BaseConfig):
-    """Configures rollout verification and rubric scoring."""
-
-    enabled: Annotated[
-        bool,
-        Field(
-            description=(
-                "Whether to verify training rollouts using the environment rubric. "
-                "If False, rewards are always set to 0."
-            ),
-        ),
-    ] = True
-
-
 class DefaultAdvantageConfig(BaseModel):
     """Config for the default advantage."""
 
@@ -735,9 +721,6 @@ class OrchestratorConfig(TrainEnvsConfig):
 
     # Data buffer configuration
     buffer: BufferConfig = BufferConfig()
-
-    # Rollout verification configuration
-    verification: VerificationConfig = VerificationConfig()
 
     # The advantage configuration
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
@@ -950,28 +933,6 @@ class OrchestratorConfig(TrainEnvsConfig):
         return self
 
     @model_validator(mode="after")
-    def validate_verification_config(self):
-        if self.verification.enabled:
-            return self
-
-        if self.buffer.online_difficulty_filtering:
-            raise ValueError(
-                "verification.enabled cannot be False when buffer.online_difficulty_filtering is True. "
-                "These features depend on rewards which are disabled when verification.enabled=False."
-            )
-        if self.buffer.easy_threshold is not None:
-            raise ValueError(
-                "verification.enabled cannot be False when buffer.easy_threshold is set. "
-                "Easy threshold depends on rewards which are disabled when verification.enabled=False."
-            )
-        if self.buffer.hard_threshold is not None:
-            raise ValueError(
-                "verification.enabled cannot be False when buffer.hard_threshold is set. "
-                "Hard threshold depends on rewards which are disabled when verification.enabled=False."
-            )
-        return self
-
-    @model_validator(mode="after")
     def validate_length_shaping_requires_online_difficulty_filtering(self):
         if isinstance(self.advantage, DefaultAdvantageConfig) and self.advantage.length_shaping_alpha is not None:
             if not self.buffer.online_difficulty_filtering:
@@ -995,10 +956,7 @@ class OrchestratorConfig(TrainEnvsConfig):
 
     @model_validator(mode="after")
     def resolve_env_config(self):
-        """Populate extra_env_kwargs from top-level and per-env fields."""
+        """Populate extra_env_kwargs from top-level fields."""
         for env in self.env:
-            env.extra_env_kwargs.update(
-                max_seq_len=self.seq_len,
-                score_rollouts=self.verification.enabled,
-            )
+            env.extra_env_kwargs.update(max_seq_len=self.seq_len)
         return self
