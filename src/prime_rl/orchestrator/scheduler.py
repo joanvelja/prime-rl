@@ -405,7 +405,8 @@ class Scheduler:
                         continue
 
                     env = self.envs.get(env_name)
-                    rollouts: list[vf.RolloutOutput] = finished_task.result()
+                    result = finished_task.result()
+                    rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
                     self.total_rollouts_by_env[env_name] += len(rollouts)
 
                     # Check for empty/errored rollouts and reschedule
