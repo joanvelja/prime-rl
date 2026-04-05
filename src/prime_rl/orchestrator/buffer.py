@@ -56,7 +56,8 @@ class _EnvBuffer:
         return self.num_normal + len(self.easy_examples) + len(self.hard_examples)
 
     def sample_example(self) -> dict:
-        return random.choice(list(self.examples.values()))
+        key = random.choice(tuple(self.examples))
+        return self.examples[key]
 
     def get_example_hash(self, example: dict) -> str:
         hash_keys = [key for key in self.config.hash_keys if key in example]
