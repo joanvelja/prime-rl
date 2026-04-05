@@ -64,7 +64,7 @@ class _EnvBuffer:
         assert hash_keys, "No hashable keys found in example."
         return hashlib.sha256(json.dumps([example[key] for key in hash_keys]).encode()).hexdigest()
 
-    def update_pools(self, example_id: int, avg_reward: float, num_rollouts: int) -> str:
+    def update_pools(self, example_id: int, avg_reward: float) -> str:
         """Assign example to pool based on reward. Returns pool name."""
         if self.config.easy_threshold is not None and avg_reward >= self.config.easy_threshold:
             pool = "easy"
@@ -164,7 +164,7 @@ class Buffer:
         for (env_name, example_id), example_rollouts in rollouts_by_example.items():
             eb = self.env_buffers[env_name]
             avg_reward = mean([r["reward"] for r in example_rollouts])
-            eb.update_pools(example_id, avg_reward, len(example_rollouts))
+            eb.update_pools(example_id, avg_reward)
 
             if self.config.online_difficulty_filtering:
                 if avg_reward == 0.0:
