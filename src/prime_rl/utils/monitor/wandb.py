@@ -12,6 +12,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from wandb.errors import CommError
 
 from prime_rl.configs.shared import WandbConfig, WandbWithExtrasConfig
+from prime_rl.utils.chat_template import deserialize_tool_calls
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
@@ -197,7 +198,12 @@ class WandbMonitor(Monitor):
                 try:
                     completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
                 except Exception:
-                    completion = str(completion)
+                    try:
+                        completion = self.tokenizer.apply_chat_template(
+                            deserialize_tool_calls(completion), tokenize=False
+                        )
+                    except Exception:
+                        completion = str(completion)
             sample = {
                 "step": step,
                 "env": env_name,
