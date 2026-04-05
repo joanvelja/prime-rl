@@ -55,9 +55,6 @@ class Env:
     def requires_group_scoring(self) -> bool:
         return any(self.env.rubric._is_group_func(func) for func in self.env.rubric._get_reward_funcs())
 
-    def get_dataset(self, seed: int | None = None):
-        return self.env.get_dataset(seed=seed)
-
     async def start(
         self,
         log_dir: Path,
@@ -160,15 +157,15 @@ class TrainEnv(Env):
     def __init__(self, config: TrainEnvConfig):
         super().__init__(config)
 
+    def get_dataset(self, seed: int | None = None):
+        return self.env.get_dataset(seed=seed)
+
 
 class EvalEnv(Env):
     config: EvalEnvConfig
 
     def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
-
-    def get_dataset(self, seed: int | None = None, n: int = -1):
-        return self.env.get_eval_dataset(seed=seed, n=n)
 
     async def evaluate(
         self,
@@ -180,7 +177,7 @@ class EvalEnv(Env):
         n, k = self.config.num_examples, self.config.rollouts_per_example
         get_logger().info(f"Evaluating {self.name} (num_examples={n}, rollouts_per_example={k})")
 
-        examples = self.get_dataset(n=n).to_list()
+        examples = self.env.get_eval_dataset(n=n).to_list()
         total_rollouts = len(examples) * k
         pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
@@ -200,7 +197,7 @@ class EvalEnv(Env):
                     pbar.update(k)
                     return outputs
                 except Exception as e:
-                    get_logger().warning(f"Rollout failed: {e}")
+                    get_logger().warning(f"Group failed: {e}")
                     pbar.update(k)
                     return None
 
