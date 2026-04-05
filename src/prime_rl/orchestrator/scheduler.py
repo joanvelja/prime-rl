@@ -140,7 +140,7 @@ class Scheduler:
 
     async def cancel_inflight_rollouts(self):
         """Cancel all in-flight rollout requests."""
-        count = len(self.inflight_requests)
+        count = sum(info.rollout_count for info in self.inflight_requests.values())
         await safe_cancel_all(list(self.inflight_requests))
         self.inflight_requests.clear()
         self.groups.clear()
@@ -164,16 +164,18 @@ class Scheduler:
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
     async def drop_group(self, group_id: int) -> int:
-        """Drop a group and cancel any remaining in-flight rollouts for it."""
+        """Drop a group and cancel any remaining in-flight rollouts for it. Returns the number of cancelled rollouts."""
         tasks_to_cancel = []
+        rollout_count = 0
         for task, info in list(self.inflight_requests.items()):
             if info.group_id != group_id:
                 continue
             self.inflight_requests.pop(task, None)
             tasks_to_cancel.append(task)
+            rollout_count += info.rollout_count
         self.groups.pop(group_id, None)
         await safe_cancel_all(tasks_to_cancel)
-        return len(tasks_to_cancel)
+        return rollout_count
 
     async def schedule_rollout(self, group_id: int):
         """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
@@ -225,13 +227,12 @@ class Scheduler:
 
     @property
     def inflight_rollout_count(self) -> int:
-        return len(self.inflight_requests)
+        return sum(info.rollout_count for info in self.inflight_requests.values())
 
     @property
     def inflight_sample_count(self) -> int:
-        inflight = sum(info.rollout_count for info in self.inflight_requests.values())
         pending = sum(g.rollouts_to_schedule for g in self.groups.values())
-        return inflight + pending
+        return self.inflight_rollout_count + pending
 
     async def _schedule_next_request(self) -> bool:
         remaining_capacity = self.max_inflight_rollouts - self.inflight_rollout_count
