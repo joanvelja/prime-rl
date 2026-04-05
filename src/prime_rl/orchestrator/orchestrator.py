@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import tomli_w
 
 from prime_rl.orchestrator.advantage import compute_advantages
-from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, evaluate_and_log
+from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
@@ -34,7 +34,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import BufferSet
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
-from prime_rl.orchestrator.envs import EvalEnv, EvalEnvs, TrainEnvs
+from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
@@ -43,7 +43,6 @@ from prime_rl.orchestrator.utils import (
     get_train_sampling_args,
     get_weight_dir,
     print_benchmark,
-    set_semaphore,
     setup_external_rollout_model,
 )
 from prime_rl.orchestrator.vf_utils import (
@@ -163,10 +162,9 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Load environments
     logger.info("Loading training environments")
-    is_vllm = config.teacher_rollout_model is None
     train_envs = TrainEnvs(config.train_envs)
-    train_envs.set_sampling_args(get_train_sampling_args(config.sampling, is_vllm=is_vllm))
-    logger.info(f"Loaded {len(train_envs)} training environment(s): {', '.join(train_envs.names)}")
+    train_envs.set_sampling_args(get_train_sampling_args(config.sampling, is_vllm=config.teacher_rollout_model is None))
+    logger.info(f"Loaded {len(train_envs)} training environment(s) ({', '.join(train_envs.names)})")
 
     train_envs.spawn(
         log_dir=get_log_dir(config.output_dir.parent) / "envs" / "train",
@@ -181,7 +179,7 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info("Loading eval environments")
         eval_envs = EvalEnvs(config.eval_envs)
         eval_envs.set_sampling_args(get_eval_sampling_args(config.eval.sampling))
-        logger.info(f"Loaded {len(eval_envs)} eval environment(s): {', '.join(eval_envs.names)}")
+        logger.info(f"Loaded {len(eval_envs)} eval environment(s) ({', '.join(eval_envs.names)})")
 
         eval_envs.spawn(
             log_dir=get_log_dir(config.output_dir.parent) / "envs" / "eval",
@@ -190,8 +188,6 @@ async def orchestrate(config: OrchestratorConfig):
         )
         await eval_envs.connect()
         logger.success("Eval environments ready")
-    else:
-        eval_envs = None
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
@@ -291,10 +287,8 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info("Training from scratch")
 
     # Iterate over dataset in batches
-    max_steps = config.max_steps or int(1e9)
-    logger.info(f"Starting orchestrator loop (max_steps={max_steps or 'infinite'})")
+    logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
-    await set_semaphore(config.max_concurrent or -1)
 
     # Persistent ThreadPoolExecutor for parallel rollout processing
     rollout_executor = ThreadPoolExecutor(max_workers=64)
@@ -359,17 +353,15 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
-            results = await asyncio.gather(
+            await asyncio.gather(
                 *[
-                    evaluate_and_log(
-                        eval_env=eval_env,
+                    eval_env.evaluate(
                         model_name=scheduler.model_name,
                         get_client=inference_pool.get_next_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
                     for eval_env in eval_envs
-                    if isinstance(eval_env, EvalEnv)
                 ]
             )
 
@@ -680,17 +672,15 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
-        results = await asyncio.gather(
+        await asyncio.gather(
             *[
-                evaluate_and_log(
-                    eval_env=eval_env,
+                eval_env.evaluate(
                     model_name=scheduler.model_name,
                     get_client=inference_pool.get_next_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
                 for eval_env in eval_envs
-                if isinstance(eval_env, EvalEnv)
             ]
         )
 

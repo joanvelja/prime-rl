@@ -324,8 +324,13 @@ class EnvConfig(BaseConfig):
     ] = 0
 
     @property
+    def stripped_id(self) -> str:
+        """Environment ID without the @version suffix."""
+        return self.id.split("@")[0]
+
+    @property
     def resolved_name(self) -> str:
-        return self.name or self.id.split("@")[0]
+        return self.name or self.stripped_id
 
     @model_validator(mode="after")
     def validate_env_name(self):
@@ -787,13 +792,6 @@ class OrchestratorConfig(TrainEnvsConfig):
         ),
     ] = Path("outputs/run_default")
 
-    max_concurrent: Annotated[
-        int | None,
-        Field(
-            description="Maximum number of concurrent rollouts to generate and score per-environment. If None, will not limit concurrency.",
-        ),
-    ] = None
-
     tasks_per_minute: Annotated[
         int | None,
         Field(
@@ -927,12 +925,6 @@ class OrchestratorConfig(TrainEnvsConfig):
         types = [f.type for f in self.filters]
         if len(types) != len(set(types)):
             raise ValueError(f"Duplicate filter types: {types}. Each filter type may only appear once.")
-        return self
-
-    @model_validator(mode="after")
-    def validate_max_concurrent(self):
-        if self.max_concurrent is not None and self.max_concurrent < self.rollouts_per_example:
-            raise ValueError("max_concurrent must be at least the number of rollouts per example")
         return self
 
     @model_validator(mode="after")

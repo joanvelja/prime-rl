@@ -3,37 +3,59 @@ from __future__ import annotations
 import asyncio
 import atexit
 import multiprocessing as mp
+import time
 from collections.abc import Awaitable, Callable, Sequence
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 
+import pandas as pd
 import verifiers as vf
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
-from prime_rl.orchestrator.vf_utils import resolve_num_workers
+from prime_rl.orchestrator.eval_utils import compute_pass_at_k
+from prime_rl.orchestrator.vf_utils import get_completion_len, resolve_num_workers
 from prime_rl.utils.logger import ProgressTracker, get_logger
-from prime_rl.utils.utils import strip_env_version
+from prime_rl.utils.monitor import get_monitor
+from prime_rl.utils.utils import capitalize
 
 REQUIRED_STATE_COLUMNS = ["trajectory", "sampling_args"]
 
 
 class Env:
-    """Wraps a verifiers Environment with its config and per-env state."""
+    """Wraps a vf.Environment - only exposes features used in PRIME-RL."""
 
     def __init__(self, config: EnvConfig):
-        env_id = strip_env_version(config.id)
         self.config = config
-        self._env: vf.Environment = vf.load_environment(env_id, **config.args)
-        self.name: str = config.resolved_name
-        self.uses_group_scoring: bool = any(
-            self._env.rubric._is_group_func(func) for func in self._env.rubric._get_reward_funcs()
-        )
         self.sampling_args: dict = {}
-        self._process: mp.Process | None = None
+
+        self._env: vf.Environment = vf.load_environment(config.stripped_id, **config.args)
+        self._env_client: ZMQEnvClient | None = None
+        self._env_server_process: BaseProcess | None = None
+
+    @property
+    def name(self) -> str:
+        return self.config.resolved_name
+
+    @property
+    def env(self) -> vf.Environment:
+        return self._env
+
+    @property
+    def env_client(self) -> ZMQEnvClient:
+        if not self._env_client:
+            raise RuntimeError(
+                f"Env {self.name} has no env client connected. Call connect() first to connect to an env server."
+            )
+        return self._env_client
+
+    @property
+    def requires_group_scoring(self) -> bool:
+        return any(self.env.rubric._is_group_func(func) for func in self.env.rubric._get_reward_funcs())
 
     def get_dataset(self, seed: int | None = None):
-        return self._env.get_dataset(seed=seed)
+        return self.env.get_dataset(seed=seed)
 
     def spawn(
         self,
@@ -50,7 +72,7 @@ class Env:
         process = mp.get_context("spawn").Process(
             target=ZMQEnvServer.run_server,
             args=(
-                strip_env_version(self.config.id),
+                self.config.stripped_id,
                 self.config.args,
                 self.config.extra_env_kwargs,
                 log_level,
@@ -66,7 +88,7 @@ class Env:
         )
         process.start()
         self.config.address = address
-        self._process = process
+        self._env_server_process = process
         get_logger().info(f"Spawned env server for {self.name} with {num_workers} worker(s)")
 
     async def connect(self) -> None:
@@ -76,54 +98,53 @@ class Env:
                 f"Env {self.name} has no address configured. Call spawn() first or set address in config."
             )
         get_logger().info(f"Connecting env {self.name} to server at {self.config.address}")
-        client = ZMQEnvClient(address=self.config.address, name=self.name)
-        await client.wait_for_server_startup()
-        self._env.env_client = client
+        self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
+        await self.env_client.wait_for_server_startup()
 
     async def run_rollout(
         self,
         client: vf.ClientConfig,
-        example: dict,
+        example: vf.RolloutInput,
         model_name: str,
     ) -> vf.RolloutOutput:
-        rollout_input = vf.RolloutInput(**example)
-        return await self._env.run_rollout(
-            rollout_input,
+        return await self.env.run_rollout(
+            example,
             client=client,
             model=model_name,
             sampling_args=self.sampling_args,
             max_retries=self.config.max_retries,
             state_columns=REQUIRED_STATE_COLUMNS,
+            env_client=self.env_client,
         )
 
     async def run_group(
         self,
         client: vf.ClientConfig,
-        example: dict,
+        example: vf.RolloutInput,
         model_name: str,
         rollouts_per_example: int,
     ) -> list[vf.RolloutOutput]:
-        group_inputs = [vf.RolloutInput(**example) for _ in range(rollouts_per_example)]
-        return await self._env.run_group(
-            group_inputs,
+        return await self.env.run_group(
+            [example for _ in range(rollouts_per_example)],
             client=client,
             model=model_name,
             sampling_args=self.sampling_args,
             max_retries=self.config.max_retries,
             state_columns=REQUIRED_STATE_COLUMNS,
+            env_client=self.env_client,
         )
 
     def shutdown(self) -> None:
-        if self._process is None:
+        if self._env_server_process is None:
             return
         logger = get_logger()
-        self._process.terminate()
-        self._process.join(timeout=25)
-        if self._process.is_alive():
-            logger.warning(f"Env server {self._process.pid} did not exit after 25s, force killing")
-            self._process.kill()
-            self._process.join(timeout=5)
-        self._process = None
+        self._env_server_process.terminate()
+        self._env_server_process.join(timeout=25)
+        if self._env_server_process.is_alive():
+            logger.warning(f"Env server {self._env_server_process.pid} did not exit after 25s, force killing")
+            self._env_server_process.kill()
+            self._env_server_process.join(timeout=5)
+        self._env_server_process = None
 
 
 class TrainEnv(Env):
@@ -140,48 +161,152 @@ class EvalEnv(Env):
         super().__init__(config)
 
     def get_dataset(self, seed: int | None = None):
-        return self._env.get_eval_dataset(seed=seed)
+        return self.env.get_eval_dataset(seed=seed)
 
     async def evaluate(
         self,
         model_name: str,
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
-    ) -> list[vf.RolloutOutput]:
-        """Generate eval rollouts across all eval inputs, round-robining clients."""
-        inputs = self._env._get_eval_inputs(self.config.num_examples, self.config.rollouts_per_example)
-        total_rollouts = len(inputs)
-        pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
+        ckpt_step: int,
+        step: int,
+    ) -> None:
+        n, k = self.config.num_examples, self.config.rollouts_per_example
+        get_logger().info(f"Evaluating {self.name} (num_examples={n}, rollouts_per_example={k})")
 
-        async def _run_group(example: dict) -> list[vf.RolloutOutput] | None:
+        inputs = self.env._get_eval_inputs(n, k)
+        pbar = ProgressTracker(total=len(inputs), desc=f"Evaluating {self.name}")
+        eval_start = time.perf_counter()
+
+        if self.requires_group_scoring:
+            # Group scoring: batch inputs into groups of k and run as groups
+            groups = [inputs[i : i + k] for i in range(0, len(inputs), k)]
+
+            async def _run_group(group: list) -> list[vf.RolloutOutput] | None:
+                try:
+                    client = await get_client()
+                    group_inputs = [vf.RolloutInput(**ex) for ex in group]
+                    result = await self._env.run_group(
+                        group_inputs,
+                        client=client,
+                        model=model_name,
+                        sampling_args=self.sampling_args,
+                        max_retries=self.config.max_retries,
+                        state_columns=REQUIRED_STATE_COLUMNS,
+                        env_client=self.env_client,
+                    )
+                    pbar.update(len(group))
+                    return result
+                except Exception as e:
+                    get_logger().warning(f"Group failed: {e}")
+                    pbar.update(len(group))
+                    return None
+
             try:
-                client = await get_client()
-                rollout_input = vf.RolloutInput(**example)
-                # rollouts_per_example=1 because _get_eval_inputs already repeats examples
-                result = await self._env.run_group(
-                    [rollout_input],
-                    client=client,
-                    model=model_name,
-                    sampling_args=self.sampling_args,
-                    max_retries=self.config.max_retries,
-                    state_columns=REQUIRED_STATE_COLUMNS,
-                )
-                pbar.update(1)
-                return result
-            except Exception as e:
-                get_logger().warning(f"Group failed: {e}")
-                pbar.update(1)
-                return None
+                group_results = await asyncio.gather(*[_run_group(g) for g in groups])
+            finally:
+                pbar.close()
 
-        try:
-            group_outputs_list = await asyncio.gather(*[_run_group(example) for example in inputs])
-        finally:
-            pbar.close()
+            successful_outputs = [o for group in group_results if group is not None for o in group]
+            failed_count = sum(len(g) for g, r in zip(groups, group_results) if r is None)
+        else:
+            # Individual scoring: run each input independently
+            async def _run_rollout(example: dict) -> vf.RolloutOutput | None:
+                try:
+                    client = await get_client()
+                    output = await self.run_rollout(client=client, example=example, model_name=model_name)
+                    pbar.update(1)
+                    return output
+                except Exception as e:
+                    get_logger().warning(f"Rollout failed: {e}")
+                    pbar.update(1)
+                    return None
 
-        failed_groups = sum(1 for g in group_outputs_list if g is None)
-        if failed_groups:
-            get_logger().warning(f"{failed_groups}/{len(group_outputs_list)} groups failed")
+            try:
+                outputs = await asyncio.gather(*[_run_rollout(example) for example in inputs])
+            finally:
+                pbar.close()
 
-        return [output for group in group_outputs_list if group is not None for output in group]
+            successful_outputs = [o for o in outputs if o is not None]
+            failed_count = sum(1 for o in outputs if o is None)
+
+        eval_time = time.perf_counter() - eval_start
+
+        total_count = len(inputs)
+        if failed_count:
+            get_logger().warning(
+                f"{failed_count}/{total_count} ({failed_count / total_count * 100:.1f}%) rollouts failed"
+            )
+
+        if not successful_outputs:
+            get_logger().warning(f"All rollouts failed for {self.name}, skipping logging metrics")
+            get_monitor().log(
+                {
+                    f"eval/{self.name}/failed_rollouts": failed_count / total_count,
+                    "progress/ckpt_step": ckpt_step,
+                    "step": step,
+                },
+                step=step,
+            )
+            return
+
+        # Log metrics
+        monitor = get_monitor()
+
+        rows = [
+            {
+                "example_id": o["example_id"],
+                "reward": o["reward"],
+                "completion_len": get_completion_len(o),
+                "is_truncated": o["is_truncated"],
+                "has_error": o.get("error") is not None,
+                "no_response": not o.get("completion"),
+            }
+            for o in successful_outputs
+        ]
+        results_df = pd.DataFrame(rows)
+
+        unique_rewards = results_df.reward.dropna().unique()
+        could_be_binary = set(unique_rewards).issubset({0.0, 1.0})
+        if could_be_binary:
+            pass_at_k = (
+                results_df.groupby("example_id")
+                .apply(lambda x: compute_pass_at_k(x.reward.dropna()), include_groups=False)
+                .apply(pd.Series)
+            )
+        else:
+            pass_at_k = None
+            get_logger().warning("Skipping computing pass@k rates because the task rewards appear to be non-binary")
+
+        message = f"Evaluated {self.name} in {eval_time:.2f}s (Avg@{k}={results_df.reward.mean():.4f}"
+        if could_be_binary:
+            for pass_rate, pass_rate_score in pd.Series(pass_at_k.mean()).items():
+                message += f", {capitalize(str(pass_rate))}: {pass_rate_score:.4f}"
+
+        message += (
+            f", No-response: {results_df.no_response.mean() * 100:.1f}%"
+            f", Completion Length: {results_df.completion_len.mean():.2f} (±{results_df.completion_len.std():.2f}, ∈[{results_df.completion_len.min():.2f}, {results_df.completion_len.max():.2f}])"
+            f", Truncated: {results_df.is_truncated.mean() * 100:.1f}%)"
+        )
+        get_logger().success(message)
+
+        eval_metrics = {
+            f"avg@{k}": float(results_df.reward.mean()),
+            "no_response/mean": float(results_df.no_response.mean()),
+            "no_response/count": int(results_df.no_response.sum()),
+            "completion_len/mean": results_df.completion_len.mean().item(),
+            "completion_len/max": results_df.completion_len.max().item(),
+            "completion_len/min": results_df.completion_len.min().item(),
+            "is_truncated/mean": results_df.is_truncated.mean().item(),
+            "failed_rollouts": failed_count / total_count,
+            "time": eval_time,
+        }
+        if could_be_binary:
+            assert pass_at_k is not None
+            eval_metrics.update(pd.Series(pass_at_k.mean()).to_dict())
+        eval_metrics = {f"eval/{self.name}/{k}": v for k, v in eval_metrics.items()}
+        eval_metrics.update({"progress/ckpt_step": ckpt_step, "step": step})
+        monitor.log(eval_metrics, step=step)
+        monitor.log_eval_samples(successful_outputs, env_name=self.name, step=step)
 
 
 class Envs:
@@ -233,7 +358,7 @@ class Envs:
 
     def shutdown(self) -> None:
         """Terminate all spawned env server processes."""
-        processes = [env._process for env in self if env._process is not None]
+        processes = [env._env_server_process for env in self if env._env_server_process is not None]
         if not processes:
             return
         logger = get_logger()

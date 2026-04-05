@@ -91,7 +91,7 @@ class Scheduler:
         # Inference pool - used for admin operations (adapter sync) and metrics
         self.inference_pool = inference_pool
 
-        group_scoring_tasks = [env.name for env in envs if env.uses_group_scoring]
+        group_scoring_tasks = [env.name for env in envs if env.requires_group_scoring]
         if group_scoring_tasks:
             self.logger.info(f"Group rollout scoring active for task(s): {', '.join(group_scoring_tasks)}")
 
@@ -193,7 +193,7 @@ class Scheduler:
         env_name = group.example["env_name"]
         env = self.envs.get(env_name)
 
-        if env.uses_group_scoring:
+        if env.requires_group_scoring:
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
                 env.run_group(
@@ -404,7 +404,7 @@ class Scheduler:
                         continue
 
                     env = self.envs.get(env_name)
-                    if env.uses_group_scoring:
+                    if env.requires_group_scoring:
                         # run_group returns all rollouts at once, already scored
                         group_rollouts: list[vf.RolloutOutput] = finished_task.result()
                         self.total_rollouts_by_task[env_name] += len(group_rollouts)

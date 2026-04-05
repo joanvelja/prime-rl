@@ -2,7 +2,7 @@ import asyncio
 import time
 from itertools import cycle
 from pathlib import Path
-from typing import Any, AsyncContextManager
+from typing import Any
 
 import pandas as pd
 import verifiers as vf
@@ -10,7 +10,6 @@ from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.completion_usage import CompletionUsage
 from rich.console import Console
 from rich.table import Table
-from verifiers.utils.async_utils import maybe_semaphore
 from verifiers.utils.client_utils import setup_openai_client
 
 from prime_rl.configs.orchestrator import EvalSamplingConfig, OrchestratorConfig, SamplingConfig
@@ -21,19 +20,6 @@ from prime_rl.utils.utils import (
     get_ckpt_dir,
     get_step_path,
 )
-
-SEMAPHORE: AsyncContextManager | None = None
-
-
-async def set_semaphore(limit: int):
-    global SEMAPHORE
-    SEMAPHORE = await maybe_semaphore(limit)
-
-
-async def get_semaphore() -> AsyncContextManager:
-    global SEMAPHORE
-    assert SEMAPHORE is not None, "Semaphore not set"
-    return SEMAPHORE
 
 
 def get_train_sampling_args(sampling_config: SamplingConfig, is_vllm: bool = True) -> dict:
@@ -187,21 +173,20 @@ async def compute_teacher_logprobs(
     async def _compute_single(client_config: vf.ClientConfig, sample: TrainingSample) -> list[float]:
         client = setup_openai_client(client_config)
 
-        async with await get_semaphore():
-            response = await client.post(
-                "/chat/completions/tokens",
-                body={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": ""}],
-                    "tokens": sample.prompt_ids + sample.completion_ids,
-                    "max_tokens": 1,
-                    "temperature": 1.0,
-                    "top_p": 1.0,
-                    "skip_special_tokens": False,
-                    "prompt_logprobs": True,
-                },
-                cast_to=ChatCompletion,
-            )
+        response = await client.post(
+            "/chat/completions/tokens",
+            body={
+                "model": model_name,
+                "messages": [{"role": "user", "content": ""}],
+                "tokens": sample.prompt_ids + sample.completion_ids,
+                "max_tokens": 1,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "skip_special_tokens": False,
+                "prompt_logprobs": True,
+            },
+            cast_to=ChatCompletion,
+        )
         return [
             0.0 if lp is None else float(next(iter(lp.values()))["logprob"])
             for lp in getattr(response, "prompt_logprobs", [])

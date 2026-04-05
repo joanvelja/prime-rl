@@ -16,10 +16,9 @@ def make_env(name: str, vf_env: vf.Environment, **config_kwargs) -> TrainEnv:
     env = TrainEnv.__new__(TrainEnv)
     env.config = config
     env._env = vf_env
-    env.name = name
-    env.uses_group_scoring = False
+    env._env_client = None
+    env._env_server_process = None
     env.sampling_args = {}
-    env._process = None
     return env
 
 
