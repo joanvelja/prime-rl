@@ -274,7 +274,7 @@ class EnvConfig(BaseConfig):
     id: Annotated[
         str,
         Field(
-            description="Registered verifiers environment ID (e.g. 'math-env', 'd42me/meow@0.1.5'). May include an @version suffix for installation; the version is stripped before loading."
+            description="Registered verifiers environment ID (e.g. 'math-env', 'primeintellect/math-env'). May include an @version suffix for installation."
         ),
     ] = "reverse-text"
 
@@ -288,7 +288,7 @@ class EnvConfig(BaseConfig):
     args: Annotated[
         dict,
         Field(
-            description="Keyword arguments forwarded to the verifiers environment constructor (e.g. dataset_name, max_turns, seed). See the environment's docstring for accepted args."
+            description="Keyword arguments forwarded to vf.load_environment. See the environment's docstring for accepted args."
         ),
     ] = {}
 
@@ -324,7 +324,7 @@ class EnvConfig(BaseConfig):
         float | None,
         Field(
             gt=0,
-            description="Sampling weight for this environment in the buffer. When None for all envs, samples uniformly across all available problems. When set, must be set on all envs and ratios are normalized to sum to 1.",
+            description="Sampling weight for this environment in the buffer. When None for all envs, samples uniformly across all available problems. When set, must be set on all envs — values are relative weights normalized to probabilities (e.g. [1, 1] and [0.5, 0.5] are equivalent).",
         ),
     ] = None
 
