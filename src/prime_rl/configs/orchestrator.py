@@ -362,7 +362,14 @@ class EvalEnvConfig(EnvConfig):
     def resolve_num_workers(self):
         if self.num_workers == "auto":
             if self.num_examples == -1:
+                import warnings
+
                 self.num_workers = 4
+                warnings.warn(
+                    f"Eval env '{self.resolved_name}' uses all examples (num_examples=-1), "
+                    f"defaulting to {self.num_workers} worker(s). Set num_workers explicitly if more are needed.",
+                    stacklevel=1,
+                )
             else:
                 max_concurrent = self.num_examples * self.rollouts_per_example
                 self.num_workers = max(1, math.ceil(max_concurrent / 256))
