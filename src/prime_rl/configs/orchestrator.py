@@ -271,40 +271,52 @@ class EvalSaveHFConfig(BaseConfig):
 class EnvConfig(BaseConfig):
     """Base environment configuration."""
 
-    id: Annotated[str, Field(description="ID of the environment to use.")] = "reverse-text"
-    args: Annotated[dict, Field(description="Arguments to pass to the environment.")] = {}
-    name: Annotated[str | None, Field(description="Name of the environment to use.")] = None
+    id: Annotated[
+        str,
+        Field(
+            description="Registered verifiers environment ID (e.g. 'math-env', 'd42me/meow@0.1.5'). May include an @version suffix for installation; the version is stripped before loading."
+        ),
+    ] = "reverse-text"
+
+    name: Annotated[
+        str | None,
+        Field(
+            description="Display name for this environment in logs, metrics, and buffer keys. Defaults to the id (without @version). Must be unique across all envs in the same group."
+        ),
+    ] = None
+
+    args: Annotated[
+        dict,
+        Field(
+            description="Keyword arguments forwarded to the verifiers environment constructor (e.g. dataset_name, max_turns, seed). See the environment's docstring for accepted args."
+        ),
+    ] = {}
+
     extra_env_kwargs: Annotated[
         dict[str, Any],
         Field(
-            description=(
-                "Extra kwargs passed to an env (e.g. seq_len, score_rollouts). This field is auto-populated "
-                "by the orchestrator. It is generally NOT recommended for this field to be overridden by the user."
-            ),
+            description="Internal kwargs injected by the orchestrator (e.g. max_seq_len, score_rollouts). Auto-populated — do not set manually unless running an isolated env server that needs matching kwargs."
         ),
     ] = {}
 
     address: Annotated[
         str | None,
         Field(
-            description="Address of the environment server. If None, will spawn an environment server in a subprocess automatically. If given, will connect an environment client to the server at this address."
+            description="ZMQ address of an external env server (e.g. 'tcp://host:5000'). When set, the orchestrator connects to this server instead of spawning one. When None (default), a subprocess env server is spawned automatically."
         ),
     ] = None
 
     num_workers: Annotated[
         int | Literal["auto"],
         Field(
-            description="Number of env server worker processes. "
-            "Set to 'auto' to scale based on the env's concurrency (1 worker per 256 concurrent rollouts). "
-            "When setting manually, we recommend sizing so that each worker handles at most 256 concurrent rollouts. "
-            "Only used when the orchestrator spawns the env server (i.e. address is None)."
+            description="Number of worker processes for the spawned env server. 'auto' scales to 1 worker per 256 concurrent rollouts. Ignored when address is set (external server)."
         ),
     ] = "auto"
 
     score_rollouts: Annotated[
         bool,
         Field(
-            description="Whether to score rollouts using the environment rubric. If False, rewards are always set to 0.",
+            description="Whether the env server scores rollouts using the environment rubric. When False, rewards are always 0. Also gated by orchestrator.verification.enabled."
         ),
     ] = True
 
@@ -312,16 +324,13 @@ class EnvConfig(BaseConfig):
         float | None,
         Field(
             gt=0,
-            description="Sampling ratio for this environment in the buffer. If None for all envs, samples uniformly across all available problems. If set, ratios across all envs must sum to 1.",
+            description="Sampling weight for this environment in the buffer. When None for all envs, samples uniformly across all available problems. When set, must be set on all envs and ratios are normalized to sum to 1.",
         ),
     ] = None
 
     max_retries: Annotated[
         int,
-        Field(
-            ge=0,
-            description="Maximum number of internal retries the environment will attempt before declaring a rollout failed.",
-        ),
+        Field(ge=0, description="Number of times the env server retries a failed rollout before returning an error."),
     ] = 0
 
     @property
@@ -350,25 +359,24 @@ class EvalEnvConfig(EnvConfig):
 
     num_examples: Annotated[
         int,
-        Field(description="Number of examples to evaluate."),
+        Field(
+            description="Number of eval examples to sample from the dataset. Set to -1 to use all available examples."
+        ),
     ] = -1
 
     rollouts_per_example: Annotated[
         int,
-        Field(ge=1, description="Number of rollouts to generate per example."),
+        Field(
+            ge=1,
+            description="Number of rollouts generated per example. Used for pass@k estimation (e.g. rollouts_per_example=8 enables pass@1 through pass@8).",
+        ),
     ] = 1
 
     @model_validator(mode="after")
     def resolve_num_workers(self):
         if self.num_workers == "auto":
             if self.num_examples == -1:
-                from prime_rl.utils.logger import get_logger
-
-                self.num_workers = 4
-                get_logger().warning(
-                    f"Eval env '{self.resolved_name}' uses all examples (num_examples=-1), "
-                    f"defaulting to {self.num_workers} worker(s). Set num_workers explicitly if more are needed."
-                )
+                self.num_workers = 4  # default when dataset size unknown; set num_workers explicitly if more are needed
             else:
                 max_concurrent = self.num_examples * self.rollouts_per_example
                 self.num_workers = max(1, math.ceil(max_concurrent / 256))
