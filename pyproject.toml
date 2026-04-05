@@ -35,6 +35,7 @@ dependencies = [
     "dion",
     "tilelang>=0.1.8",
     "flash-linear-attention",
+    "kernels",
 ]
 
 [project.scripts]
