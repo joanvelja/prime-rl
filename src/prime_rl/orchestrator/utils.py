@@ -6,8 +6,7 @@ from typing import Any
 
 import pandas as pd
 import verifiers as vf
-from openai.types.chat.chat_completion import ChatCompletion, Choice
-from openai.types.completion_usage import CompletionUsage
+from openai.types.chat.chat_completion import ChatCompletion
 from rich.console import Console
 from rich.table import Table
 from verifiers.utils.client_utils import setup_openai_client
@@ -77,40 +76,6 @@ def get_eval_sampling_args(sampling_config: EvalSamplingConfig) -> dict[str, Any
     sampling_args["extra_body"] = extra_body
 
     return sampling_args
-
-
-def parse_num_completion_tokens(responses: list[list[ChatCompletion]]) -> list[int]:
-    """Parses the number of tokens from a list of chat completions returned by OAI API."""
-    all_num_completion_tokens = []
-    for response in responses:
-        num_completion_tokens = 0
-        for chat_completion in response:
-            assert isinstance(chat_completion, ChatCompletion)
-            assert chat_completion.usage is not None, "Usage should be present in the response"
-            usage = chat_completion.usage
-            assert isinstance(usage, CompletionUsage)
-            num_completion_tokens += usage.completion_tokens
-        all_num_completion_tokens.append(num_completion_tokens)
-    assert len(all_num_completion_tokens) == len(responses), (
-        "Number of completion tokens should be the same as the number of responses"
-    )
-    return all_num_completion_tokens
-
-
-def parse_is_truncated_completions(responses: list[list[ChatCompletion]]) -> list[bool]:
-    """Parses whether the completions were truncated from a list of (multi-turn) OAI chat completions"""
-    all_is_truncated = []
-    for response in responses:
-        is_truncated = False
-        for chat_completion in response:
-            assert isinstance(chat_completion, ChatCompletion)
-            assert len(chat_completion.choices) == 1, "Response should always have one choice"
-            choice = chat_completion.choices[0]
-            assert isinstance(choice, Choice)
-            if choice.finish_reason == "length":
-                is_truncated = True
-        all_is_truncated.append(is_truncated)
-    return all_is_truncated
 
 
 def print_benchmark(history: dict[str, list[Any]]) -> None:
