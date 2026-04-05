@@ -185,33 +185,44 @@ class EvalEnv(Env):
         pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
 
-        async def run_with_progress(example: dict, rollouts_per_example: int) -> list[vf.RolloutOutput] | None:
-            """Run rollout(s) for one example. Uses run_group for group-scoring or when k > 1."""
-            try:
-                client = await get_client()
-                if self.requires_group_scoring:
+        if self.requires_group_scoring:
+
+            async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
+                """Run k rollouts as a scored group for one example."""
+                try:
+                    client = await get_client()
                     outputs = await self.run_group(
                         client=client,
                         example=vf.RolloutInput(**example),
                         model_name=model_name,
-                        rollouts_per_example=rollouts_per_example,
+                        rollouts_per_example=k,
                     )
-                else:
+                    pbar.update(k)
+                    return outputs
+                except Exception as e:
+                    get_logger().warning(f"Rollout failed: {e}")
+                    pbar.update(k)
+                    return None
+
+            coros = [run_with_progress(example) for example in examples]
+
+        else:
+
+            async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
+                """Run a single rollout for one example."""
+                try:
+                    client = await get_client()
                     output = await self.run_rollout(
                         client=client, example=vf.RolloutInput(**example), model_name=model_name
                     )
-                    outputs = [output]
-                pbar.update(rollouts_per_example)
-                return outputs
-            except Exception as e:
-                get_logger().warning(f"Rollout failed: {e}")
-                pbar.update(rollouts_per_example)
-                return None
+                    pbar.update(1)
+                    return [output]
+                except Exception as e:
+                    get_logger().warning(f"Rollout failed: {e}")
+                    pbar.update(1)
+                    return None
 
-        if self.requires_group_scoring:
-            coros = [run_with_progress(example, k) for example in examples]
-        else:
-            coros = [run_with_progress(example, 1) for example in examples for _ in range(k)]
+            coros = [run_with_progress(example) for example in examples for _ in range(k)]
 
         try:
             results = await asyncio.gather(*coros)
