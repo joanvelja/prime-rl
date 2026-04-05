@@ -63,7 +63,7 @@ class _EnvBuffer:
         assert hash_keys, "No hashable keys found in example."
         return hashlib.sha256(json.dumps([example[key] for key in hash_keys]).encode()).hexdigest()
 
-    def update_pools(self, example_id: int, avg_reward: float, num_rollouts: int) -> list[str]:
+    def update_pools(self, example_id: int, avg_reward: float, num_rollouts: int) -> str:
         """Assign example to pool based on reward. Returns pool name."""
         if self.config.easy_threshold is not None and avg_reward >= self.config.easy_threshold:
             pool = "easy"

@@ -362,13 +362,12 @@ class EvalEnvConfig(EnvConfig):
     def resolve_num_workers(self):
         if self.num_workers == "auto":
             if self.num_examples == -1:
-                import warnings
+                from prime_rl.utils.logger import get_logger
 
                 self.num_workers = 4
-                warnings.warn(
+                get_logger().warning(
                     f"Eval env '{self.resolved_name}' uses all examples (num_examples=-1), "
-                    f"defaulting to {self.num_workers} worker(s). Set num_workers explicitly if more are needed.",
-                    stacklevel=1,
+                    f"defaulting to {self.num_workers} worker(s). Set num_workers explicitly if more are needed."
                 )
             else:
                 max_concurrent = self.num_examples * self.rollouts_per_example
@@ -1041,7 +1040,7 @@ class OrchestratorConfig(TrainEnvsConfig):
         for env in self.env:
             env.extra_env_kwargs.update(
                 max_seq_len=self.seq_len,
-                score_rollouts=env.score_rollouts,
+                score_rollouts=self.verification.enabled and env.score_rollouts,
             )
         return self
 

@@ -339,6 +339,7 @@ async def orchestrate(config: OrchestratorConfig):
                 eval_base_model=config.eval.eval_base_model,
             )
 
+        if eval_ckpt_step is not None:
             last_eval_step = ckpt_step
             if eval_ckpt_step != ckpt_step:
                 logger.info(f"Running evals for interval step {eval_ckpt_step} (current ckpt_step={ckpt_step})")

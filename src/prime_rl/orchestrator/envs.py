@@ -70,7 +70,7 @@ class Env:
         assert isinstance(self.config.num_workers, int), (
             f"num_workers must be resolved before spawn, got {self.config.num_workers!r}"
         )
-        get_logger().debug(f"Spawning env server {self.name})")
+        get_logger().debug(f"Spawning env server {self.name}")
         num_workers = self.config.num_workers
         address = f"tcp://127.0.0.1:{get_free_port()}"
         process = mp.get_context("spawn").Process(
