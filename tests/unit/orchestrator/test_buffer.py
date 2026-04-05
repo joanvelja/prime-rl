@@ -87,7 +87,7 @@ def make_rollouts():
             rollouts = [
                 vf.RolloutOutput(
                     example_id=example["example_id"],
-                    task=example["task"],
+                    task=example["env_name"],
                     prompt=example["prompt"],
                     prompt_ids=[0],
                     prompt_mask=[1],

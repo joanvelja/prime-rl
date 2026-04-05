@@ -40,7 +40,6 @@ class _EnvBuffer:
         self.examples: dict[int, dict] = {}
         for example in map(partial(cast, dict), dataset):
             example["env_name"] = env.name
-            example["task"] = env.name  # for vf.RolloutInput compat
             self.examples[example["example_id"]] = example
 
         self.easy_examples: list[dict] = []
@@ -265,7 +264,7 @@ class Buffer:
                 )
 
         if any(saved_rollouts):
-            valid = [r for r in saved_rollouts if r.get("env_name", r.get("task")) in self.env_names]
+            valid = [r for r in saved_rollouts if r.get("env_name") in self.env_names]
             self.rollout_buffer.extend(valid)
             self.logger.debug(f"Loaded {len(valid)} rollout(s) from checkpoint.")
 
