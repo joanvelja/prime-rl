@@ -31,6 +31,7 @@ class InflightRolloutInfo(NamedTuple):
     client_config: vf.ClientConfig
     env_name: str
     group_id: int | None = None
+    rollout_count: int = 1
 
 
 @dataclass
@@ -194,17 +195,18 @@ class Scheduler:
         env = self.envs.get(env_name)
 
         if env.requires_group_scoring:
-            rollouts_per_example = group.rollouts_to_schedule
+            rollout_count = group.rollouts_to_schedule
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
                 env.run_group(
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
-                    rollouts_per_example=rollouts_per_example,
+                    rollouts_per_example=rollout_count,
                 )
             )
         else:
+            rollout_count = 1
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
                 env.run_rollout(
@@ -214,7 +216,11 @@ class Scheduler:
                 )
             )
         self.inflight_requests[task] = InflightRolloutInfo(
-            off_policy_steps=0, client_config=client_config, env_name=env_name, group_id=group_id
+            off_policy_steps=0,
+            client_config=client_config,
+            env_name=env_name,
+            group_id=group_id,
+            rollout_count=rollout_count,
         )
 
     @property
@@ -223,7 +229,9 @@ class Scheduler:
 
     @property
     def inflight_sample_count(self) -> int:
-        return self.inflight_rollout_count + sum(g.rollouts_to_schedule for g in self.groups.values())
+        inflight = sum(info.rollout_count for info in self.inflight_requests.values())
+        pending = sum(g.rollouts_to_schedule for g in self.groups.values())
+        return inflight + pending
 
     async def _schedule_next_request(self) -> bool:
         remaining_capacity = self.max_inflight_rollouts - self.inflight_rollout_count
