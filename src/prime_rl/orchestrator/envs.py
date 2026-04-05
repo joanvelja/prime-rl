@@ -11,8 +11,8 @@ from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
-from prime_rl.orchestrator.vf_utils import evaluate, resolve_num_workers
-from prime_rl.utils.logger import get_logger
+from prime_rl.orchestrator.vf_utils import resolve_num_workers
+from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.utils import strip_env_version
 
 REQUIRED_STATE_COLUMNS = ["trajectory", "sampling_args"]
@@ -147,15 +147,41 @@ class EvalEnv(Env):
         model_name: str,
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
     ) -> list[vf.RolloutOutput]:
-        return await evaluate(
-            env=self._env,
-            model_name=model_name,
-            sampling_args=self.sampling_args,
-            num_examples=self.config.num_examples,
-            rollouts_per_example=self.config.rollouts_per_example,
-            get_client=get_client,
-            max_retries=self.config.max_retries,
-        )
+        """Generate eval rollouts across all eval inputs, round-robining clients."""
+        inputs = self._env._get_eval_inputs(self.config.num_examples, self.config.rollouts_per_example)
+        total_rollouts = len(inputs)
+        pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
+
+        async def _run_group(example: dict) -> list[vf.RolloutOutput] | None:
+            try:
+                client = await get_client()
+                rollout_input = vf.RolloutInput(**example)
+                # rollouts_per_example=1 because _get_eval_inputs already repeats examples
+                result = await self._env.run_group(
+                    [rollout_input],
+                    client=client,
+                    model=model_name,
+                    sampling_args=self.sampling_args,
+                    max_retries=self.config.max_retries,
+                    state_columns=REQUIRED_STATE_COLUMNS,
+                )
+                pbar.update(1)
+                return result
+            except Exception as e:
+                get_logger().warning(f"Group failed: {e}")
+                pbar.update(1)
+                return None
+
+        try:
+            group_outputs_list = await asyncio.gather(*[_run_group(example) for example in inputs])
+        finally:
+            pbar.close()
+
+        failed_groups = sum(1 for g in group_outputs_list if g is None)
+        if failed_groups:
+            get_logger().warning(f"{failed_groups}/{len(group_outputs_list)} groups failed")
+
+        return [output for group in group_outputs_list if group is not None for output in group]
 
 
 class Envs:
