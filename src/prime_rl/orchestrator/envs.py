@@ -105,13 +105,25 @@ class Env:
         self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
         await self.env_client.wait_for_server_startup()
 
-    async def run_rollout(
+    async def run(
         self,
         client: vf.ClientConfig,
         example: vf.RolloutInput,
         model_name: str,
-    ) -> vf.RolloutOutput:
-        return await self.env.run_rollout(
+        rollouts_per_example: int = 1,
+    ) -> list[vf.RolloutOutput]:
+        """Run rollout(s) for an example. Uses run_group for group-scoring envs or when rollouts_per_example > 1."""
+        if self.requires_group_scoring or rollouts_per_example > 1:
+            return await self.env.run_group(
+                [example for _ in range(rollouts_per_example)],
+                client=client,
+                model=model_name,
+                sampling_args=self.sampling_args,
+                max_retries=self.config.max_retries,
+                state_columns=REQUIRED_STATE_COLUMNS,
+                env_client=self.env_client,
+            )
+        output = await self.env.run_rollout(
             example,
             client=client,
             model=model_name,
@@ -120,23 +132,7 @@ class Env:
             state_columns=REQUIRED_STATE_COLUMNS,
             env_client=self.env_client,
         )
-
-    async def run_group(
-        self,
-        client: vf.ClientConfig,
-        example: vf.RolloutInput,
-        model_name: str,
-        rollouts_per_example: int,
-    ) -> list[vf.RolloutOutput]:
-        return await self.env.run_group(
-            [example for _ in range(rollouts_per_example)],
-            client=client,
-            model=model_name,
-            sampling_args=self.sampling_args,
-            max_retries=self.config.max_retries,
-            state_columns=REQUIRED_STATE_COLUMNS,
-            env_client=self.env_client,
-        )
+        return [output]
 
     def shutdown(self) -> None:
         if self._env_server_process is None:
@@ -181,57 +177,24 @@ class EvalEnv(Env):
         pbar = ProgressTracker(total=len(inputs), desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
 
-        if self.requires_group_scoring:
-            # Group scoring: batch inputs into groups of k and run as groups
-            groups = [inputs[i : i + k] for i in range(0, len(inputs), k)]
-
-            async def _run_group(group: list) -> list[vf.RolloutOutput] | None:
-                try:
-                    client = await get_client()
-                    group_inputs = [vf.RolloutInput(**ex) for ex in group]
-                    result = await self._env.run_group(
-                        group_inputs,
-                        client=client,
-                        model=model_name,
-                        sampling_args=self.sampling_args,
-                        max_retries=self.config.max_retries,
-                        state_columns=REQUIRED_STATE_COLUMNS,
-                        env_client=self.env_client,
-                    )
-                    pbar.update(len(group))
-                    return result
-                except Exception as e:
-                    get_logger().warning(f"Group failed: {e}")
-                    pbar.update(len(group))
-                    return None
-
+        async def _run_one(example: dict) -> list[vf.RolloutOutput] | None:
             try:
-                group_results = await asyncio.gather(*[_run_group(g) for g in groups])
-            finally:
-                pbar.close()
+                client = await get_client()
+                result = await self.run(client=client, example=vf.RolloutInput(**example), model_name=model_name)
+                pbar.update(1)
+                return result
+            except Exception as e:
+                get_logger().warning(f"Rollout failed: {e}")
+                pbar.update(1)
+                return None
 
-            successful_outputs = [o for group in group_results if group is not None for o in group]
-            failed_count = sum(len(g) for g, r in zip(groups, group_results) if r is None)
-        else:
-            # Individual scoring: run each input independently
-            async def _run_rollout(example: dict) -> vf.RolloutOutput | None:
-                try:
-                    client = await get_client()
-                    output = await self.run_rollout(client=client, example=example, model_name=model_name)
-                    pbar.update(1)
-                    return output
-                except Exception as e:
-                    get_logger().warning(f"Rollout failed: {e}")
-                    pbar.update(1)
-                    return None
+        try:
+            results = await asyncio.gather(*[_run_one(example) for example in inputs])
+        finally:
+            pbar.close()
 
-            try:
-                outputs = await asyncio.gather(*[_run_rollout(example) for example in inputs])
-            finally:
-                pbar.close()
-
-            successful_outputs = [o for o in outputs if o is not None]
-            failed_count = sum(1 for o in outputs if o is None)
+        successful_outputs = [o for group in results if group is not None for o in group]
+        failed_count = sum(1 for r in results if r is None)
 
         eval_time = time.perf_counter() - eval_start
 

@@ -194,24 +194,20 @@ class Scheduler:
         env = self.envs.get(env_name)
 
         if env.requires_group_scoring:
+            rollouts_per_example = group.rollouts_to_schedule
             group.rollouts_to_schedule = 0
-            task = asyncio.create_task(
-                env.run_group(
-                    client=client_config,
-                    example=group.example,
-                    model_name=self.model_name,
-                    rollouts_per_example=self.rollouts_per_example,
-                )
-            )
         else:
+            rollouts_per_example = 1
             group.rollouts_to_schedule -= 1
-            task = asyncio.create_task(
-                env.run_rollout(
-                    client=client_config,
-                    example=group.example,
-                    model_name=self.model_name,
-                )
+
+        task = asyncio.create_task(
+            env.run(
+                client=client_config,
+                example=group.example,
+                model_name=self.model_name,
+                rollouts_per_example=rollouts_per_example,
             )
+        )
         self.inflight_requests[task] = InflightRolloutInfo(
             off_policy_steps=0, client_config=client_config, env_name=env_name, group_id=group_id
         )
@@ -403,43 +399,35 @@ class Scheduler:
                     if group is None:
                         continue
 
-                    env = self.envs.get(env_name)
-                    if env.requires_group_scoring:
-                        # run_group returns all rollouts at once, already scored
-                        group_rollouts: list[vf.RolloutOutput] = finished_task.result()
-                        self.total_rollouts_by_env[env_name] += len(group_rollouts)
-                        for rollout in group_rollouts:
-                            rollout["env_name"] = env_name
-                        completed_rollouts = group_rollouts
-                        self.groups.pop(group_id, None)
-                    else:
-                        rollout = finished_task.result()
-                        self.total_rollouts_by_env[env_name] += 1
-                        should_reschedule = False
+                    rollouts: list[vf.RolloutOutput] = finished_task.result()
+                    self.total_rollouts_by_env[env_name] += len(rollouts)
+
+                    # Check for empty/errored rollouts and reschedule
+                    valid_rollouts = []
+                    for rollout in rollouts:
                         if len(rollout["trajectory"]) == 0:
                             self.empty_rollouts_by_env[env_name] += 1
-                            should_reschedule = True
+                            group.rollouts_to_schedule += 1
                             self.logger.warning(
                                 f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
                                 f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                             )
-                        if rollout["error"] is not None:
+                        elif rollout["error"] is not None:
                             self.errored_rollouts_by_env[env_name] += 1
-                            should_reschedule = True
+                            group.rollouts_to_schedule += 1
                             self.logger.warning(
                                 f"Rollout error in group {group_id} ({env_name}), re-scheduling "
                                 f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
                                 f"{rollout['error']['error_chain_repr']}"
                             )
-                        if should_reschedule:
-                            group.rollouts_to_schedule += 1
-                            continue
+                        else:
+                            rollout["env_name"] = env_name
+                            valid_rollouts.append(rollout)
 
-                        rollout["env_name"] = env_name
-                        group.completed_rollouts.append(rollout)
-                        if len(group.completed_rollouts) < self.rollouts_per_example:
-                            continue
-                        completed_rollouts = self.groups.pop(group_id).completed_rollouts
+                    group.completed_rollouts.extend(valid_rollouts)
+                    if len(group.completed_rollouts) < self.rollouts_per_example:
+                        continue
+                    completed_rollouts = self.groups.pop(group_id).completed_rollouts
 
                 except asyncio.CancelledError:
                     if group_id is not None:
