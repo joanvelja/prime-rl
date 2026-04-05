@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import verifiers as vf
-from datasets import Dataset
 from verifiers.utils.save_utils import make_serializable
 
 from prime_rl.configs.orchestrator import BufferConfig
@@ -17,7 +16,7 @@ from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import format_num, mean, mean_normalize
 
 if TYPE_CHECKING:
-    from prime_rl.orchestrator.envs import TrainEnvs
+    from prime_rl.orchestrator.envs import TrainEnv, TrainEnvs
 
 
 POOLS = ["easy", "normal", "hard"]
@@ -26,18 +25,22 @@ POOLS = ["easy", "normal", "hard"]
 class Buffer:
     """Manages examples and difficulty pools for a single env."""
 
-    def __init__(self, env_name: str, dataset: Dataset, config: BufferConfig):
-        self.env_name = env_name
+    def __init__(self, env: TrainEnv, config: BufferConfig):
+        self.env_name = env.name
         self.config = config
 
-        assert len(dataset) > 0, f"Dataset for {env_name} must contain at least one example."
-        assert "example_id" in dataset.column_names, f"Dataset for {env_name} must contain an `example_id` column."
-        assert "prompt" in dataset.column_names, f"Dataset for {env_name} must contain a `prompt` column."
+        dataset = env.get_dataset(seed=config.seed)
+        if "example_id" not in dataset.column_names:
+            dataset = dataset.map(lambda ex, idx: {**ex, "example_id": idx}, with_indices=True)
+
+        assert len(dataset) > 0, f"Dataset for {env.name} must contain at least one example."
+        assert "example_id" in dataset.column_names, f"Dataset for {env.name} must contain an `example_id` column."
+        assert "prompt" in dataset.column_names, f"Dataset for {env.name} must contain a `prompt` column."
 
         self.examples: dict[int, dict] = {}
         for example in map(partial(cast, dict), dataset):
-            example["env_name"] = env_name
-            example["task"] = env_name  # for vf.RolloutInput compat
+            example["env_name"] = env.name
+            example["task"] = env.name  # for vf.RolloutInput compat
             self.examples[example["example_id"]] = example
 
         self.easy_examples: list[dict] = []
@@ -115,10 +118,7 @@ class Buffers:
 
         self.env_buffers: dict[str, Buffer] = {}
         for env in envs:
-            ds = env.get_dataset(seed=config.seed)
-            if "example_id" not in ds.column_names:
-                ds = ds.map(lambda ex, idx: {**ex, "example_id": idx}, with_indices=True)
-            self.env_buffers[env.name] = Buffer(env.name, ds, config)
+            self.env_buffers[env.name] = Buffer(env, config)
         self.env_names = envs.names
 
         total = sum(eb.num_total for eb in self.env_buffers.values())
