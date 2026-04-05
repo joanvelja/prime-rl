@@ -244,7 +244,7 @@ def get_model(
             raise ValueError(
                 f"GPT-OSS requires 'attn = \"eager\"' on non-Hopper GPUs (detected SM {major}{minor}). "
                 f"The only flash attention kernel supported by GPT-OSS (kernels-community/vllm-flash-attn3) is Hopper-only. "
-                f"Set [trainer.model] attn = \"eager\" in your config."
+                f'Set [trainer.model] attn = "eager" in your config.'
             )
 
     # Fallback Qwen3.5 patch detection from loaded config model_type
