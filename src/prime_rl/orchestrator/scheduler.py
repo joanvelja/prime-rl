@@ -196,18 +196,23 @@ class Scheduler:
         if env.requires_group_scoring:
             rollouts_per_example = group.rollouts_to_schedule
             group.rollouts_to_schedule = 0
-        else:
-            rollouts_per_example = 1
-            group.rollouts_to_schedule -= 1
-
-        task = asyncio.create_task(
-            env.run(
-                client=client_config,
-                example=group.example,
-                model_name=self.model_name,
-                rollouts_per_example=rollouts_per_example,
+            task = asyncio.create_task(
+                env.run_group(
+                    client=client_config,
+                    example=group.example,
+                    model_name=self.model_name,
+                    rollouts_per_example=rollouts_per_example,
+                )
             )
-        )
+        else:
+            group.rollouts_to_schedule -= 1
+            task = asyncio.create_task(
+                env.run_rollout(
+                    client=client_config,
+                    example=group.example,
+                    model_name=self.model_name,
+                )
+            )
         self.inflight_requests[task] = InflightRolloutInfo(
             off_policy_steps=0, client_config=client_config, env_name=env_name, group_id=group_id
         )
@@ -399,7 +404,8 @@ class Scheduler:
                     if group is None:
                         continue
 
-                    rollouts: list[vf.RolloutOutput] = finished_task.result()
+                    result = finished_task.result()
+                    rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
                     self.total_rollouts_by_env[env_name] += len(rollouts)
 
                     # Check for empty/errored rollouts and reschedule

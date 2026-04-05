@@ -55,10 +55,6 @@ class Env:
     def requires_group_scoring(self) -> bool:
         return any(self.env.rubric._is_group_func(func) for func in self.env.rubric._get_reward_funcs())
 
-    @property
-    def requires_env_server_spawn(self) -> bool:
-        return self.config.address is None
-
     def get_dataset(self, seed: int | None = None):
         return self.env.get_dataset(seed=seed)
 
@@ -69,10 +65,12 @@ class Env:
         json_logging: bool = False,
     ) -> None:
         """Spawn an env server (if needed) and connect to it."""
-        if self.requires_env_server_spawn:
-            self._spawn(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
-        get_logger().debug(f"Connecting {self.name} to env server {self.config.address}")
-        self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
+        if self.config.address is None:
+            address = self._spawn(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
+        else:
+            address = self.config.address
+        get_logger().debug(f"Connecting {self.name} to env server {address}")
+        self._env_client = ZMQEnvClient(address=address, name=self.name)
         await self.env_client.wait_for_server_startup()
 
     def _spawn(
@@ -80,7 +78,7 @@ class Env:
         log_dir: Path,
         log_level: str | None = None,
         json_logging: bool = False,
-    ) -> None:
+    ) -> str:
         assert isinstance(self.config.num_workers, int), (
             f"num_workers must be resolved before spawn, got {self.config.num_workers!r}"
         )
@@ -105,28 +103,17 @@ class Env:
             daemon=False,
         )
         process.start()
-        self.config.address = address
         self._env_server_process = process
+        return address
 
-    async def run(
+    async def run_rollout(
         self,
         client: vf.ClientConfig,
         example: vf.RolloutInput,
         model_name: str,
-        rollouts_per_example: int = 1,
-    ) -> list[vf.RolloutOutput]:
-        """Run rollout(s) for an example. Uses run_group for group-scoring envs or when rollouts_per_example > 1."""
-        if self.requires_group_scoring or rollouts_per_example > 1:
-            return await self.env.run_group(
-                [example for _ in range(rollouts_per_example)],
-                client=client,
-                model=model_name,
-                sampling_args=self.sampling_args,
-                max_retries=self.config.max_retries,
-                state_columns=REQUIRED_STATE_COLUMNS,
-                env_client=self.env_client,
-            )
-        output = await self.env.run_rollout(
+    ) -> vf.RolloutOutput:
+        """Run a single rollout for an example."""
+        return await self.env.run_rollout(
             example,
             client=client,
             model=model_name,
@@ -135,7 +122,24 @@ class Env:
             state_columns=REQUIRED_STATE_COLUMNS,
             env_client=self.env_client,
         )
-        return [output]
+
+    async def run_group(
+        self,
+        client: vf.ClientConfig,
+        example: vf.RolloutInput,
+        model_name: str,
+        rollouts_per_example: int,
+    ) -> list[vf.RolloutOutput]:
+        """Run a group of rollouts for an example. Required for group-scoring envs."""
+        return await self.env.run_group(
+            [example for _ in range(rollouts_per_example)],
+            client=client,
+            model=model_name,
+            sampling_args=self.sampling_args,
+            max_retries=self.config.max_retries,
+            state_columns=REQUIRED_STATE_COLUMNS,
+            env_client=self.env_client,
+        )
 
     def shutdown(self) -> None:
         if self._env_server_process is None:
@@ -163,8 +167,8 @@ class EvalEnv(Env):
     def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
 
-    def get_dataset(self, seed: int | None = None):
-        return self.env.get_eval_dataset(seed=seed)
+    def get_dataset(self, seed: int | None = None, n: int = -1):
+        return self.env.get_eval_dataset(seed=seed, n=n)
 
     async def evaluate(
         self,
@@ -176,32 +180,63 @@ class EvalEnv(Env):
         n, k = self.config.num_examples, self.config.rollouts_per_example
         get_logger().info(f"Evaluating {self.name} (num_examples={n}, rollouts_per_example={k})")
 
-        inputs = self.env._get_eval_inputs(n, k)
-        pbar = ProgressTracker(total=len(inputs), desc=f"Evaluating {self.name}")
+        examples = self.get_dataset(n=n).to_list()
+        total_rollouts = len(examples) * k
+        pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
 
-        async def _run_one(example: dict) -> list[vf.RolloutOutput] | None:
+        if self.requires_group_scoring:
+
+            async def run_group_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
+                """Run a group of k rollouts for one example, updating progress by k."""
+                try:
+                    client = await get_client()
+                    result = await self.run_group(
+                        client=client, example=vf.RolloutInput(**example), model_name=model_name, rollouts_per_example=k
+                    )
+                    pbar.update(k)
+                    return result
+                except Exception as e:
+                    get_logger().warning(f"Group rollout failed: {e}")
+                    pbar.update(k)
+                    return None
+
             try:
-                client = await get_client()
-                result = await self.run(client=client, example=vf.RolloutInput(**example), model_name=model_name)
-                pbar.update(1)
-                return result
-            except Exception as e:
-                get_logger().warning(f"Rollout failed: {e}")
-                pbar.update(1)
-                return None
+                results = await asyncio.gather(*[run_group_with_progress(example) for example in examples])
+            finally:
+                pbar.close()
 
-        try:
-            results = await asyncio.gather(*[_run_one(dict(example)) for example in inputs])
-        finally:
-            pbar.close()
+            successful_outputs = [o for group in results if group is not None for o in group]
+            failed_count = sum(k for r in results if r is None)
 
-        successful_outputs = [o for group in results if group is not None for o in group]
-        failed_count = sum(1 for r in results if r is None)
+        else:
+
+            async def run_rollout_with_progress(example: dict) -> vf.RolloutOutput | None:
+                """Run a single rollout for one example, updating progress by 1."""
+                try:
+                    client = await get_client()
+                    result = await self.run_rollout(
+                        client=client, example=vf.RolloutInput(**example), model_name=model_name
+                    )
+                    pbar.update(1)
+                    return result
+                except Exception as e:
+                    get_logger().warning(f"Rollout failed: {e}")
+                    pbar.update(1)
+                    return None
+
+            flat_examples = [example for example in examples for _ in range(k)]
+            try:
+                results = await asyncio.gather(*[run_rollout_with_progress(example) for example in flat_examples])
+            finally:
+                pbar.close()
+
+            successful_outputs = [r for r in results if r is not None]
+            failed_count = sum(1 for r in results if r is None)
 
         eval_time = time.perf_counter() - eval_start
 
-        total_count = len(inputs)
+        total_count = total_rollouts
         if failed_count:
             get_logger().warning(
                 f"{failed_count}/{total_count} ({failed_count / total_count * 100:.1f}%) rollouts failed"
