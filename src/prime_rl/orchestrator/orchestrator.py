@@ -185,7 +185,7 @@ async def orchestrate(config: OrchestratorConfig):
             log_level=config.log.vf_level,
             json_logging=config.log.json_logging,
         )
-        logger.success("Eval environments ready")
+        logger.success("Eval environment(s) ready")
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
