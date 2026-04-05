@@ -166,12 +166,11 @@ async def orchestrate(config: OrchestratorConfig):
     train_envs.set_sampling_args(get_train_sampling_args(config.sampling, is_vllm=config.teacher_rollout_model is None))
     logger.info(f"Loaded {len(train_envs)} training environment(s) ({', '.join(train_envs.names)})")
 
-    train_envs.spawn(
+    await train_envs.start(
         log_dir=get_log_dir(config.output_dir.parent) / "envs" / "train",
         log_level=config.log.vf_level,
         json_logging=config.log.json_logging,
     )
-    await train_envs.connect()
     logger.success("Train environment(s) ready")
 
     eval_envs: EvalEnvs | None = None
@@ -181,12 +180,11 @@ async def orchestrate(config: OrchestratorConfig):
         eval_envs.set_sampling_args(get_eval_sampling_args(config.eval.sampling))
         logger.info(f"Loaded {len(eval_envs)} eval environment(s) ({', '.join(eval_envs.names)})")
 
-        eval_envs.spawn(
+        await eval_envs.start(
             log_dir=get_log_dir(config.output_dir.parent) / "envs" / "eval",
             log_level=config.log.vf_level,
             json_logging=config.log.json_logging,
         )
-        await eval_envs.connect()
         logger.success("Eval environments ready")
 
     # Setup buffer

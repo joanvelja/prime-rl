@@ -55,24 +55,38 @@ class Env:
     def requires_group_scoring(self) -> bool:
         return any(self.env.rubric._is_group_func(func) for func in self.env.rubric._get_reward_funcs())
 
+    @property
+    def requires_env_server_spawn(self) -> bool:
+        return self.config.address is None
+
     def get_dataset(self, seed: int | None = None):
         return self.env.get_dataset(seed=seed)
 
-    def spawn(
+    async def start(
         self,
         log_dir: Path,
         log_level: str | None = None,
         json_logging: bool = False,
     ) -> None:
-        """Spawn an env server if no explicit address is configured."""
-        if self.config.address is not None:
-            return
+        """Spawn an env server (if needed) and connect to it."""
+        if self.requires_env_server_spawn:
+            self._spawn(log_dir=log_dir, log_level=log_level, json_logging=json_logging)
+        get_logger().debug(f"Connecting {self.name} to env server {self.config.address}")
+        self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
+        await self.env_client.wait_for_server_startup()
+
+    def _spawn(
+        self,
+        log_dir: Path,
+        log_level: str | None = None,
+        json_logging: bool = False,
+    ) -> None:
         assert isinstance(self.config.num_workers, int), (
             f"num_workers must be resolved before spawn, got {self.config.num_workers!r}"
         )
-        get_logger().debug(f"Spawning env server {self.name}")
         num_workers = self.config.num_workers
         address = f"tcp://127.0.0.1:{get_free_port()}"
+        get_logger().debug(f"Spawning env server {self.name} ({address=}, {num_workers=})")
         process = mp.get_context("spawn").Process(
             target=ZMQEnvServer.run_server,
             args=(
@@ -93,17 +107,6 @@ class Env:
         process.start()
         self.config.address = address
         self._env_server_process = process
-        get_logger().debug(f"Spawned env server {self.name} ({address=}, {num_workers=})")
-
-    async def connect(self) -> None:
-        """Connect an env client to the server and assign it."""
-        if self.config.address is None:
-            raise RuntimeError(
-                f"Env {self.name} has no address configured. Call spawn() first or set address in config."
-            )
-        get_logger().debug(f"Connecting {self.name} to env server {self.config.address}")
-        self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
-        await self.env_client.wait_for_server_startup()
 
     async def run(
         self,
@@ -306,24 +309,17 @@ class Envs(Generic[EnvT]):
     def __len__(self) -> int:
         return len(self._envs)
 
-    def spawn(
+    async def start(
         self,
         log_dir: Path,
         log_level: str | None = None,
         json_logging: bool = False,
     ) -> None:
-        """Spawn env servers for all envs without an explicit address."""
-        for env in self:
-            env.spawn(
-                log_dir=log_dir,
-                log_level=log_level,
-                json_logging=json_logging,
-            )
+        """Spawn env servers (where needed) and connect all env clients in parallel."""
+        await asyncio.gather(
+            *(env.start(log_dir=log_dir, log_level=log_level, json_logging=json_logging) for env in self)
+        )
         atexit.register(self.shutdown)
-
-    async def connect(self) -> None:
-        """Connect all env clients to their servers and wait for health (in parallel)."""
-        await asyncio.gather(*(env.connect() for env in self))
 
     def shutdown(self) -> None:
         """Terminate all spawned env server processes."""
