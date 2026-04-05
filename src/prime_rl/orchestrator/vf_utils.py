@@ -1,23 +1,8 @@
 import logging
-import math
 
 import verifiers as vf
 
 from prime_rl.utils.logger import InterceptHandler
-
-WORKERS_PER_CONCURRENCY = 256
-
-
-def resolve_num_workers(num_workers: int | str, max_concurrent: int | None = None) -> int:
-    """Resolve num_workers from config value.
-
-    When set to ``"auto"``, scales based on max_concurrent using the same
-    heuristic as verifiers' eval_utils: 1 worker per 256 concurrent rollouts.
-    """
-    if num_workers == "auto":
-        assert max_concurrent is not None, "max_concurrent must be set when num_workers='auto'"
-        return max(1, math.ceil(max_concurrent / WORKERS_PER_CONCURRENCY))
-    return int(num_workers)
 
 
 # TODO: remove once usage is tracked by verifiers

@@ -91,9 +91,9 @@ class Scheduler:
         # Inference pool - used for admin operations (adapter sync) and metrics
         self.inference_pool = inference_pool
 
-        group_scoring_tasks = [env.name for env in envs if env.requires_group_scoring]
-        if group_scoring_tasks:
-            self.logger.info(f"Group rollout scoring active for task(s): {', '.join(group_scoring_tasks)}")
+        group_scoring_envs = [env.name for env in envs if env.requires_group_scoring]
+        if group_scoring_envs:
+            self.logger.info(f"Group rollout scoring active for env(s): {', '.join(group_scoring_envs)}")
 
         # Track in-flight requests: task -> info
         self.inflight_requests: dict[asyncio.Task, InflightRolloutInfo] = {}
@@ -110,9 +110,9 @@ class Scheduler:
         self.inflight_policy_update_task: asyncio.Task | None = None
         self.policy_update_lock = asyncio.Lock()
         self.cancelled_rollouts_count = 0
-        self.empty_rollouts_by_task: dict[str, int] = defaultdict(int)
-        self.errored_rollouts_by_task: dict[str, int] = defaultdict(int)
-        self.total_rollouts_by_task: dict[str, int] = defaultdict(int)
+        self.empty_rollouts_by_env: dict[str, int] = defaultdict(int)
+        self.errored_rollouts_by_env: dict[str, int] = defaultdict(int)
+        self.total_rollouts_by_env: dict[str, int] = defaultdict(int)
         self.last_batch_generation_time = 0.0
 
     @property
@@ -407,24 +407,24 @@ class Scheduler:
                     if env.requires_group_scoring:
                         # run_group returns all rollouts at once, already scored
                         group_rollouts: list[vf.RolloutOutput] = finished_task.result()
-                        self.total_rollouts_by_task[env_name] += len(group_rollouts)
+                        self.total_rollouts_by_env[env_name] += len(group_rollouts)
                         for rollout in group_rollouts:
                             rollout["env_name"] = env_name
                         completed_rollouts = group_rollouts
                         self.groups.pop(group_id, None)
                     else:
                         rollout = finished_task.result()
-                        self.total_rollouts_by_task[env_name] += 1
+                        self.total_rollouts_by_env[env_name] += 1
                         should_reschedule = False
                         if len(rollout["trajectory"]) == 0:
-                            self.empty_rollouts_by_task[env_name] += 1
+                            self.empty_rollouts_by_env[env_name] += 1
                             should_reschedule = True
                             self.logger.warning(
                                 f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
                                 f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                             )
                         if rollout["error"] is not None:
-                            self.errored_rollouts_by_task[env_name] += 1
+                            self.errored_rollouts_by_env[env_name] += 1
                             should_reschedule = True
                             self.logger.warning(
                                 f"Rollout error in group {group_id} ({env_name}), re-scheduling "
@@ -494,7 +494,7 @@ class Scheduler:
         return self.step - self.ckpt_step
 
     def get_metrics(self) -> dict[str, float]:
-        total_rollouts = sum(self.total_rollouts_by_task.values())
+        total_rollouts = sum(self.total_rollouts_by_env.values())
         metrics = {
             "time/wait_for_ckpt": self.wait_for_ckpt_time,
             "time/update_weights": self.update_weights_time,
@@ -502,25 +502,25 @@ class Scheduler:
             "scheduler/inflight_rollouts": self.inflight_rollout_count,
             "scheduler/inflight_samples": self.inflight_sample_count,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
-            "empty_rollouts/all": sum(self.empty_rollouts_by_task.values()) / max(total_rollouts, 1),
-            "errored_rollouts/all": sum(self.errored_rollouts_by_task.values()) / max(total_rollouts, 1),
+            "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
+            "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
             "off_policy_level/all/max": self.max_off_policy_level,
             "off_policy_level/all/mean": self.mean_off_policy_level,
         }
-        for task in self.total_rollouts_by_task:
-            task_total = max(self.total_rollouts_by_task[task], 1)
-            metrics[f"empty_rollouts/{task}"] = self.empty_rollouts_by_task.get(task, 0) / task_total
-            metrics[f"errored_rollouts/{task}"] = self.errored_rollouts_by_task.get(task, 0) / task_total
-        by_task: dict[str, list[int]] = {}
+        for env_name in self.total_rollouts_by_env:
+            env_total = max(self.total_rollouts_by_env[env_name], 1)
+            metrics[f"empty_rollouts/{env_name}"] = self.empty_rollouts_by_env.get(env_name, 0) / env_total
+            metrics[f"errored_rollouts/{env_name}"] = self.errored_rollouts_by_env.get(env_name, 0) / env_total
+        by_env: dict[str, list[int]] = {}
         for info in self.inflight_requests.values():
-            by_task.setdefault(info.env_name, []).append(info.off_policy_steps)
-        for task, steps in by_task.items():
-            metrics[f"off_policy_level/{task}/max"] = max(steps)
-            metrics[f"off_policy_level/{task}/mean"] = sum(steps) / len(steps)
+            by_env.setdefault(info.env_name, []).append(info.off_policy_steps)
+        for env_name, steps in by_env.items():
+            metrics[f"off_policy_level/{env_name}/max"] = max(steps)
+            metrics[f"off_policy_level/{env_name}/mean"] = sum(steps) / len(steps)
         self.cancelled_rollouts_count = 0
-        self.empty_rollouts_by_task.clear()
-        self.errored_rollouts_by_task.clear()
-        self.total_rollouts_by_task.clear()
+        self.empty_rollouts_by_env.clear()
+        self.errored_rollouts_by_env.clear()
+        self.total_rollouts_by_env.clear()
 
         # Add inference pool metrics (e.g. elastic pool server counts)
         metrics.update(self.inference_pool.get_metrics())

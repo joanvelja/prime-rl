@@ -75,7 +75,7 @@ async def orchestrate(config: OrchestratorConfig):
         config.log.level,
         json_logging=config.log.json_logging,
     )
-    intercept_vf_logging(logger="verifiers.serve", level=config.log.vf_level)  # show logs from env clients
+    intercept_vf_logging(logger="verifiers.serve", level="WARN")  # show logs from env clients
     logger.info("Starting orchestrator")
 
     event_loop_lag_monitor = EventLoopLagMonitor()
@@ -168,12 +168,11 @@ async def orchestrate(config: OrchestratorConfig):
 
     train_envs.spawn(
         log_dir=get_log_dir(config.output_dir.parent) / "envs" / "train",
-        max_concurrent=config.max_inflight_rollouts,
         log_level=config.log.vf_level,
         json_logging=config.log.json_logging,
     )
     await train_envs.connect()
-    logger.success("Train environments ready")
+    logger.success("Train environment(s) ready")
 
     if config.eval:
         logger.info("Loading eval environments")
@@ -188,6 +187,8 @@ async def orchestrate(config: OrchestratorConfig):
         )
         await eval_envs.connect()
         logger.success("Eval environments ready")
+    else:
+        eval_envs = None
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")

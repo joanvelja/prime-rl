@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -356,6 +357,16 @@ class EvalEnvConfig(EnvConfig):
         int,
         Field(ge=1, description="Number of rollouts to generate per example."),
     ] = 1
+
+    @model_validator(mode="after")
+    def resolve_num_workers(self):
+        if self.num_workers == "auto":
+            if self.num_examples == -1:
+                self.num_workers = 4
+            else:
+                max_concurrent = self.num_examples * self.rollouts_per_example
+                self.num_workers = max(1, math.ceil(max_concurrent / 256))
+        return self
 
 
 class TrainEnvsConfig(BaseConfig):
@@ -964,6 +975,13 @@ class OrchestratorConfig(TrainEnvsConfig):
 
         if self.max_inflight_rollouts is not None and self.max_inflight_rollouts < self.rollouts_per_example:
             raise ValueError("max_inflight_rollouts must be at least the number of rollouts per example")
+
+        # Resolve train env num_workers from max_inflight_rollouts
+        for env_cfg in self.env:
+            if env_cfg.num_workers == "auto":
+                assert self.max_inflight_rollouts is not None
+                env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
+
         return self
 
     @model_validator(mode="after")

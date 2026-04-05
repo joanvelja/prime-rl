@@ -15,7 +15,7 @@ from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.eval_utils import compute_pass_at_k
-from prime_rl.orchestrator.vf_utils import get_completion_len, resolve_num_workers
+from prime_rl.orchestrator.vf_utils import get_completion_len
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
@@ -60,14 +60,17 @@ class Env:
     def spawn(
         self,
         log_dir: Path,
-        max_concurrent: int | None = None,
         log_level: str | None = None,
         json_logging: bool = False,
     ) -> None:
         """Spawn an env server if no explicit address is configured."""
         if self.config.address is not None:
             return
-        num_workers = resolve_num_workers(self.config.num_workers, max_concurrent)
+        assert isinstance(self.config.num_workers, int), (
+            f"num_workers must be resolved before spawn, got {self.config.num_workers!r}"
+        )
+        get_logger().debug(f"Spawning env server {self.name})")
+        num_workers = self.config.num_workers
         address = f"tcp://127.0.0.1:{get_free_port()}"
         process = mp.get_context("spawn").Process(
             target=ZMQEnvServer.run_server,
@@ -89,7 +92,7 @@ class Env:
         process.start()
         self.config.address = address
         self._env_server_process = process
-        get_logger().info(f"Spawned env server for {self.name} with {num_workers} worker(s)")
+        get_logger().debug(f"Spawned env server {self.name} ({address=}, {num_workers=})")
 
     async def connect(self) -> None:
         """Connect an env client to the server and assign it."""
@@ -97,7 +100,7 @@ class Env:
             raise RuntimeError(
                 f"Env {self.name} has no address configured. Call spawn() first or set address in config."
             )
-        get_logger().info(f"Connecting env {self.name} to server at {self.config.address}")
+        get_logger().debug(f"Connecting {self.name} to env server {self.config.address}")
         self._env_client = ZMQEnvClient(address=self.config.address, name=self.name)
         await self.env_client.wait_for_server_startup()
 
@@ -338,7 +341,6 @@ class Envs:
     def spawn(
         self,
         log_dir: Path,
-        max_concurrent: int | None = None,
         log_level: str | None = None,
         json_logging: bool = False,
     ) -> None:
@@ -346,7 +348,6 @@ class Envs:
         for env in self:
             env.spawn(
                 log_dir=log_dir,
-                max_concurrent=max_concurrent,
                 log_level=log_level,
                 json_logging=json_logging,
             )
