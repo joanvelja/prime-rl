@@ -404,23 +404,24 @@ class Scheduler:
                     if group is None:
                         continue
 
-                    result = finished_task.result()
-                    rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
+                    env = self.envs.get(env_name)
+                    rollouts: list[vf.RolloutOutput] = finished_task.result()
                     self.total_rollouts_by_env[env_name] += len(rollouts)
 
                     # Check for empty/errored rollouts and reschedule
                     valid_rollouts = []
+                    has_failures = False
                     for rollout in rollouts:
                         if len(rollout["trajectory"]) == 0:
                             self.empty_rollouts_by_env[env_name] += 1
-                            group.rollouts_to_schedule += 1
+                            has_failures = True
                             self.logger.warning(
                                 f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
                                 f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                             )
                         elif rollout["error"] is not None:
                             self.errored_rollouts_by_env[env_name] += 1
-                            group.rollouts_to_schedule += 1
+                            has_failures = True
                             self.logger.warning(
                                 f"Rollout error in group {group_id} ({env_name}), re-scheduling "
                                 f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
@@ -430,6 +431,14 @@ class Scheduler:
                             rollout["env_name"] = env_name
                             valid_rollouts.append(rollout)
 
+                    if has_failures and env.requires_group_scoring:
+                        # Group scoring requires all rollouts — discard partial results, reschedule full group
+                        group.completed_rollouts.clear()
+                        group.rollouts_to_schedule = self.rollouts_per_example
+                        continue
+
+                    # For individual scoring, reschedule only the failed ones
+                    group.rollouts_to_schedule += len(rollouts) - len(valid_rollouts)
                     group.completed_rollouts.extend(valid_rollouts)
                     if len(group.completed_rollouts) < self.rollouts_per_example:
                         continue

@@ -271,13 +271,6 @@ class EnvConfig(BaseConfig):
         ),
     ] = "auto"
 
-    score_rollouts: Annotated[
-        bool,
-        Field(
-            description="Whether the env server scores rollouts using the environment rubric. When False, rewards are always 0. Also gated by orchestrator.verification.enabled."
-        ),
-    ] = True
-
     ratio: Annotated[
         float | None,
         Field(
@@ -1006,6 +999,6 @@ class OrchestratorConfig(TrainEnvsConfig):
         for env in self.env:
             env.extra_env_kwargs.update(
                 max_seq_len=self.seq_len,
-                score_rollouts=self.verification.enabled and env.score_rollouts,
+                score_rollouts=self.verification.enabled,
             )
         return self
