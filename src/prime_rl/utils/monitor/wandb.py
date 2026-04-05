@@ -194,7 +194,10 @@ class WandbMonitor(Monitor):
             if not completion:
                 continue
             if isinstance(completion, list):
-                completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
+                try:
+                    completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
+                except Exception:
+                    completion = str(completion)
             sample = {
                 "step": step,
                 "env": env_name,
