@@ -17,14 +17,14 @@ from prime_rl.utils.logger import get_logger
 from prime_rl.utils.utils import format_num, mean, mean_normalize
 
 if TYPE_CHECKING:
-    from prime_rl.orchestrator.envs import Envs
+    from prime_rl.orchestrator.envs import TrainEnvs
 
 
 POOLS = ["easy", "normal", "hard"]
 
 
-class EnvBuffer:
-    """Per-environment buffer managing examples and difficulty pools."""
+class Buffer:
+    """Manages examples and difficulty pools for a single env."""
 
     def __init__(self, env_name: str, dataset: Dataset, config: BufferConfig):
         self.env_name = env_name
@@ -103,22 +103,22 @@ class EnvBuffer:
         return metrics
 
 
-class BufferSet:
-    """Manages multiple EnvBuffers with env-ratio-aware sampling."""
+class Buffers:
+    """Manages multiple Buffers with env-ratio-aware sampling."""
 
-    def __init__(self, envs: Envs, config: BufferConfig):
+    def __init__(self, envs: TrainEnvs, config: BufferConfig):
         self.config = config
         self.logger = get_logger()
 
         if config.seed is not None:
             random.seed(config.seed)
 
-        self.env_buffers: dict[str, EnvBuffer] = {}
+        self.env_buffers: dict[str, Buffer] = {}
         for env in envs:
             ds = env.get_dataset(seed=config.seed)
             if "example_id" not in ds.column_names:
                 ds = ds.map(lambda ex, idx: {**ex, "example_id": idx}, with_indices=True)
-            self.env_buffers[env.name] = EnvBuffer(env.name, ds, config)
+            self.env_buffers[env.name] = Buffer(env.name, ds, config)
         self.env_names = envs.names
 
         total = sum(eb.num_total for eb in self.env_buffers.values())
@@ -269,7 +269,7 @@ class BufferSet:
             self.rollout_buffer.extend(valid)
             self.logger.debug(f"Loaded {len(valid)} rollout(s) from checkpoint.")
 
-        def convert_to_normal(eb: EnvBuffer, pool: list[dict], fraction: float) -> int:
+        def convert_to_normal(eb: Buffer, pool: list[dict], fraction: float) -> int:
             if fraction <= 0.0 or not pool:
                 return 0
             num_to_move = round(len(pool) * fraction)

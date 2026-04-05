@@ -32,7 +32,7 @@ import verifiers as vf
 from transformers import AutoProcessor, AutoTokenizer
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
-from prime_rl.orchestrator.buffer import BufferSet
+from prime_rl.orchestrator.buffer import Buffers
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
@@ -191,7 +191,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
-    buffer = BufferSet(train_envs, config.buffer)
+    buffer = Buffers(train_envs, config.buffer)
 
     # Get checkpoint manager
     logger.info(f"Initializing checkpoint manager ({config.ckpt})")

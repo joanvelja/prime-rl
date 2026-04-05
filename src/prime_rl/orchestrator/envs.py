@@ -189,7 +189,7 @@ class EvalEnv(Env):
                 return None
 
         try:
-            results = await asyncio.gather(*[_run_one(example) for example in inputs])
+            results = await asyncio.gather(*[_run_one(dict(example)) for example in inputs])
         finally:
             pbar.close()
 
@@ -246,6 +246,7 @@ class EvalEnv(Env):
 
         message = f"Evaluated {self.name} in {eval_time:.2f}s (Avg@{k}={results_df.reward.mean():.4f}"
         if could_be_binary:
+            assert pass_at_k is not None
             for pass_rate, pass_rate_score in pd.Series(pass_at_k.mean()).items():
                 message += f", {capitalize(str(pass_rate))}: {pass_rate_score:.4f}"
 
