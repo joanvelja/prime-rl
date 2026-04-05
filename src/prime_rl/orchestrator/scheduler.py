@@ -4,7 +4,6 @@ import asyncio
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import NamedTuple
 
 import verifiers as vf
 from aiolimiter import AsyncLimiter
@@ -24,7 +23,8 @@ from prime_rl.utils.utils import (
 )
 
 
-class InflightRolloutInfo(NamedTuple):
+@dataclass
+class InflightRequest:
     """Metadata for an in-flight request."""
 
     off_policy_steps: int
@@ -97,7 +97,7 @@ class Scheduler:
             self.logger.info(f"Group rollout scoring active for env(s): {', '.join(group_scoring_envs)}")
 
         # Track in-flight requests: task -> info
-        self.inflight_requests: dict[asyncio.Task, InflightRolloutInfo] = {}
+        self.inflight_requests: dict[asyncio.Task, InflightRequest] = {}
 
         # Track in-progress groups while rollouts are generated independently.
         self.next_group_id = 0
@@ -215,7 +215,7 @@ class Scheduler:
                     model_name=self.model_name,
                 )
             )
-        self.inflight_requests[task] = InflightRolloutInfo(
+        self.inflight_requests[task] = InflightRequest(
             off_policy_steps=0,
             client_config=client_config,
             env_name=env_name,
@@ -350,7 +350,7 @@ class Scheduler:
             info = self.inflight_requests.get(task)
             if info is None:
                 continue
-            self.inflight_requests[task] = info._replace(off_policy_steps=info.off_policy_steps + 1)
+            info.off_policy_steps += 1
 
         self.cancelled_rollouts_count += removed
         if removed:
