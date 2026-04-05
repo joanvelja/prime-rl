@@ -229,17 +229,16 @@ class EvalEnv(Env):
         failed_count = total_rollouts - len(successful_outputs)
         eval_time = time.perf_counter() - eval_start
 
-        total_count = total_rollouts
         if failed_count:
             get_logger().warning(
-                f"{failed_count}/{total_count} ({failed_count / total_count * 100:.1f}%) rollouts failed"
+                f"{failed_count}/{total_rollouts} ({failed_count / total_rollouts * 100:.1f}%) rollouts failed"
             )
 
         if not successful_outputs:
             get_logger().warning(f"All rollouts failed for {self.name}, skipping logging metrics")
             get_monitor().log(
                 {
-                    f"eval/{self.name}/failed_rollouts": failed_count / total_count,
+                    f"eval/{self.name}/failed_rollouts": failed_count / total_rollouts,
                     "progress/ckpt_step": ckpt_step,
                     "step": step,
                 },
@@ -296,7 +295,7 @@ class EvalEnv(Env):
             "completion_len/max": results_df.completion_len.max().item(),
             "completion_len/min": results_df.completion_len.min().item(),
             "is_truncated/mean": results_df.is_truncated.mean().item(),
-            "failed_rollouts": failed_count / total_count,
+            "failed_rollouts": failed_count / total_rollouts,
             "time": eval_time,
         }
         if could_be_binary:
