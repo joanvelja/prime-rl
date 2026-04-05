@@ -174,8 +174,9 @@ async def orchestrate(config: OrchestratorConfig):
     await train_envs.connect()
     logger.success("Train environment(s) ready")
 
+    eval_envs: EvalEnvs | None = None
     if config.eval:
-        logger.info("Loading eval environments")
+        logger.info("Loading eval environment(s)")
         eval_envs = EvalEnvs(config.eval_envs)
         eval_envs.set_sampling_args(get_eval_sampling_args(config.eval.sampling))
         logger.info(f"Loaded {len(eval_envs)} eval environment(s) ({', '.join(eval_envs.names)})")
@@ -187,8 +188,6 @@ async def orchestrate(config: OrchestratorConfig):
         )
         await eval_envs.connect()
         logger.success("Eval environments ready")
-    else:
-        eval_envs = None
 
     # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
@@ -331,6 +330,7 @@ async def orchestrate(config: OrchestratorConfig):
         # Use range check to handle ckpt_step jumping over interval boundaries.
         eval_ckpt_step = None
         if config.eval:
+            assert eval_envs is not None
             eval_ckpt_step = compute_eval_ckpt_step(
                 ckpt_step=ckpt_step,
                 prev_ckpt_step=prev_ckpt_step,

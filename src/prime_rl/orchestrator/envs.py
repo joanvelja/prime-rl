@@ -4,9 +4,10 @@ import asyncio
 import atexit
 import multiprocessing as mp
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import Generic, TypeVar
 
 import pandas as pd
 import verifiers as vf
@@ -312,10 +313,13 @@ class EvalEnv(Env):
         monitor.log_eval_samples(successful_outputs, env_name=self.name, step=step)
 
 
-class Envs:
+EnvT = TypeVar("EnvT", bound=Env)
+
+
+class Envs(Generic[EnvT]):
     """Base container for a set of Env instances."""
 
-    _envs: dict[str, Env]
+    _envs: dict[str, EnvT]
 
     @property
     def names(self) -> list[str]:
@@ -325,14 +329,14 @@ class Envs:
     def configs(self) -> list[EnvConfig]:
         return [env.config for env in self._envs.values()]
 
-    def get(self, name: str) -> Env:
+    def get(self, name: str) -> EnvT:
         return self._envs[name]
 
     def set_sampling_args(self, sampling_args: dict) -> None:
         for env in self:
             env.sampling_args = sampling_args
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[EnvT]:
         return iter(self._envs.values())
 
     def __len__(self) -> int:
@@ -368,21 +372,21 @@ class Envs:
             env.shutdown()
 
 
-class TrainEnvs(Envs):
+class TrainEnvs(Envs[TrainEnv]):
     """Collection of training environments."""
 
     def __init__(self, configs: Sequence[TrainEnvConfig]):
-        self._envs: dict[str, Env] = {}
+        self._envs: dict[str, TrainEnv] = {}
         for config in configs:
             env = TrainEnv(config)
             self._envs[env.name] = env
 
 
-class EvalEnvs(Envs):
+class EvalEnvs(Envs[EvalEnv]):
     """Collection of evaluation environments."""
 
     def __init__(self, configs: Sequence[EvalEnvConfig]):
-        self._envs: dict[str, Env] = {}
+        self._envs: dict[str, EvalEnv] = {}
         for config in configs:
             env = EvalEnv(config)
             self._envs[env.name] = env
