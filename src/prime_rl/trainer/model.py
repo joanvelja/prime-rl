@@ -235,6 +235,18 @@ def get_model(
                 "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
             )
 
+    # GPT-OSS only supports FlashAttention via kernels-community/vllm-flash-attn3, which requires Hopper (SM 90).
+    # On other architectures (e.g. Blackwell), users must fall back to eager attention.
+    HOPPER_MAJOR = 9
+    if getattr(model_config, "model_type", "") == "gpt_oss" and config.attn != "eager":
+        major, minor = torch.cuda.get_device_capability()
+        if major != HOPPER_MAJOR:
+            raise ValueError(
+                f"GPT-OSS requires 'attn = \"eager\"' on non-Hopper GPUs (detected SM {major}{minor}). "
+                f"The only flash attention kernel supported by GPT-OSS (kernels-community/vllm-flash-attn3) is Hopper-only. "
+                f"Set [trainer.model] attn = \"eager\" in your config."
+            )
+
     # Fallback Qwen3.5 patch detection from loaded config model_type
     if getattr(model_config, "model_type", "").startswith("qwen3_5_moe"):
         _patch_qwen3_5_text_position_ids()
