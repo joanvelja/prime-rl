@@ -166,6 +166,7 @@ class EvalEnv(Env):
 
     def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
+        self.examples = self.env.get_eval_dataset(n=config.num_examples).to_list()
 
     async def evaluate(
         self,
@@ -174,11 +175,9 @@ class EvalEnv(Env):
         ckpt_step: int,
         step: int,
     ) -> None:
-        n, k = self.config.num_examples, self.config.rollouts_per_example
+        n, k = len(self.examples), self.config.rollouts_per_example
         get_logger().info(f"Evaluating {self.name} (num_examples={n}, rollouts_per_example={k})")
-
-        examples = self.env.get_eval_dataset(n=n).to_list()
-        total_rollouts = len(examples) * k
+        total_rollouts = n * k
         pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
 
@@ -201,7 +200,7 @@ class EvalEnv(Env):
                     pbar.update(k)
                     return None
 
-            coros = [run_with_progress(example) for example in examples]
+            coros = [run_with_progress(example) for example in self.examples]
 
         else:
 
@@ -219,7 +218,7 @@ class EvalEnv(Env):
                     pbar.update(1)
                     return None
 
-            coros = [run_with_progress(example) for example in examples for _ in range(k)]
+            coros = [run_with_progress(example) for example in self.examples for _ in range(k)]
 
         try:
             results = await asyncio.gather(*coros)
