@@ -1,3 +1,5 @@
+import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before import
+
 from contextlib import nullcontext
 import time
 from datetime import timedelta
@@ -10,7 +12,6 @@ from prime_rl.trainer.rl.broadcast import setup_weight_broadcast
 from prime_rl.utils.act_offloading import maybe_activation_offloading
 import torch
 import torch.distributed as dist
-import torch.distributed.nn as dist_nn
 from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.trainer.multi_ckpt import setup_multi_checkpoint_manager
@@ -19,6 +20,8 @@ from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
 from prime_rl.utils.cp import (
+    gather_for_cp,
+    gather_for_cp_wo_grad,
     setup_cp_params,
     shard_for_cp,
 )
@@ -45,6 +48,7 @@ from prime_rl.trainer.utils import (
     MemoryProfiler,
     Tensors,
     export_benchmark_json,
+    filter_rl_trainer_tensor_stats_for_wandb,
     get_zero_gradient_ratio,
     get_ckpt_disk_metrics,
     setup_torch_distributed,
@@ -181,9 +185,10 @@ def train(config: TrainerConfig):
         cp_rank = parallel_dims.world_mesh["cp"].get_local_rank()
         substitute_hf_flash_attn(cp_group, heads_k_stride=1)
         substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
-        from prime_rl.utils.cp import setup_hybrid_cp
+        from prime_rl.utils.cp import setup_hybrid_cp, setup_sparse_mla_cp
 
         setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
+        setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
     # Optionally, resume training from a checkpoint
     progress = Progress()
@@ -406,12 +411,8 @@ def train(config: TrainerConfig):
             # else: FusedOutputLinear was used - logprobs already computed with per-token temperatures
 
             if cp_enabled:
-                logprobs = dist_nn.all_gather(out["logprobs"], group=cp_group)
-                out["logprobs"] = torch.cat(logprobs, dim=1)
-
-                entropies = [torch.zeros_like(out["entropy"]) for _ in range(cp_size)]
-                dist.all_gather(entropies, out["entropy"], group=cp_group)
-                out["entropy"] = torch.cat(entropies, dim=1)
+                out["logprobs"] = gather_for_cp(out["logprobs"], cp_group)
+                out["entropy"] = gather_for_cp_wo_grad(out["entropy"], cp_size, cp_group)
 
             vocab_size = getattr(model.config, "vocab_size", None) or model.config.text_config.vocab_size
             # This is not really necessary as the first token should be masked out, but we do it anyway to be sure
@@ -441,8 +442,6 @@ def train(config: TrainerConfig):
                 loss.backward()
 
             # Add relevant tensors to tensor dict for logging purposes
-            tensors["trainer_probs"].append(torch.exp(out["logprobs"])[loss_mask].detach().to("cpu"))
-            tensors["inference_probs"].append(torch.exp(inference_logprobs)[loss_mask].detach().to("cpu"))
             tensors["entropy"].append(out["entropy"][loss_mask].detach().to("cpu"))
             tensors["loss"].append(loss.detach().to("cpu").unsqueeze(0))
 
@@ -540,9 +539,8 @@ def train(config: TrainerConfig):
         if mismatch_kl_mean is not None and entropy_mean > 0:
             tensor_stats["kl_ent_ratio/mean"] = mismatch_kl_mean / entropy_mean
 
-        # Log tensor stats
         tensor_stats["step"] = progress.step
-        monitor.log(tensor_stats, step=progress.step)
+        monitor.log(filter_rl_trainer_tensor_stats_for_wandb(tensor_stats), step=progress.step)
 
         # Log time metrics
         time_metrics = {

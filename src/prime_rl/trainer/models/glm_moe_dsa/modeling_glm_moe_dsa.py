@@ -2,6 +2,7 @@ import warnings
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 from torch import Tensor, nn
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
@@ -26,6 +27,7 @@ from prime_rl.trainer.models.layers.mlp import MLP, MLPConfig
 from prime_rl.trainer.models.layers.moe import MoE, MoEArgs
 from prime_rl.trainer.models.layers.norms import RMSNorm, RMSNormConfig
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig
+from prime_rl.utils.cp import gather_for_cp, shard_for_cp
 
 
 def _sparse_mla_attention_args(config: GlmMoeDsaConfig) -> SparseMlaAttentionArgs:
@@ -80,6 +82,27 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
         self.post_attention_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
 
+    def set_context_parallel_attributes(self, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
+        self._cp_group = cp_group
+        self._cp_rank = cp_rank
+        self._cp_world_size = cp_world_size
+
+    @property
+    def cp_enabled(self) -> bool:
+        return hasattr(self, "_cp_group") and hasattr(self, "_cp_rank") and hasattr(self, "_cp_world_size")
+
+    def shard_to_cp(self, t: torch.Tensor) -> torch.Tensor:
+        if not self.cp_enabled:
+            return t
+
+        return shard_for_cp(t, self._cp_rank, self._cp_world_size)
+
+    def gather_for_cp(self, t: torch.Tensor) -> torch.Tensor:
+        if not self.cp_enabled:
+            return t
+
+        return gather_for_cp(t, self._cp_group)
+
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
         self,
@@ -91,12 +114,14 @@ class GlmMoeDsaDecoderLayer(GradientCheckpointingLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.gather_for_cp(hidden_states)
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             ks=ks,
             ke=ke,
         )
+        hidden_states = self.shard_to_cp(hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -186,6 +211,23 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
 
         self.post_init()
 
+    def _context_parallel_state(self) -> tuple[dist.ProcessGroup | None, int, int]:
+        if len(self.layers) == 0:
+            return None, 0, 1
+
+        layer = self.layers[0]
+        return getattr(layer, "_cp_group", None), getattr(layer, "_cp_rank", 0), getattr(layer, "_cp_world_size", 1)
+
+    def _gather_position_ids_for_cp(
+        self,
+        position_ids: torch.LongTensor,
+        cp_group: dist.ProcessGroup,
+        cp_world_size: int,
+    ) -> torch.LongTensor:
+        gathered_position_ids = [torch.empty_like(position_ids) for _ in range(cp_world_size)]
+        dist.all_gather(gathered_position_ids, position_ids.contiguous(), group=cp_group)
+        return torch.cat(gathered_position_ids, dim=1)
+
     @auto_docstring
     def forward(
         self,
@@ -204,13 +246,19 @@ class GlmMoeDsaModel(GlmMoeDsaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
 
-        flat_position_ids = position_ids.view(-1)
+        cp_group, _, cp_world_size = self._context_parallel_state()
+        if cp_group is not None and cp_world_size > 1:
+            position_ids_for_attn = self._gather_position_ids_for_cp(position_ids, cp_group, cp_world_size)
+        else:
+            position_ids_for_attn = position_ids
+
+        flat_position_ids = position_ids_for_attn.view(-1)
         S = flat_position_ids.shape[0]
         ks = torch.arange(S, dtype=torch.int32, device=flat_position_ids.device) - flat_position_ids.to(torch.int32)
         ke = torch.arange(1, S + 1, dtype=torch.int32, device=flat_position_ids.device)
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids_for_attn)
 
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             routed_experts_layer = routed_experts[:, :, layer_idx, :] if routed_experts is not None else None

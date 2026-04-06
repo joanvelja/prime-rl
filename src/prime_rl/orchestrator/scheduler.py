@@ -483,13 +483,6 @@ class Scheduler:
         return max(steps)
 
     @property
-    def min_off_policy_level(self) -> int:
-        steps = [info.off_policy_steps for info in self.inflight_requests.values()]
-        if not steps:
-            return 0
-        return min(steps)
-
-    @property
     def mean_off_policy_level(self) -> float:
         steps = [info.off_policy_steps for info in self.inflight_requests.values()]
         if not steps:
@@ -513,21 +506,17 @@ class Scheduler:
             "errored_rollouts/all": sum(self.errored_rollouts_by_task.values()) / max(total_rollouts, 1),
             "off_policy_level/all/max": self.max_off_policy_level,
             "off_policy_level/all/mean": self.mean_off_policy_level,
-            "off_policy_level/all/min": self.min_off_policy_level,
         }
-        for task, count in self.empty_rollouts_by_task.items():
+        for task in self.total_rollouts_by_task:
             task_total = max(self.total_rollouts_by_task[task], 1)
-            metrics[f"empty_rollouts/{task}"] = count / task_total
-        for task, count in self.errored_rollouts_by_task.items():
-            task_total = max(self.total_rollouts_by_task[task], 1)
-            metrics[f"errored_rollouts/{task}"] = count / task_total
+            metrics[f"empty_rollouts/{task}"] = self.empty_rollouts_by_task.get(task, 0) / task_total
+            metrics[f"errored_rollouts/{task}"] = self.errored_rollouts_by_task.get(task, 0) / task_total
         by_task: dict[str, list[int]] = {}
         for info in self.inflight_requests.values():
             by_task.setdefault(info.task, []).append(info.off_policy_steps)
         for task, steps in by_task.items():
             metrics[f"off_policy_level/{task}/max"] = max(steps)
             metrics[f"off_policy_level/{task}/mean"] = sum(steps) / len(steps)
-            metrics[f"off_policy_level/{task}/min"] = min(steps)
         self.cancelled_rollouts_count = 0
         self.empty_rollouts_by_task.clear()
         self.errored_rollouts_by_task.clear()

@@ -730,7 +730,6 @@ async def orchestrate(config: OrchestratorConfig):
             "decode_len/all/min": by_example.decode_len.mean().min(),
             "is_truncated/all/mean": by_example.is_truncated.mean().mean(),
             "is_truncated/all/max": by_example.is_truncated.mean().max(),
-            "is_truncated/all/min": by_example.is_truncated.mean().min(),
             "stop_condition/all/generation_truncated": (
                 results_df.is_truncated & (results_df.stop_condition != "prompt_too_long")
             ).mean(),
@@ -795,7 +794,8 @@ async def orchestrate(config: OrchestratorConfig):
             for col in per_env_columns:
                 to_log[f"{col}/{env}/mean"] = env_by_example[col].mean().mean()
                 to_log[f"{col}/{env}/max"] = env_by_example[col].mean().max()
-                to_log[f"{col}/{env}/min"] = env_by_example[col].mean().min()
+                if col != "is_truncated":
+                    to_log[f"{col}/{env}/min"] = env_by_example[col].mean().min()
             to_log[f"reward/{env}/mean"] = env_by_example.reward.mean().mean()
             to_log[f"reward/{env}/max"] = env_by_example.reward.mean().max()
             to_log[f"reward/{env}/min"] = env_by_example.reward.mean().min()
