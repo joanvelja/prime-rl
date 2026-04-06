@@ -111,8 +111,6 @@ async def orchestrate(config: OrchestratorConfig):
     for env_id in env_ids_to_install:
         install_env(env_id)
 
-    run_id = os.getenv("RUN_ID", "")
-
     # Setup rollout inference pool (handles both static and elastic modes)
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
@@ -161,6 +159,7 @@ async def orchestrate(config: OrchestratorConfig):
         tokenizer=tokenizer,
         run_config=config,
     )
+    run_id = os.getenv("RUN_ID", "")
 
     usage_config = config.prime_monitor.usage if config.prime_monitor else None
     usage_reporter = UsageReporter(usage_config or UsageConfig.from_env())
