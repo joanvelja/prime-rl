@@ -406,7 +406,8 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info("Training from scratch")
 
     # Update weights at step 0 (or checkpoint step if resuming)
-    if enable_policy_updates:
+    # For NCCL broadcast, we always update weights. For filesystem broadcast, we only update when resuming.
+    if enable_policy_updates and (checkpoint_step is not None or config.weight_broadcast.type == "nccl"):
         # In NCCL mode, skip existence check - weights are broadcasted, not stored on disk
         check_exists = config.weight_broadcast.type != "nccl"
         wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt and checkpoint_step is not None else None
