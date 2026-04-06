@@ -70,7 +70,6 @@ class Scheduler:
         tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
-        deferred_group_scoring_tasks: set[str] | None = None,
     ):
         self.logger = get_logger()
         if tasks_per_minute is not None:
@@ -99,10 +98,6 @@ class Scheduler:
         self.inference_pool = inference_pool
 
         self.max_retries_by_task = {env.resolved_name: env.max_retries for env in config.env}
-        self.deferred_group_scoring_tasks = set(deferred_group_scoring_tasks or ())
-        if self.deferred_group_scoring_tasks:
-            task_list = ", ".join(sorted(self.deferred_group_scoring_tasks))
-            self.logger.info(f"Deferred group scoring active for task(s): {task_list}")
 
         # Track in-flight requests: task -> info
         self.inflight_requests: dict[asyncio.Task, InflightRolloutInfo] = {}

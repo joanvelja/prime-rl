@@ -400,7 +400,6 @@ async def orchestrate(config: OrchestratorConfig):
         tasks_per_minute=config.tasks_per_minute,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
-        deferred_group_scoring_tasks=train_env_deferred_group_scoring_tasks,
         config=config,
     )
     scheduler.model_name = rollout_model_name
