@@ -114,6 +114,10 @@ def train(config: TrainerConfig):
         config.output_dir, config.max_concurrent_runs, torch.device("cuda", world.local_rank), config.model.lora
     )
 
+    # For single-run, set ready_to_update to True at initialization to allow weight broadcast at step 0
+    if config.max_concurrent_runs == 1:
+        multi_run_manager.ready_to_update[0] = True
+
     # Initialize parallel dimensions
     parallel_dims = get_parallel_dims(config.model)
 

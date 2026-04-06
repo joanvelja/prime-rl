@@ -414,6 +414,10 @@ async def orchestrate(config: OrchestratorConfig):
             await inference_pool.update_weights(weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
     else:
         logger.info("Training from scratch")
+        # For NCCL broadcast, trigger weight update at step 0 to initialize inference workers
+        if enable_policy_updates and config.weight_broadcast.type == "nccl":
+            weights_path = get_step_path(get_broadcast_dir(config.output_dir), 0)
+            await inference_pool.update_weights(weights_path, step=0)
 
     # Iterate over dataset in batches
     max_steps = config.max_steps or int(1e9)
