@@ -1,0 +1,8 @@
+# GR3: multiplicative reward-level shaping (Li et al., 2026)
+
+[wandb]
+name = "gr3"
+
+[orchestrator.advantage]
+length_shaping = "gr3"
+length_shaping_alpha = 0.33

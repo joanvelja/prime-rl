@@ -21,60 +21,158 @@ def test_default_advantage_fn_simple_mean():
     assert torch.allclose(result.advantages.mean(dim=1), torch.zeros(2), atol=1e-6)
 
 
-def test_length_shaping_only_penalizes_correct_rollouts():
-    """Correct rollouts get attenuated by L_min/L_i; incorrect ones are unchanged."""
+def test_efficiency_mixed_group():
+    """Mixed group: advantage-level shaping preserves positive advantage for all correct rollouts."""
     inputs = AdvantageInputs(
         rewards=torch.tensor([[1.0, 1.0, 0.0, 1.0]]),
         completion_lengths=torch.tensor([[10, 30, 20, 20]]),
     )
-    result = default_advantage_fn(inputs, length_shaping="brevity_bonus")
+    result = default_advantage_fn(inputs, length_shaping="efficiency")
 
-    # min_correct = 10
-    # shaped: [1*10/10, 1*10/30, 0, 1*10/20] = [1.0, 1/3, 0.0, 0.5]
-    shaped_rewards = torch.tensor([1.0, 1.0 / 3, 0.0, 0.5])
-    expected = shaped_rewards - shaped_rewards.mean()
+    # mean_correct_len = (10+30+20)/3 = 20
+    # w = [20/10, 20/30, 1, 20/20] = [2.0, 2/3, 1.0, 1.0]
+    # baseline = mean(R) = 3/4
+    # A_correct = (1 - 0.75) * w = 0.25 * w
+    # A_incorrect = (0 - 0.75) * 1 = -0.75
+    expected = torch.tensor([[0.25 * 2.0, 0.25 * (2.0 / 3.0), -0.75, 0.25 * 1.0]])
 
-    assert torch.allclose(result.advantages, expected.unsqueeze(0), atol=1e-6)
+    assert torch.allclose(result.advantages, expected, atol=1e-6)
+
+    # All correct rollouts have positive advantage
+    correct_mask = inputs.rewards[0] >= 1.0
+    assert (result.advantages[0][correct_mask] > 0).all()
 
 
-def test_length_shaping_shortest_correct_keeps_full_reward():
-    """The shortest correct rollout keeps reward=1."""
+def test_efficiency_all_correct_group():
+    """All-correct group: switches to reward-level shaping for length differentiation."""
     inputs = AdvantageInputs(
         rewards=torch.tensor([[1.0, 1.0, 1.0]]),
         completion_lengths=torch.tensor([[10, 20, 40]]),
     )
-    result = default_advantage_fn(inputs, length_shaping="brevity_bonus")
+    result = default_advantage_fn(inputs, length_shaping="efficiency")
 
-    # shaped: [1*10/10, 1*10/20, 1*10/40] = [1.0, 0.5, 0.25]
-    shaped_rewards = torch.tensor([1.0, 0.5, 0.25])
-    expected = shaped_rewards - shaped_rewards.mean()
+    # mean_correct_len = (10+20+40)/3 = 70/3
+    # w = [70/30, 70/60, 70/120] = [7/3, 7/6, 7/12]
+    # A = w - mean(w)
+    mean_len = 70.0 / 3.0
+    w = torch.tensor([mean_len / 10, mean_len / 20, mean_len / 40])
+    expected = (w - w.mean()).unsqueeze(0)
 
-    assert torch.allclose(result.advantages, expected.unsqueeze(0), atol=1e-6)
+    assert torch.allclose(result.advantages, expected, atol=1e-6)
+
+    # Shortest rollout has highest advantage
+    assert result.advantages[0, 0] > result.advantages[0, 1] > result.advantages[0, 2]
 
 
-def test_length_shaping_no_correct_rollouts():
-    """When no rollout is correct, length shaping has no effect."""
+def test_efficiency_no_correct_rollouts():
+    """When no rollout is correct, efficiency shaping has no effect."""
     inputs = AdvantageInputs(
         rewards=torch.tensor([[0.0, 0.0, 0.0]]),
         completion_lengths=torch.tensor([[10, 20, 15]]),
     )
-    result_with = default_advantage_fn(inputs, length_shaping="brevity_bonus")
+    result_with = default_advantage_fn(inputs, length_shaping="efficiency")
     result_without = default_advantage_fn(inputs)
 
     assert torch.allclose(result_with.advantages, result_without.advantages, atol=1e-6)
 
 
+def test_efficiency_single_correct():
+    """Single correct rollout: w=1 for it, no differentiation among correct, same as standard GRPO."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        completion_lengths=torch.tensor([[100, 50, 200, 150]]),
+    )
+    result = default_advantage_fn(inputs, length_shaping="efficiency")
+
+    # Only 1 correct, mean_correct_len = 100, w = 100/100 = 1
+    # A = (R - 0.25) * w = (R - 0.25) * 1 for correct, (R - 0.25) * 1 for incorrect
+    expected = torch.tensor([[0.75, -0.25, -0.25, -0.25]])
+    assert torch.allclose(result.advantages, expected, atol=1e-6)
+
+
+def test_efficiency_custom_threshold():
+    """Threshold parameter controls what counts as 'correct'."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[0.8, 0.9, 0.3, 0.7]]),
+        completion_lengths=torch.tensor([[10, 30, 20, 20]]),
+    )
+    result = default_advantage_fn(inputs, length_shaping="efficiency", length_shaping_threshold=0.7)
+
+    # Correct (>= 0.7): indices 0,1,3 with lengths 10,30,20
+    # mean_correct_len = 20
+    # w = [20/10, 20/30, 1.0, 20/20] = [2.0, 2/3, 1.0, 1.0]
+    expected = torch.tensor(
+        [[(0.8 - 0.675) * 2.0, (0.9 - 0.675) * (2.0 / 3.0), (0.3 - 0.675) * 1.0, (0.7 - 0.675) * 1.0]]
+    )
+
+    assert torch.allclose(result.advantages, expected, atol=1e-6)
+
+
+def test_efficiency_shorter_correct_always_higher_advantage():
+    """Among correct rollouts in a mixed group, shorter always gets higher advantage."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0]]),
+        completion_lengths=torch.tensor([[50, 100, 200, 80, 120]]),
+    )
+    result = default_advantage_fn(inputs, length_shaping="efficiency")
+
+    advs = result.advantages[0]
+    # Correct rollouts: 0, 1, 2 with lengths 50, 100, 200
+    assert advs[0] > advs[1] > advs[2]
+    # All correct have positive advantage (3 correct, 5 total -> baseline = 3/5 = 0.6)
+    assert (advs[:3] > 0).all()
+    # Incorrect have negative advantage
+    assert (advs[3:] < 0).all()
+
+
+def test_efficiency_incorrect_unchanged():
+    """Incorrect rollouts get exactly the same advantage as standard GRPO."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 1.0, 0.0, 0.0]]),
+        completion_lengths=torch.tensor([[10, 30, 20, 40]]),
+    )
+    result_eff = default_advantage_fn(inputs, length_shaping="efficiency")
+    result_std = default_advantage_fn(inputs)
+
+    # Incorrect rollout advantages should be identical
+    assert torch.allclose(result_eff.advantages[0, 2:], result_std.advantages[0, 2:], atol=1e-6)
+
+
+def test_efficiency_multiple_problems():
+    """Handles multiple problems independently."""
+    inputs = AdvantageInputs(
+        rewards=torch.tensor(
+            [
+                [1.0, 1.0, 0.0],  # mixed
+                [1.0, 1.0, 1.0],  # all correct
+            ]
+        ),
+        completion_lengths=torch.tensor(
+            [
+                [10, 20, 15],
+                [10, 20, 40],
+            ]
+        ),
+    )
+    result = default_advantage_fn(inputs, length_shaping="efficiency")
+
+    # Row 0: mixed group (advantage-level)
+    assert result.advantages[0, 0] > result.advantages[0, 1]  # shorter correct > longer correct
+    assert (result.advantages[0, :2] > 0).all()  # both correct positive
+    assert result.advantages[0, 2] < 0  # incorrect negative
+
+    # Row 1: all-correct group (reward-level)
+    assert result.advantages[1, 0] > result.advantages[1, 1] > result.advantages[1, 2]
+
+
 def test_gr3_length_shaping():
-    """GR³: multiplicative shaping on all rollouts relative to mean length."""
+    """GR3: multiplicative shaping on all rollouts relative to mean length."""
     inputs = AdvantageInputs(
         rewards=torch.tensor([[1.0, 0.5, 0.8]]),
         completion_lengths=torch.tensor([[10, 20, 10]]),
     )
     result = default_advantage_fn(inputs, length_shaping="gr3", length_shaping_alpha=0.33)
 
-    # mean_length = 40/3, normalized = [10/13.33, 20/13.33, 10/13.33] = [0.75, 1.5, 0.75]
-    # factor = (1 + 0.33 * normalized)^-1
-    # rewards_shaped = rewards * factor, then subtract mean
     expected = torch.tensor([[0.20915856, -0.25799648, 0.04883792]])
     assert torch.allclose(result.advantages, expected, atol=1e-6)
 

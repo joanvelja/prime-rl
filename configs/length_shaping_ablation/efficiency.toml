@@ -1,0 +1,7 @@
+# Efficiency: advantage-level shaping with correct-only normalization
+
+[wandb]
+name = "efficiency"
+
+[orchestrator.advantage]
+length_shaping = "efficiency"

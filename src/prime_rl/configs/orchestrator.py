@@ -563,11 +563,13 @@ class DefaultAdvantageConfig(BaseModel):
 
     type: Literal["default"] = "default"
     length_shaping: Annotated[
-        Literal["off", "brevity_bonus", "gr3"],
+        Literal["off", "efficiency", "gr3"],
         Field(
             description=(
                 "Length shaping strategy for reward adjustment. "
-                "'brevity_bonus': attenuate correct rollouts by L_min/L_i (shortest correct keeps 1). "
+                "'efficiency': advantage-level shaping that weights correct rollouts by relative efficiency "
+                "(mean_correct_len / len_i). In mixed groups, preserves positive advantage for all correct "
+                "rollouts. In all-correct groups, switches to reward-level shaping for length differentiation. "
                 "'gr3': multiplicatively scale all rollouts by (1 + alpha * L_i / L_mean)^-1. "
                 "'off': no length shaping."
             )
@@ -577,6 +579,12 @@ class DefaultAdvantageConfig(BaseModel):
         float,
         Field(description="Coefficient for gr3 length shaping. Only used when length_shaping='gr3'."),
     ] = 0.33
+    length_shaping_threshold: Annotated[
+        float,
+        Field(
+            description="Reward threshold for classifying rollouts as 'correct'. Only used when length_shaping='efficiency'."
+        ),
+    ] = 1.0
 
 
 class CustomAdvantageConfig(BaseModel):

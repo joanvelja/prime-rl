@@ -1,0 +1,7 @@
+# Baseline: standard GRPO, no length shaping
+
+[wandb]
+name = "grpo"
+
+[orchestrator.advantage]
+length_shaping = "off"

@@ -37,21 +37,15 @@ def default_advantage_fn(
     inputs: AdvantageInputs,
     length_shaping: str = "off",
     length_shaping_alpha: float = 0.33,
+    length_shaping_threshold: float = 1.0,
 ) -> AdvantageOutputs:
     """Default GRPO advantage: reward minus per-problem baseline."""
     rewards = inputs.rewards
     completion_lengths = inputs.completion_lengths.to(dtype=rewards.dtype)
 
-    if length_shaping == "brevity_bonus":
-        correct_mask = rewards >= 1.0
-
-        # Shortest correct completion per problem (inf where no rollout is correct)
-        lengths_masked = completion_lengths.masked_fill(~correct_mask, float("inf"))
-        min_correct_length = lengths_masked.min(dim=1, keepdim=True).values
-
-        # Correct rollouts: reward * L_min/L_i (shortest correct keeps 1, longer ones attenuated)
-        shaped = rewards * (min_correct_length / completion_lengths)
-        rewards = torch.where(correct_mask, shaped, rewards)
+    if length_shaping == "efficiency":
+        advantages = _efficiency_length_shaping(rewards, completion_lengths, length_shaping_threshold)
+        return AdvantageOutputs(advantages=advantages)
 
     elif length_shaping == "gr3":
         lengths_normalized = completion_lengths / completion_lengths.mean(dim=1, keepdim=True)
@@ -60,6 +54,43 @@ def default_advantage_fn(
     baseline = rewards.mean(dim=1, keepdim=True)
 
     return AdvantageOutputs(advantages=rewards - baseline)
+
+
+def _efficiency_length_shaping(
+    rewards: Float[Tensor, "num_problems rollouts_per_example"],
+    completion_lengths: Float[Tensor, "num_problems rollouts_per_example"],
+    threshold: float,
+) -> Float[Tensor, "num_problems rollouts_per_example"]:
+    """Advantage-level length shaping for correct rollouts.
+
+    Mixed groups (some correct, some incorrect):
+        A_i = (R_i - mean(R)) * w_i, where w_i = mean_correct_len / len_i for correct, 1 for incorrect.
+        Preserves positive advantage for all correct rollouts.
+
+    All-correct groups:
+        A_i = w_i - mean(w), giving length differentiation when correctness is saturated.
+    """
+    correct_mask = rewards >= threshold
+    num_correct = correct_mask.sum(dim=1, keepdim=True)
+    G = rewards.shape[1]
+
+    # Mean length of correct rollouts per problem (0 where none correct)
+    correct_lengths = completion_lengths * correct_mask
+    mean_correct_len = correct_lengths.sum(dim=1, keepdim=True) / num_correct.clamp(min=1)
+
+    # Efficiency weight: mean_correct_len / len for correct, 1 for incorrect
+    w = torch.where(correct_mask, mean_correct_len / completion_lengths, torch.ones_like(completion_lengths))
+
+    all_correct = num_correct == G
+    baseline = rewards.mean(dim=1, keepdim=True)
+
+    # Mixed: advantage-level shaping (preserves signs)
+    mixed_advantages = (rewards - baseline) * w
+
+    # All-correct: reward-level shaping (provides length signal)
+    all_correct_advantages = w - w.mean(dim=1, keepdim=True)
+
+    return torch.where(all_correct, all_correct_advantages, mixed_advantages)
 
 
 def setup_advantage_fn(config: AdvantageConfig) -> AdvantageFn:
@@ -78,6 +109,7 @@ def setup_advantage_fn(config: AdvantageConfig) -> AdvantageFn:
             inputs,
             length_shaping=config.length_shaping,
             length_shaping_alpha=config.length_shaping_alpha,
+            length_shaping_threshold=config.length_shaping_threshold,
         )
 
     return advantage_fn
