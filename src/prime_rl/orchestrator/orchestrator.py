@@ -402,23 +402,19 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             # Allow eval at resumed step by setting prev_ckpt_step one behind
             prev_ckpt_step = scheduler.ckpt_step - 1
-
-        if enable_policy_updates:
-            # In NCCL mode, skip existence check - weights are broadcasted, not stored on disk
-            check_exists = config.weight_broadcast.type != "nccl"
-            wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt else None
-            weights_path = get_weight_dir(
-                config.output_dir, scheduler.ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
-            )
-            lora_name = config.model.lora.name if config.model.lora else None
-            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
     else:
         logger.info("Training from scratch")
-        # For NCCL broadcast, trigger weight update at step 0 to initialize inference workers
-        if enable_policy_updates and config.weight_broadcast.type == "nccl":
-            weights_path = get_step_path(get_broadcast_dir(config.output_dir), 0)
-            lora_name = config.model.lora.name if config.model.lora else None
-            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=0)
+
+    # Update weights at step 0 (or checkpoint step if resuming)
+    if enable_policy_updates:
+        # In NCCL mode, skip existence check - weights are broadcasted, not stored on disk
+        check_exists = config.weight_broadcast.type != "nccl"
+        wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt and checkpoint_step is not None else None
+        weights_path = get_weight_dir(
+            config.output_dir, scheduler.ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
+        )
+        lora_name = config.model.lora.name if config.model.lora else None
+        await inference_pool.update_weights(weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
 
     # Iterate over dataset in batches
     max_steps = config.max_steps or int(1e9)
