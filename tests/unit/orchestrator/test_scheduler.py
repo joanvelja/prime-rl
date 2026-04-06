@@ -208,8 +208,12 @@ def test_generate_batch_releases_version_when_buffer_update_raises():
         scheduler.env = env_registry
 
         rollout = {"task": "env_a", "trajectory": [{"tokens": {}}], "error": None}
-        finished_task = asyncio.get_running_loop().create_future()
-        finished_task.set_result(rollout)
+
+        async def done_rollout():
+            await asyncio.sleep(0)
+            return rollout
+
+        finished_task = asyncio.create_task(done_rollout())
         scheduler.inflight_requests = {
             finished_task: InflightRolloutInfo(
                 off_policy_steps=0,
@@ -232,10 +236,7 @@ def test_generate_batch_releases_version_when_buffer_update_raises():
         )
 
         try:
-            with patch(
-                "prime_rl.orchestrator.scheduler.asyncio.wait", new=AsyncMock(return_value=({finished_task}, set()))
-            ):
-                await scheduler.generate_batch(step=0)
+            await scheduler.generate_batch(step=0)
         except RuntimeError as e:
             assert str(e) == "boom"
         else:
