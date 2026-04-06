@@ -578,21 +578,22 @@ async def orchestrate(config: OrchestratorConfig):
                 train_env_registry.retire_version(env_name, result.version)
                 continue
 
+            previous_version = state.active_version
             train_env_registry.add_version(env_name, result.version_handle)
-            train_env_registry.activate_version(env_name, result.version)
             activate_event = state.mark_reload_complete(step=step, version=result.version, args=result.args)
             if activate_event is not None:
                 events.append(activate_event)
+            train_env_registry.activate_version(env_name, result.version)
             logger.info(
                 f"Activated env args reload for {env_name} (version {result.previous_version}->{result.version}) "
                 f"in {result.duration_s:.2f}s with args={result.args}"
             )
 
             if (
-                result.previous_version != train_env_states[env_name].active_version
-                and train_env_states[env_name].version_refcounts.get(result.previous_version, 0) == 0
+                previous_version != train_env_states[env_name].active_version
+                and train_env_states[env_name].version_refcounts.get(previous_version, 0) == 0
             ):
-                train_env_registry.retire_version(env_name, result.previous_version)
+                train_env_registry.retire_version(env_name, previous_version)
         return events
 
     while True:

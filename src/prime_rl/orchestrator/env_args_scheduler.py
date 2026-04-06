@@ -151,11 +151,6 @@ class TrainEnvRegistry:
         version = state.active_version if version is None else version
         return state.versions[version].env
 
-    def get_client_for_task(self, task: str, version: int | None = None) -> Any:
-        state = self.states[task]
-        version = state.active_version if version is None else version
-        return state.versions[version].client
-
     def get_active_version(self, task: str) -> int:
         return self.states[task].active_version
 

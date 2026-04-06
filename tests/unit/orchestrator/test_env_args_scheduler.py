@@ -102,6 +102,24 @@ def test_mark_reload_complete_updates_active_state():
     assert event == EnvArgsEvent(step=11, env="env_a", event="activate", version="0->1", args={"difficulty": 2})
 
 
+def test_mark_reload_complete_clears_pending_version_and_reload_timestamp():
+    state = EnvArgsState(
+        env_name="env_a",
+        active_version=0,
+        desired_version=1,
+        active_args={"difficulty": 1},
+        desired_args={"difficulty": 2},
+        pending_version=1,
+        reload_started_at=12.5,
+    )
+
+    event = state.mark_reload_complete(step=11, version=1, args={"difficulty": 2})
+
+    assert event is not None
+    assert state.pending_version is None
+    assert state.reload_started_at is None
+
+
 def test_build_env_args_metrics_counts_changes_reloads_and_pending_envs():
     states = {
         "env_a": EnvArgsState(
