@@ -37,10 +37,9 @@ class UsageReporter:
         if not base_url:
             return
 
-        api_key_var = os.environ.get("PI_USAGE_API_KEY_VAR", "INTERNAL_RFT_API_KEY")
-        api_key = os.getenv(api_key_var)
+        api_key = os.environ.get("PI_USAGE_API_KEY")
         if not api_key:
-            self.logger.warning("Usage reporter disabled: %s not set", api_key_var)
+            self.logger.warning("Usage reporter disabled: PI_USAGE_API_KEY not set")
             return
 
         self._api_key = api_key

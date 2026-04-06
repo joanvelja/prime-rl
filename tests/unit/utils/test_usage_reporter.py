@@ -19,7 +19,7 @@ def test_disabled_when_api_key_missing():
 def test_enabled_when_configured():
     with patch.dict(
         os.environ,
-        {"PI_USAGE_BASE_URL": "http://localhost:8000/api/internal/rft", "INTERNAL_RFT_API_KEY": "test-key"},
+        {"PI_USAGE_BASE_URL": "http://localhost:8000/api/internal/rft", "PI_USAGE_API_KEY": "test-key"},
         clear=True,
     ):
         reporter = UsageReporter()
