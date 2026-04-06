@@ -58,6 +58,10 @@ class Monitor(ABC):
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         pass
 
+    def log_env_args_events(self, rows: list[dict[str, Any]], step: int) -> None:
+        """Log environment args change events. Optional for monitor implementations."""
+        pass
+
     def close(self) -> None:
         """Close any resources held by the monitor. Override in subclasses that need cleanup."""
         pass
@@ -68,6 +72,7 @@ class NoOpMonitor(Monitor):
 
     def __init__(self):
         self.history: list[dict[str, Any]] = []
+        self.env_args_events: list[dict[str, Any]] = []
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
         self.history.append(metrics)
@@ -86,3 +91,6 @@ class NoOpMonitor(Monitor):
 
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         pass
+
+    def log_env_args_events(self, rows: list[dict[str, Any]], step: int) -> None:
+        self.env_args_events.extend(rows)

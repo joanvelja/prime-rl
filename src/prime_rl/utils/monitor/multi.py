@@ -61,6 +61,13 @@ class MultiMonitor(Monitor):
             except Exception as e:
                 self.logger.warning(f"Failed to log distributions to {monitor.__class__.__name__}: {e}")
 
+    def log_env_args_events(self, rows: list[dict[str, Any]], step: int) -> None:
+        for monitor in self.monitors:
+            try:
+                monitor.log_env_args_events(rows=rows, step=step)
+            except Exception as e:
+                self.logger.warning(f"Failed to log env args events to {monitor.__class__.__name__}: {e}")
+
     def close(self) -> None:
         for monitor in self.monitors:
             try:

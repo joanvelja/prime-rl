@@ -11,6 +11,7 @@ from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
+from prime_rl.orchestrator.env_args_scheduler import TrainEnvRegistry
 from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -39,6 +40,7 @@ class GroupState:
     """Tracks the state of a rollout group (one example × N rollouts)."""
 
     example: dict
+    env_version: int
     rollouts_to_schedule: int
     completed_rollouts: list[vf.RolloutOutput] = field(default_factory=list)
     pinned_client: vf.ClientConfig | None = None
@@ -57,7 +59,7 @@ class Scheduler:
 
     def __init__(
         self,
-        env: vf.Environment,
+        env: TrainEnvRegistry,
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
@@ -153,6 +155,8 @@ class Scheduler:
         count = len(self.inflight_requests)
         await safe_cancel_all(list(self.inflight_requests))
         self.inflight_requests.clear()
+        for group in self.groups.values():
+            self.env.release_version(group.example["task"], group.env_version)
         self.groups.clear()
         self.cancelled_rollouts_count += count
 
@@ -181,7 +185,9 @@ class Scheduler:
                 continue
             self.inflight_requests.pop(task, None)
             tasks_to_cancel.append(task)
-        self.groups.pop(group_id, None)
+        group = self.groups.pop(group_id, None)
+        if group is not None:
+            self.env.release_version(group.example["task"], group.env_version)
         await safe_cancel_all(tasks_to_cancel)
         return len(tasks_to_cancel)
 
@@ -202,7 +208,7 @@ class Scheduler:
             group.pinned_client = client_config
         run_rollout_task = asyncio.create_task(
             run_rollout(
-                env=self.env,
+                env=self.env.get_env_for_task(group.example["task"], version=group.env_version),
                 client=client_config,
                 example=group.example,
                 model_name=self.model_name,
@@ -234,9 +240,16 @@ class Scheduler:
                 return True
 
         example = self.buffer.sample_examples(n=1)[0]
+        task = example["task"]
+        env_version = self.env.get_active_version(task)
         group_id = self.next_group_id
         self.next_group_id += 1
-        self.groups[group_id] = GroupState(example=example, rollouts_to_schedule=self.rollouts_per_example)
+        self.groups[group_id] = GroupState(
+            example=example,
+            env_version=env_version,
+            rollouts_to_schedule=self.rollouts_per_example,
+        )
+        self.env.pin_version(task, env_version)
         await self.schedule_rollout(group_id=group_id)
         return True
 
@@ -348,16 +361,18 @@ class Scheduler:
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
 
-    def _should_defer_group_scoring(self, task: str) -> bool:
-        return task in self.deferred_group_scoring_tasks and self.config.verification.enabled
+    def _should_defer_group_scoring(self, task: str, env_version: int) -> bool:
+        return self.config.verification.enabled and self.env.should_defer_group_scoring(task, env_version)
 
-    async def _score_group_if_deferred(self, completed_rollouts: list[vf.RolloutOutput]) -> list[vf.RolloutOutput]:
+    async def _score_group_if_deferred(
+        self, completed_rollouts: list[vf.RolloutOutput], env_version: int
+    ) -> list[vf.RolloutOutput]:
         if not completed_rollouts:
             return completed_rollouts
         task = completed_rollouts[0]["task"]
-        if not self._should_defer_group_scoring(task):
+        if not self._should_defer_group_scoring(task, env_version):
             return completed_rollouts
-        env_for_task = self.env.get_env_for_task(task)
+        env_for_task = self.env.get_env_for_task(task, version=env_version)
         await env_for_task.rubric.score_group(cast(list[vf.State], completed_rollouts))
         return completed_rollouts
 
@@ -407,6 +422,7 @@ class Scheduler:
                     continue
 
                 group_id = rollout_info.group_id
+                group_state: GroupState | None = None
 
                 try:
                     group = self.groups.get(group_id)
@@ -439,20 +455,28 @@ class Scheduler:
                     group.completed_rollouts.append(rollout)
                     if len(group.completed_rollouts) < self.rollouts_per_example:
                         continue
-                    completed_rollouts = self.groups.pop(group_id).completed_rollouts
-                    completed_rollouts = await self._score_group_if_deferred(completed_rollouts)
+                    group_state = self.groups.pop(group_id)
+                    completed_rollouts = group_state.completed_rollouts
+                    completed_rollouts = await self._score_group_if_deferred(
+                        completed_rollouts, env_version=group_state.env_version
+                    )
                 except asyncio.CancelledError:
-                    if group_id is not None:
+                    if group_state is not None:
+                        self.env.release_version(rollout_info.task, group_state.env_version)
+                    elif group_id is not None:
                         await self.drop_group(group_id)
                     continue
                 except Exception as e:
                     self.logger.warning(f"Rollout failed: {e}")
-                    if group_id is not None:
+                    if group_state is not None:
+                        self.env.release_version(rollout_info.task, group_state.env_version)
+                    elif group_id is not None:
                         await self.drop_group(group_id)
                     continue
 
                 self.buffer.update(completed_rollouts)
                 accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
+                self.env.release_version(rollout_info.task, group_state.env_version)
 
                 batch_rollouts.extend(accepted_rollouts)
                 progress_increment = self.get_batch_progress_increment(accepted_rollouts)

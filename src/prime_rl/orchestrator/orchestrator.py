@@ -36,6 +36,19 @@ from transformers import AutoProcessor, AutoTokenizer
 from prime_rl.configs.orchestrator import BufferConfig, OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
+from prime_rl.orchestrator.env_args_scheduler import (
+    EnvArgsSchedulerInputs,
+    EnvArgsState,
+    ManagedTrainEnvVersion,
+    ReloadResult,
+    TrainEnvRegistry,
+    build_env_args_metrics,
+    build_env_args_table_rows,
+    build_reload_warning_message,
+    env_uses_group_scoring,
+    now,
+    setup_env_args_scheduler,
+)
 from prime_rl.orchestrator.eval_utils import evaluate_env
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
@@ -174,10 +187,11 @@ async def orchestrate(config: OrchestratorConfig):
     logger.info(
         f"Loading {len(config.env)} training environment(s) ({', '.join(env.resolved_name for env in config.env)})"
     )
-    env_ids = [strip_env_version(env.id) for env in config.env]
+    train_env_ids = [strip_env_version(env.id) for env in config.env]
     train_env_names = [env.resolved_name for env in config.env]
+    train_envs = [vf.load_environment(env_id, **env.args) for env_id, env in zip(train_env_ids, config.env)]
     train_env_group = vf.EnvGroup(
-        envs=[vf.load_environment(env_id, **env.args) for env_id, env in zip(env_ids, config.env)],
+        envs=train_envs,
         env_names=train_env_names,
         map_kwargs=dict(writer_batch_size=1),  # set defensively to not error on map operations on large datasets
     )
@@ -202,6 +216,7 @@ async def orchestrate(config: OrchestratorConfig):
         )
 
     train_env_addresses = []
+    train_env_processes_by_name: dict[str, mp.Process | None] = {}
     env_processes: list[mp.Process] = []
 
     def _cleanup_env_processes():
@@ -219,7 +234,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     atexit.register(_cleanup_env_processes)
 
-    for env_id, env, env_name in zip(env_ids, config.env, train_env_names):
+    for env_id, env, env_name in zip(train_env_ids, config.env, train_env_names):
         if env.address is None:
             num_workers = resolve_num_workers(env.num_workers, config.max_inflight_rollouts)
             log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "train" / env_name).as_posix()
@@ -234,6 +249,7 @@ async def orchestrate(config: OrchestratorConfig):
             )
             logger.info(f"Spawned env server for {env_name} with {num_workers} worker(s)")
             env_processes.append(process)
+            train_env_processes_by_name[env_name] = process
         else:
             if env_name in train_env_deferred_group_scoring_tasks:
                 logger.warning(
@@ -241,6 +257,7 @@ async def orchestrate(config: OrchestratorConfig):
                     "Ensure that server was started with score_rollouts=False."
                 )
             address = env.address
+            train_env_processes_by_name[env_name] = None
         logger.info(f"Connecting train environment {env_name} to server at {address}")
         train_env_addresses.append(address)
     train_env_clients = [
@@ -255,6 +272,46 @@ async def orchestrate(config: OrchestratorConfig):
     # all calls to run_rollout and run_group will be routed to the server via the env client
     for env, env_client in zip(train_env_group.envs, train_env_clients):
         env.env_client = env_client
+
+    train_env_states: dict[str, EnvArgsState] = {}
+    for env_cfg, env_id, env_name, env_obj, address, env_client in zip(
+        config.env, train_env_ids, train_env_names, train_env_group.envs, train_env_addresses, train_env_clients
+    ):
+        scheduler_fn = None
+        scheduler_interval = 1
+        if env_cfg.args_scheduler is not None:
+            if env_cfg.address is not None:
+                logger.warning(
+                    f"Env args scheduling is not supported for externally managed env server '{env_name}'. "
+                    "Disabling args scheduler for this env."
+                )
+            else:
+                scheduler_fn = setup_env_args_scheduler(env_cfg.args_scheduler)
+                scheduler_interval = env_cfg.args_scheduler.interval
+
+        train_env_states[env_name] = EnvArgsState(
+            env_name=env_name,
+            active_version=0,
+            desired_version=0,
+            active_args=dict(env_cfg.args),
+            desired_args=dict(env_cfg.args),
+            versions={
+                0: ManagedTrainEnvVersion(
+                    version=0,
+                    args=dict(env_cfg.args),
+                    env=env_obj,
+                    address=address,
+                    client=env_client,
+                    process=train_env_processes_by_name[env_name],
+                    uses_deferred_group_scoring=verification_enabled and env_uses_group_scoring(env_obj),
+                )
+            },
+            scheduler_fn=scheduler_fn,
+            scheduler_interval=scheduler_interval,
+            version_refcounts={0: 0},
+        )
+
+    train_env_registry = TrainEnvRegistry(train_env_states, train_env_names)
 
     if config.eval:
         env_ids = [strip_env_version(env.id) for env in config.eval.env]
@@ -333,7 +390,7 @@ async def orchestrate(config: OrchestratorConfig):
             checkpoint_step = config.ckpt.resume_step
 
     scheduler = Scheduler(
-        env=train_env_group,
+        env=train_env_registry,
         buffer=buffer,
         inference_pool=inference_pool,
         max_inflight_rollouts=config.max_inflight_rollouts,
@@ -423,6 +480,120 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Persistent ThreadPoolExecutor for parallel rollout processing
     rollout_executor = ThreadPoolExecutor(max_workers=64)
+    train_env_config_by_name = {env.resolved_name: env for env in config.env}
+    train_env_id_by_name = {env.resolved_name: env_id for env, env_id in zip(config.env, train_env_ids)}
+
+    async def _reload_train_env(env_name: str, version: int, args: dict[str, Any]) -> ReloadResult:
+        env_cfg = train_env_config_by_name[env_name]
+        env_id = train_env_id_by_name[env_name]
+        reload_start_time = now()
+        env_obj = vf.load_environment(env_id, **args)
+        uses_deferred_group_scoring = verification_enabled and env_uses_group_scoring(env_obj)
+        extra_env_kwargs = dict(env_cfg.extra_env_kwargs)
+        extra_env_kwargs["score_rollouts"] = verification_enabled and not uses_deferred_group_scoring
+        num_workers = resolve_num_workers(env_cfg.num_workers, config.max_inflight_rollouts)
+        log_dir = (get_log_dir(config.output_dir.parent) / "envs" / "train" / env_name).as_posix()
+        address, process = spawn_env_server(
+            env_id=env_id,
+            env_args=args,
+            extra_env_kwargs=extra_env_kwargs,
+            num_workers=num_workers,
+            log_level=config.log.vf_level,
+            log_dir=log_dir,
+            json_logging=config.log.json_logging,
+        )
+        env_processes.append(process)
+        client = setup_env_client(address=address, name=env_name)
+        await wait_for_env_servers([client])
+        env_obj.env_client = client
+        return ReloadResult(
+            task=env_name,
+            version=version,
+            previous_version=train_env_states[env_name].active_version,
+            args=dict(args),
+            version_handle=ManagedTrainEnvVersion(
+                version=version,
+                args=dict(args),
+                env=env_obj,
+                address=address,
+                client=client,
+                process=process,
+                uses_deferred_group_scoring=uses_deferred_group_scoring,
+            ),
+            duration_s=now() - reload_start_time,
+        )
+
+    def _start_pending_env_reloads() -> None:
+        for env_name, state in train_env_states.items():
+            if state.active_version == state.desired_version or state.reload_in_progress:
+                continue
+            target_version = state.desired_version
+            target_args = dict(state.desired_args)
+            state.pending_version = target_version
+            state.reload_started_at = now()
+            state.reload_task = asyncio.create_task(_reload_train_env(env_name, target_version, target_args))
+            logger.info(
+                f"Starting env args reload for {env_name} (version {state.active_version}->{target_version}, "
+                f"diff target={target_args})"
+            )
+
+    def _build_env_metrics_for_scheduler(
+        metrics: dict[str, Any],
+    ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+        env_metrics_by_name: dict[str, dict[str, float]] = {env_name: {} for env_name in train_env_names}
+        global_metrics: dict[str, float] = {}
+        for key, value in metrics.items():
+            if not isinstance(value, (int, float)):
+                continue
+            matched_env = False
+            for env_name in train_env_names:
+                if f"/{env_name}/" in key or key.endswith(f"/{env_name}") or key == f"batch/{env_name}":
+                    env_metrics_by_name[env_name][key] = float(value)
+                    matched_env = True
+            if not matched_env:
+                global_metrics[key] = float(value)
+        return global_metrics, env_metrics_by_name
+
+    def _collect_completed_env_reloads(step: int) -> list:
+        events = []
+        for env_name, state in train_env_states.items():
+            reload_task = state.reload_task
+            if reload_task is None or not reload_task.done():
+                continue
+
+            state.reload_task = None
+            try:
+                result = reload_task.result()
+            except Exception as e:
+                state.reload_started_at = None
+                logger.warning(f"Env args reload failed for {env_name}: {e}")
+                continue
+
+            if result.version < state.desired_version:
+                logger.warning(
+                    f"Discarding stale env args reload for {env_name} (completed version {result.version}, "
+                    f"latest desired version {state.desired_version})"
+                )
+                train_env_registry.add_version(env_name, result.version_handle)
+                train_env_registry.retire_version(env_name, result.version)
+                continue
+
+            train_env_registry.add_version(env_name, result.version_handle)
+            train_env_registry.activate_version(env_name, result.version)
+            activate_event = state.mark_reload_complete(step=step, version=result.version, args=result.args)
+            if activate_event is not None:
+                events.append(activate_event)
+            logger.info(
+                f"Activated env args reload for {env_name} (version {result.previous_version}->{result.version}) "
+                f"in {result.duration_s:.2f}s with args={result.args}"
+            )
+
+            if (
+                result.previous_version != train_env_states[env_name].active_version
+                and train_env_states[env_name].version_refcounts.get(result.previous_version, 0) == 0
+            ):
+                train_env_registry.retire_version(env_name, result.previous_version)
+        return events
 
     while True:
         # Check if this run has been evicted by the trainer
@@ -522,7 +693,7 @@ async def orchestrate(config: OrchestratorConfig):
             val_examples = val_buffer.sample_examples(config.val.num_examples)
             val_task = asyncio.create_task(
                 generate(
-                    env=train_env_group,
+                    env=train_env_registry.build_active_env_group(),
                     model_name=scheduler.model_name,
                     examples=val_examples,
                     rollouts_per_example=config.val.rollouts_per_example,
@@ -824,8 +995,43 @@ async def orchestrate(config: OrchestratorConfig):
                 to_log[f"val/reward/{env}/max"] = env_by_example.reward.mean().max()
                 to_log[f"val/reward/{env}/min"] = env_by_example.reward.mean().min()
 
+        env_args_events = _collect_completed_env_reloads(progress.step)
+        global_scheduler_metrics, env_scheduler_metrics = _build_env_metrics_for_scheduler(to_log)
+        for env_name, state in train_env_states.items():
+            if not state.should_run_scheduler(progress.step):
+                continue
+            assert state.scheduler_fn is not None
+            scheduler_inputs = EnvArgsSchedulerInputs(
+                step=progress.step,
+                ckpt_step=ckpt_step,
+                env_name=env_name,
+                active_args=dict(state.active_args),
+                desired_args=dict(state.desired_args),
+                reload_in_progress=state.reload_in_progress,
+                global_metrics=global_scheduler_metrics,
+                env_metrics=env_scheduler_metrics.get(env_name, {}),
+            )
+            diff = state.scheduler_fn(scheduler_inputs)
+            new_events = state.request_change(step=progress.step, diff=diff)
+            if not new_events:
+                continue
+            env_args_events.extend(new_events)
+            for event in new_events:
+                if event.event == "request":
+                    logger.info(f"Requested env args change for {env_name} ({event.version}) with diff={event.args}")
+                elif event.event == "overlap":
+                    logger.warning(
+                        build_reload_warning_message(env_name, train_env_states[env_name].desired_version, event.args)
+                    )
+
+        _start_pending_env_reloads()
+        to_log.update(build_env_args_metrics(train_env_states, env_args_events))
+        env_args_rows = build_env_args_table_rows(env_args_events)
+
         # Log metrics to monitor(s)
         monitor.log(to_log, step=progress.step)
+        if env_args_rows:
+            monitor.log_env_args_events(env_args_rows, step=progress.step)
 
         # Log samples to monitor(s) if enabled.
         monitor.log_samples(train_rollouts, step=progress.step)

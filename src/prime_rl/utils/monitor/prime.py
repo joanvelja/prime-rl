@@ -491,6 +491,9 @@ class PrimeMonitor(Monitor):
             f"Logged distributions at step {step} to Prime Intellect API in {time.perf_counter() - start_time:.2f}s"
         )
 
+    def log_env_args_events(self, rows: list[dict[str, Any]], step: int) -> None:
+        pass
+
     def save_final_summary(self, filename: str = "final_summary.json") -> None:
         """Save final summary to Prime Intellect API."""
         if not self.is_master or not self.enabled:

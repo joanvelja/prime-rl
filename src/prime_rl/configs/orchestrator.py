@@ -267,6 +267,23 @@ class EvalSaveHFConfig(BaseConfig):
     ] = False
 
 
+class EnvArgsSchedulerConfig(BaseModel):
+    """Config for an external environment args scheduler."""
+
+    import_path: Annotated[
+        str,
+        Field(description="Import path to the args scheduler function (e.g. 'my_module.schedule_env_args')"),
+    ]
+    kwargs: Annotated[
+        dict[str, Any],
+        Field(default_factory=dict, description="Kwargs to pass to the args scheduler function"),
+    ]
+    interval: Annotated[
+        int,
+        Field(ge=1, description="How often to call the args scheduler, in orchestrator steps."),
+    ] = 1
+
+
 class EnvConfig(BaseConfig):
     """Configures an environment for training."""
 
@@ -283,7 +300,7 @@ class EnvConfig(BaseConfig):
         dict[str, Any],
         Field(
             description=(
-                "Extra kwargs passed to an env (e.g. seq_len, score_rollouts). This field is auto-populated with the seq_len, and score_rollouts for training envs on the orchestrator. It is generally NOT recommended for this field to be overriden by the user. It's main use case is to match the extra_env_kwargs when running an env in an isolated environment server."
+                "Extra kwargs passed to an env (e.g. seq_len, score_rollouts, max_total_completion_tokens). This field is auto-populated with the seq_len, and score_rollouts for training envs on the orchestrator and max_total_completion_tokens for all envs. It is generally NOT recommended for this field to be overriden by the user. It's main use case is to match the extra_env_kwargs when running an env in an isolated environment server."
             ),
         ),
     ] = {}
@@ -305,6 +322,19 @@ class EnvConfig(BaseConfig):
             description="Maximum number of times the environment will retry a failed rollout.",
         ),
     ] = 0
+    args_scheduler: Annotated[
+        EnvArgsSchedulerConfig | None,
+        Field(description="Optional scheduler that can update env args over training."),
+    ] = None
+    max_total_completion_tokens: Annotated[
+        int,
+        Field(
+            description=(
+                "Maximum total completion tokens across all turns in a multi-turn rollout. "
+                "Set to -1 (default) to disable. Auto-populated into extra_env_kwargs."
+            ),
+        ),
+    ] = -1
 
     @property
     def resolved_name(self) -> str:
@@ -316,6 +346,11 @@ class EnvConfig(BaseConfig):
             raise ValueError(
                 'Environment name "all" is reserved for global metric aggregation. Use a different name or id.'
             )
+        return self
+
+    @model_validator(mode="after")
+    def resolve_max_total_completion_tokens(self):
+        self.extra_env_kwargs["max_total_completion_tokens"] = self.max_total_completion_tokens
         return self
 
 

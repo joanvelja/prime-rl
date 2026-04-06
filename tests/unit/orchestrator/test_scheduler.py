@@ -159,3 +159,28 @@ def test_stop_cancels_inflight_policy_update_task():
         assert scheduler.inflight_policy_update_task is None
 
     asyncio.run(run())
+
+
+def test_score_group_if_deferred_uses_pinned_env_version():
+    async def run() -> None:
+        scheduler = make_scheduler()
+        scheduler.config = SimpleNamespace(verification=SimpleNamespace(enabled=True))
+
+        rubric_v1 = SimpleNamespace(score_group=AsyncMock())
+        rubric_v2 = SimpleNamespace(score_group=AsyncMock())
+        env_registry = SimpleNamespace(
+            should_defer_group_scoring=lambda task, version: task == "env_a" and version == 1,
+            get_env_for_task=lambda task, version=None: {
+                ("env_a", 1): SimpleNamespace(rubric=rubric_v1),
+                ("env_a", 2): SimpleNamespace(rubric=rubric_v2),
+            }[(task, version)],
+        )
+        scheduler.env = env_registry
+
+        rollouts = [{"task": "env_a", "reward": 1.0}]
+        await scheduler._score_group_if_deferred(rollouts, env_version=1)
+
+        rubric_v1.score_group.assert_awaited_once_with(rollouts)
+        rubric_v2.score_group.assert_not_called()
+
+    asyncio.run(run())

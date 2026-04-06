@@ -107,6 +107,12 @@ class WandbMonitor(Monitor):
                     columns=self.eval_samples_cols,
                     log_mode="INCREMENTAL",
                 )
+        if self.enabled and self.is_master:
+            self.env_args_event_cols = ["step", "env", "event", "version", "args"]
+            self.env_args_events_table = wandb.Table(
+                columns=self.env_args_event_cols,
+                log_mode="INCREMENTAL",
+            )
 
     def _maybe_overwrite_wandb_command(self) -> None:
         """Overwrites sys.argv with the start command if it is set in the environment variables."""
@@ -227,6 +233,21 @@ class WandbMonitor(Monitor):
     def log_distributions(self, distributions: dict[str, list[float]], step: int) -> None:
         """Log distributions (no-op for W&B)."""
         pass
+
+    def log_env_args_events(self, rows: list[dict[str, Any]], step: int) -> None:
+        if not self.is_master or not self.enabled or not rows:
+            return
+
+        for row in rows:
+            self.env_args_events_table.add_data(
+                row["step"],
+                row["env"],
+                row["event"],
+                row["version"],
+                row["args"],
+            )
+
+        wandb.log({"env_args/events": self.env_args_events_table, "step": step})
 
     def save_final_summary(self, filename: str = "final_summary.json") -> None:
         """Save final summary to W&B table."""
