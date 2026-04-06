@@ -131,6 +131,7 @@ class SamplingConfig(BaseConfig):
     max_completion_tokens: Annotated[
         int | None,
         Field(
+            validation_alias=AliasChoices("max_completion_tokens", "max_tokens"),
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
         ),
     ] = None
@@ -163,10 +164,7 @@ class SamplingConfig(BaseConfig):
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            get_logger().warning(
-                "SamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead."
-            )
-            data["max_completion_tokens"] = data.pop("max_tokens")
+            get_logger().warning("'max_tokens' is deprecated, use 'max_completion_tokens' instead.")
         return data
 
 
@@ -213,6 +211,7 @@ class EvalSamplingConfig(BaseConfig):
     max_completion_tokens: Annotated[
         int | None,
         Field(
+            validation_alias=AliasChoices("max_completion_tokens", "max_tokens"),
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
         ),
     ] = None
@@ -251,10 +250,7 @@ class EvalSamplingConfig(BaseConfig):
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            get_logger().warning(
-                "EvalSamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead."
-            )
-            data["max_completion_tokens"] = data.pop("max_tokens")
+            get_logger().warning("'max_tokens' is deprecated, use 'max_completion_tokens' instead.")
         return data
 
 
