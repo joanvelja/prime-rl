@@ -242,7 +242,9 @@ def train(config: TrainerConfig):
             broadcast_weights_time = 0
         else:
             last_async_level_steps = config.max_steps and progress.step >= config.max_steps - config.max_async_level
-            if not last_async_level_steps or config.weight_broadcast.type == "filesystem":
+            # Skip broadcast only if we're in the last async level steps AND not at step 0
+            # At step 0, we always broadcast to avoid deadlock when max_steps <= max_async_level
+            if progress.step == 0 or (not last_async_level_steps or config.weight_broadcast.type == "filesystem"):
                 broadcast_weights_start_time = time.perf_counter()
                 weight_broadcast.broadcast_weights(model, step=progress.step)
                 broadcast_weights_time = time.perf_counter() - broadcast_weights_start_time
