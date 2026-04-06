@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -127,7 +128,7 @@ class SamplingConfig(BaseConfig):
         ),
     ] = 1.0
 
-    max_tokens: Annotated[
+    max_completion_tokens: Annotated[
         int | None,
         Field(
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
@@ -157,6 +158,18 @@ class SamplingConfig(BaseConfig):
             description="Extra body to pass with each request to the inference server. By default, it is set to an empty dictionary.",
         ),
     ] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_max_tokens(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
+            warnings.warn(
+                "SamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            data["max_completion_tokens"] = data.pop("max_tokens")
+        return data
 
 
 class EvalSamplingConfig(BaseConfig):
@@ -199,7 +212,7 @@ class EvalSamplingConfig(BaseConfig):
         ),
     ] = None
 
-    max_tokens: Annotated[
+    max_completion_tokens: Annotated[
         int | None,
         Field(
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
@@ -235,6 +248,18 @@ class EvalSamplingConfig(BaseConfig):
             description="Extra body to use for the OpenAI API. By default, it is set to an empty dictionary.",
         ),
     ] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_max_tokens(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
+            warnings.warn(
+                "EvalSamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            data["max_completion_tokens"] = data.pop("max_tokens")
+        return data
 
 
 class EvalSaveHFConfig(BaseConfig):
