@@ -19,6 +19,7 @@ from prime_rl.orchestrator.trajectories import (
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
 from prime_rl.utils.pathing import get_log_dir
+from prime_rl.utils.usage_reporter import UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
 monkey_patch_oai_iterable_types()
@@ -149,7 +150,7 @@ async def orchestrate(config: OrchestratorConfig):
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
 
-    # Setup monitor
+    # Setup monitor (may register the run and set RUN_ID in the environment)
     logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
     monitor = setup_monitor(
         wandb_config=config.wandb,
@@ -158,6 +159,11 @@ async def orchestrate(config: OrchestratorConfig):
         tokenizer=tokenizer,
         run_config=config,
     )
+
+    # Read run_id AFTER setup_monitor so that newly registered runs are captured
+    run_id = os.getenv("RUN_ID", "")
+
+    usage_reporter = UsageReporter()
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)
     heart = None
@@ -839,6 +845,13 @@ async def orchestrate(config: OrchestratorConfig):
             step=progress.step,
         )
 
+        if usage_reporter.is_enabled and run_id:
+            usage_reporter.report_training_usage(
+                run_id=run_id,
+                step=progress.step,
+                tokens=num_prefill_tokens + num_decode_tokens,
+            )
+
         reward_mean = by_example.reward.mean().mean()
         val_reward_str = ""
         if val_results_df is not None:
@@ -912,6 +925,8 @@ async def orchestrate(config: OrchestratorConfig):
     # Shutdown env processes (also registered as atexit handler for crash safety)
     atexit.unregister(_cleanup_env_processes)
     _cleanup_env_processes()
+
+    usage_reporter.close()
 
     logger.success("Orchestrator finished.")
 
