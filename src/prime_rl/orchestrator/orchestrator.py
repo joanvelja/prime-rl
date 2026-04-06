@@ -4,6 +4,7 @@ import gc
 import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import tomli_w
 
