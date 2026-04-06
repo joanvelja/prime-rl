@@ -61,18 +61,22 @@ echo "Creating new tmux session: $SESSION_NAME"
 # Window 0: Launcher - empty shell
 tmux new-session -d -s "$SESSION_NAME" -n "Launcher"
 
-# Window 1: Logs - 4 vertical panes
+# Window 1: Logs - 6 vertical panes
 tmux new-window -t "$SESSION_NAME" -n "Logs"
 
 tmux split-window -v -t "$SESSION_NAME:Logs.0"
 tmux split-window -v -t "$SESSION_NAME:Logs.1"
 tmux split-window -v -t "$SESSION_NAME:Logs.2"
+tmux split-window -v -t "$SESSION_NAME:Logs.3"
+tmux split-window -v -t "$SESSION_NAME:Logs.4"
 tmux select-layout -t "$SESSION_NAME:Logs" even-vertical
 
 tmux select-pane -t "$SESSION_NAME:Logs.0" -T "Trainer"
 tmux select-pane -t "$SESSION_NAME:Logs.1" -T "Orchestrator"
-tmux select-pane -t "$SESSION_NAME:Logs.2" -T "Envs"
-tmux select-pane -t "$SESSION_NAME:Logs.3" -T "Inference"
+tmux select-pane -t "$SESSION_NAME:Logs.2" -T "Trainer Steps"
+tmux select-pane -t "$SESSION_NAME:Logs.3" -T "Orchestrator Steps"
+tmux select-pane -t "$SESSION_NAME:Logs.4" -T "Envs"
+tmux select-pane -t "$SESSION_NAME:Logs.5" -T "Inference"
 
 tmux send-keys -t "$SESSION_NAME:Logs.0" \
   "tail -F ${LOG_DIR}/trainer.log 2>/dev/null" C-m
@@ -81,9 +85,15 @@ tmux send-keys -t "$SESSION_NAME:Logs.1" \
   "tail -F ${LOG_DIR}/orchestrator.log 2>/dev/null" C-m
 
 tmux send-keys -t "$SESSION_NAME:Logs.2" \
-  "tail -F ${LOG_DIR}/envs/*/*/*.log 2>/dev/null" C-m
+  "tail -F ${LOG_DIR}/trainer.log 2>/dev/null | grep --line-buffered SUCCESS" C-m
 
 tmux send-keys -t "$SESSION_NAME:Logs.3" \
+  "tail -F ${LOG_DIR}/orchestrator.log 2>/dev/null | grep --line-buffered SUCCESS" C-m
+
+tmux send-keys -t "$SESSION_NAME:Logs.4" \
+  "tail -F ${LOG_DIR}/envs/*/*/*.log 2>/dev/null" C-m
+
+tmux send-keys -t "$SESSION_NAME:Logs.5" \
   "tail -F ${LOG_DIR}/inference.log 2>/dev/null" C-m
 
 # Window 2: Claude Code with log context
