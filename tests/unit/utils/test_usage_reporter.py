@@ -29,11 +29,6 @@ def test_enabled_when_api_key_set(usage_config):
         reporter.close()
 
 
-def test_report_inference_noop_when_disabled():
-    reporter = UsageReporter(None)
-    reporter.report_inference_usage("run1", 0, 100, 200)
-
-
 def test_report_training_noop_when_disabled():
     reporter = UsageReporter(None)
     reporter.report_training_usage("run1", 0, 5000)

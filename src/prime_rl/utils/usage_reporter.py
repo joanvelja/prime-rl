@@ -69,24 +69,6 @@ class UsageReporter:
     def is_enabled(self) -> bool:
         return self.enabled
 
-    def report_inference_usage(
-        self,
-        run_id: str,
-        step: int,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> None:
-        if not self.enabled:
-            return
-        self._post_usage(
-            run_id=run_id,
-            step=step,
-            usage_type="inference",
-            tokens=input_tokens + output_tokens,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-        )
-
     def report_training_usage(
         self,
         run_id: str,

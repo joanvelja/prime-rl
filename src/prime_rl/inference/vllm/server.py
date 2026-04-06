@@ -324,21 +324,12 @@ import vllm.entrypoints.cli.serve
 import vllm.entrypoints.openai.api_server
 from vllm.entrypoints.openai.api_server import build_app as _original_build_app
 
-from prime_rl.inference.vllm.usage_middleware import UsageSigningMiddleware
-
-
 def custom_build_app(args: Namespace, supported_tasks: tuple):
     """
-    Wrap build_app to include our custom router and usage signing middleware.
+    Wrap build_app to include our custom router.
     """
     app = _original_build_app(args, supported_tasks)
     app.include_router(router)
-
-    signing_secret = os.environ.get("PI_USAGE_SIGNING_SECRET")
-    if signing_secret:
-        app.add_middleware(UsageSigningMiddleware, secret=signing_secret)
-        logger.info("Usage signing middleware enabled")
-
     return app
 
 
