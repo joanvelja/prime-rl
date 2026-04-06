@@ -15,6 +15,7 @@ from prime_rl.configs.shared import (
     WandbWithExtrasConfig,
 )
 from prime_rl.utils.config import BaseConfig
+from prime_rl.utils.logger import get_logger
 
 
 class OptimizerConfig(BaseConfig):
@@ -86,9 +87,10 @@ class SamplingConfig(BaseConfig):
         ),
     ] = 1.0
 
-    max_tokens: Annotated[
+    max_completion_tokens: Annotated[
         int | None,
         Field(
+            validation_alias=AliasChoices("max_completion_tokens", "max_tokens"),
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
         ),
     ] = None
@@ -116,6 +118,13 @@ class SamplingConfig(BaseConfig):
             description="Extra body to pass with each request to the inference server. By default, it is set to an empty dictionary.",
         ),
     ] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_max_tokens(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
+            get_logger().warning("'max_tokens' is deprecated, use 'max_completion_tokens' instead.")
+        return data
 
 
 class EvalSamplingConfig(BaseConfig):
@@ -158,9 +167,10 @@ class EvalSamplingConfig(BaseConfig):
         ),
     ] = None
 
-    max_tokens: Annotated[
+    max_completion_tokens: Annotated[
         int | None,
         Field(
+            validation_alias=AliasChoices("max_completion_tokens", "max_tokens"),
             description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
         ),
     ] = None
@@ -194,6 +204,13 @@ class EvalSamplingConfig(BaseConfig):
             description="Extra body to use for the OpenAI API. By default, it is set to an empty dictionary.",
         ),
     ] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_max_tokens(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
+            get_logger().warning("'max_tokens' is deprecated, use 'max_completion_tokens' instead.")
+        return data
 
 
 class EvalSaveHFConfig(BaseConfig):
@@ -253,7 +270,9 @@ class EnvConfig(BaseConfig):
     extra_env_kwargs: Annotated[
         dict[str, Any],
         Field(
-            description="Internal kwargs injected by the orchestrator (e.g. max_seq_len, score_rollouts). Auto-populated — do not set manually unless running an isolated env server that needs matching kwargs."
+            description=(
+                "Extra kwargs passed to an env (e.g. seq_len, max_total_completion_tokens). This field is auto-populated on the orchestrator for all envs. It is generally NOT recommended for this field to be overriden by the user. It's main use case is to match the extra_env_kwargs when running an env in an isolated environment server."
+            ),
         ),
     ] = {}
 
@@ -283,6 +302,15 @@ class EnvConfig(BaseConfig):
         int,
         Field(ge=0, description="Number of times the env server retries a failed rollout before returning an error."),
     ] = 0
+    max_total_completion_tokens: Annotated[
+        int,
+        Field(
+            description=(
+                "Maximum total completion tokens across all turns in a multi-turn rollout. "
+                "Set to -1 (default) to disable. Auto-populated into extra_env_kwargs."
+            ),
+        ),
+    ] = -1
 
     @property
     def stripped_id(self) -> str:
@@ -299,6 +327,11 @@ class EnvConfig(BaseConfig):
             raise ValueError(
                 'Environment name "all" is reserved for global metric aggregation. Use a different name or id.'
             )
+        return self
+
+    @model_validator(mode="after")
+    def resolve_max_total_completion_tokens(self):
+        self.extra_env_kwargs["max_total_completion_tokens"] = self.max_total_completion_tokens
         return self
 
 

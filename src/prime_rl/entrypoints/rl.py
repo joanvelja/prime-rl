@@ -296,6 +296,7 @@ def rl_local(config: RLConfig):
         # Start training process
         trainer_cmd = [
             "torchrun",
+            "--role=trainer",
             f"--rdzv-endpoint=localhost:{get_free_port()}",
             f"--rdzv-id={uuid.uuid4().hex}",
             # Pipe all logs to file, and only master rank logs to stdout
@@ -342,7 +343,10 @@ def rl_local(config: RLConfig):
         # Monitor all processes for failures
         logger.success("Startup complete. Showing trainer logs...")
 
-        tail_process = Popen(["tail", "-F", log_dir / "trainer.log"])
+        tail_process = Popen(
+            f"tail -F '{log_dir / 'trainer.log'}' | sed -u 's/^\\[[a-zA-Z]*[0-9]*\\]://'",
+            shell=True,
+        )
         processes.append(tail_process)
 
         # Check for errors from monitor threads
