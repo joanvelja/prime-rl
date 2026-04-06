@@ -106,12 +106,12 @@ class Env:
     async def run_rollout(
         self,
         client: vf.ClientConfig,
-        example: vf.RolloutInput,
+        example: dict,
         model_name: str,
     ) -> vf.RolloutOutput:
         """Run a single rollout for an example."""
         return await self.env.run_rollout(
-            example,
+            vf.RolloutInput(**example),
             client=client,
             model=model_name,
             sampling_args=self.sampling_args,
@@ -123,13 +123,13 @@ class Env:
     async def run_group(
         self,
         client: vf.ClientConfig,
-        example: vf.RolloutInput,
+        example: dict,
         model_name: str,
         rollouts_per_example: int,
     ) -> list[vf.RolloutOutput]:
         """Run a group of rollouts for an example. Required for group-scoring envs."""
         return await self.env.run_group(
-            [example for _ in range(rollouts_per_example)],
+            [vf.RolloutInput(**example) for _ in range(rollouts_per_example)],
             client=client,
             model=model_name,
             sampling_args=self.sampling_args,
@@ -190,7 +190,7 @@ class EvalEnv(Env):
                     client = await get_client()
                     outputs = await self.run_group(
                         client=client,
-                        example=vf.RolloutInput(**example),
+                        example=example,
                         model_name=model_name,
                         rollouts_per_example=rollouts_per_example,
                     )
@@ -209,9 +209,7 @@ class EvalEnv(Env):
                 """Run a single rollout for one example."""
                 try:
                     client = await get_client()
-                    output = await self.run_rollout(
-                        client=client, example=vf.RolloutInput(**example), model_name=model_name
-                    )
+                    output = await self.run_rollout(client=client, example=example, model_name=model_name)
                     pbar.update(1)
                     return [output]
                 except Exception as e:

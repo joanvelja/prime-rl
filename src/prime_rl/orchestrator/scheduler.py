@@ -10,7 +10,7 @@ from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
-from prime_rl.orchestrator.envs import Envs
+from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
@@ -57,7 +57,7 @@ class Scheduler:
 
     def __init__(
         self,
-        envs: Envs,
+        train_envs: TrainEnvs,
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
@@ -74,7 +74,7 @@ class Scheduler:
             self.rate_limiter = AsyncLimiter(max_rate=tasks_per_minute, time_period=60)
         else:
             self.rate_limiter = None
-        self.envs = envs
+        self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
         self.batch_size = config.batch_size
@@ -92,7 +92,7 @@ class Scheduler:
         # Inference pool - used for admin operations (adapter sync) and metrics
         self.inference_pool = inference_pool
 
-        group_scoring_envs = [env.name for env in envs if env.requires_group_scoring]
+        group_scoring_envs = [env.name for env in train_envs if env.requires_group_scoring]
         if group_scoring_envs:
             self.logger.info(f"Group rollout scoring active for env(s): {', '.join(group_scoring_envs)}")
 
@@ -194,7 +194,7 @@ class Scheduler:
             group.pinned_client = client_config
 
         env_name = group.example["env_name"]
-        env = self.envs.get(env_name)
+        env = self.train_envs.get(env_name)
 
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
@@ -241,9 +241,16 @@ class Scheduler:
             return False
 
         for group_id, group in self.groups.items():
-            if group.rollouts_to_schedule > 0:
+            if group.rollouts_to_schedule <= 0:
+                continue
+            env = self.train_envs.get(group.example["env_name"])
+            cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
+            if cost <= remaining_capacity:
                 await self.schedule_rollout(group_id=group_id)
                 return True
+
+        if remaining_capacity < self.rollouts_per_example:
+            return False
 
         example = self.buffer.sample_examples(n=1)[0]
         group_id = self.next_group_id
@@ -413,7 +420,7 @@ class Scheduler:
                     if group is None:
                         continue
 
-                    env = self.envs.get(env_name)
+                    env = self.train_envs.get(env_name)
                     result = finished_task.result()
                     rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
                     self.total_rollouts_by_env[env_name] += len(rollouts)
