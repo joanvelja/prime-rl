@@ -371,6 +371,18 @@ class Scheduler:
         await env_for_task.rubric.score_group(cast(list[vf.State], completed_rollouts))
         return completed_rollouts
 
+    def _commit_completed_group(
+        self,
+        rollout_info: InflightRolloutInfo,
+        group_state: GroupState,
+        completed_rollouts: list[vf.RolloutOutput],
+    ) -> list[vf.RolloutOutput]:
+        try:
+            self.buffer.update(completed_rollouts)
+            return self.buffer.sample_rollouts(n=self.rollouts_per_example)
+        finally:
+            self.env.release_version(rollout_info.task, group_state.env_version)
+
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""
         self.step = step
@@ -469,11 +481,7 @@ class Scheduler:
                         await self.drop_group(group_id)
                     continue
 
-                try:
-                    self.buffer.update(completed_rollouts)
-                    accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
-                finally:
-                    self.env.release_version(rollout_info.task, group_state.env_version)
+                accepted_rollouts = self._commit_completed_group(rollout_info, group_state, completed_rollouts)
 
                 batch_rollouts.extend(accepted_rollouts)
                 progress_increment = self.get_batch_progress_increment(accepted_rollouts)

@@ -186,63 +186,34 @@ def test_score_group_if_deferred_uses_pinned_env_version():
     asyncio.run(run())
 
 
-def test_generate_batch_releases_version_when_buffer_update_raises():
-    async def run() -> None:
-        scheduler = make_scheduler()
-        scheduler.config = SimpleNamespace(
-            verification=SimpleNamespace(enabled=False),
-            batch_size=1,
-            token_batch_size=None,
-        )
-        scheduler.batch_size = 1
-        scheduler.token_batch_size = None
-        scheduler.rollouts_per_example = 1
-        scheduler.json_logging = False
-        scheduler.enable_policy_updates = False
-        scheduler._fill_inflight_requests = AsyncMock()
+def test_commit_completed_group_releases_version_when_buffer_update_raises():
+    scheduler = make_scheduler()
+    scheduler.rollouts_per_example = 1
+    scheduler.env = SimpleNamespace(release_version=MagicMock())
+    scheduler.buffer = SimpleNamespace(
+        update=MagicMock(side_effect=RuntimeError("boom")),
+        sample_rollouts=MagicMock(),
+    )
 
-        env_registry = SimpleNamespace(
-            release_version=MagicMock(),
-            should_defer_group_scoring=lambda task, version: False,
-        )
-        scheduler.env = env_registry
+    rollout_info = InflightRolloutInfo(
+        off_policy_steps=0,
+        client_config=SimpleNamespace(api_base_url="http://test"),
+        task="env_a",
+        group_id=0,
+    )
+    group_state = SimpleNamespace(
+        example={"task": "env_a"},
+        env_version=3,
+        rollouts_to_schedule=0,
+        completed_rollouts=[],
+    )
+    completed_rollouts = [{"task": "env_a", "trajectory": [{"tokens": {}}], "error": None}]
 
-        rollout = {"task": "env_a", "trajectory": [{"tokens": {}}], "error": None}
-        finished_task = asyncio.get_running_loop().create_future()
-        finished_task.set_result(rollout)
-        scheduler.inflight_requests = {
-            finished_task: InflightRolloutInfo(
-                off_policy_steps=0,
-                client_config=SimpleNamespace(api_base_url="http://test"),
-                task="env_a",
-                group_id=0,
-            )
-        }
-        scheduler.groups = {
-            0: SimpleNamespace(
-                example={"task": "env_a"},
-                env_version=3,
-                rollouts_to_schedule=0,
-                completed_rollouts=[],
-            )
-        }
-        scheduler.buffer = SimpleNamespace(
-            update=MagicMock(side_effect=RuntimeError("boom")),
-            sample_rollouts=MagicMock(),
-        )
+    try:
+        scheduler._commit_completed_group(rollout_info, group_state, completed_rollouts)
+    except RuntimeError as e:
+        assert str(e) == "boom"
+    else:
+        raise AssertionError("Expected _commit_completed_group to propagate buffer failure")
 
-        async def fake_wait(fs, *, return_when):
-            assert list(fs) == [finished_task]
-            return {finished_task}, set()
-
-        try:
-            with patch("prime_rl.orchestrator.scheduler.asyncio.wait", new=fake_wait):
-                await scheduler.generate_batch(step=0)
-        except RuntimeError as e:
-            assert str(e) == "boom"
-        else:
-            raise AssertionError("Expected generate_batch to propagate buffer failure")
-
-        env_registry.release_version.assert_called_once_with("env_a", 3)
-
-    asyncio.run(run())
+    scheduler.env.release_version.assert_called_once_with("env_a", 3)
