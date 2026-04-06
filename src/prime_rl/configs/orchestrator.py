@@ -1,4 +1,3 @@
-import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -15,6 +14,7 @@ from prime_rl.configs.shared import (
     WandbWithExtrasConfig,
 )
 from prime_rl.utils.config import BaseConfig
+from prime_rl.utils.logger import get_logger
 
 
 class OptimizerConfig(BaseConfig):
@@ -163,10 +163,8 @@ class SamplingConfig(BaseConfig):
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            warnings.warn(
-                "SamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead.",
-                DeprecationWarning,
-                stacklevel=2,
+            get_logger().warning(
+                "SamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead."
             )
             data["max_completion_tokens"] = data.pop("max_tokens")
         return data
@@ -253,10 +251,8 @@ class EvalSamplingConfig(BaseConfig):
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
-            warnings.warn(
-                "EvalSamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead.",
-                DeprecationWarning,
-                stacklevel=2,
+            get_logger().warning(
+                "EvalSamplingConfig field 'max_tokens' is deprecated, use 'max_completion_tokens' instead."
             )
             data["max_completion_tokens"] = data.pop("max_tokens")
         return data
