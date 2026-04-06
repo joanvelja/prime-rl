@@ -114,8 +114,17 @@ def train(config: TrainerConfig):
         config.output_dir, config.max_concurrent_runs, torch.device("cuda", world.local_rank), config.model.lora
     )
 
-    # For single-run, set ready_to_update to True at initialization to allow weight broadcast at step 0
-    if config.max_concurrent_runs == 1:
+    # For single-run non-LoRA, discover run 0 before setting ready_to_update.
+    # This must happen before weight broadcast at step 0 so idx_2_id[0] exists.
+    # For LoRA, setup_optimizer() already waits for run 0 discovery, so we only
+    # need to set ready_to_update[0] = True after optimizer setup completes below.
+    if config.max_concurrent_runs == 1 and config.model.lora is None:
+        while 0 not in multi_run_manager.idx_2_id:
+            if world.is_master:
+                multi_run_manager.discover_runs()
+            multi_run_manager.synchronize_state()
+            logger.info(f"Waiting for run 0 to be created {multi_run_manager.id_2_idx=}")
+            time.sleep(1)
         multi_run_manager.ready_to_update[0] = True
 
     # Initialize parallel dimensions
@@ -162,6 +171,9 @@ def train(config: TrainerConfig):
             cpu_offload=config.model.optim_cpu_offload,
         )
         scheduler = setup_scheduler(optimizer, config.scheduler, config.max_steps, config.optim.lr)
+        # For single-run LoRA, setup_optimizer waited for run 0 discovery, so now set ready_to_update
+        if config.model.lora is not None:
+            multi_run_manager.ready_to_update[0] = True
     else:
         optimizer = setup_multi_optimizer(config.optim, parallel_dims)
         scheduler = setup_multi_scheduler(optimizer, config.scheduler, config.max_steps)
