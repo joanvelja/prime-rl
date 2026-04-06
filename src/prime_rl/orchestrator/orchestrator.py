@@ -583,7 +583,6 @@ async def orchestrate(config: OrchestratorConfig):
             activate_event = state.mark_reload_complete(step=step, version=result.version, args=result.args)
             if activate_event is not None:
                 events.append(activate_event)
-            train_env_registry.activate_version(env_name, result.version)
             logger.info(
                 f"Activated env args reload for {env_name} (version {result.previous_version}->{result.version}) "
                 f"in {result.duration_s:.2f}s with args={result.args}"

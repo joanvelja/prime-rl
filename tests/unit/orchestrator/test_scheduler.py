@@ -184,3 +184,64 @@ def test_score_group_if_deferred_uses_pinned_env_version():
         rubric_v2.score_group.assert_not_called()
 
     asyncio.run(run())
+
+
+def test_generate_batch_releases_version_when_buffer_update_raises():
+    async def run() -> None:
+        scheduler = make_scheduler()
+        scheduler.config = SimpleNamespace(
+            verification=SimpleNamespace(enabled=False),
+            batch_size=1,
+            token_batch_size=None,
+        )
+        scheduler.batch_size = 1
+        scheduler.token_batch_size = None
+        scheduler.rollouts_per_example = 1
+        scheduler.json_logging = False
+        scheduler.enable_policy_updates = False
+        scheduler._fill_inflight_requests = AsyncMock()
+
+        env_registry = SimpleNamespace(
+            release_version=MagicMock(),
+            should_defer_group_scoring=lambda task, version: False,
+        )
+        scheduler.env = env_registry
+
+        rollout = {"task": "env_a", "trajectory": [{"tokens": {}}], "error": None}
+
+        async def done_rollout():
+            return rollout
+
+        finished_task = asyncio.create_task(done_rollout())
+        await asyncio.sleep(0)
+        scheduler.inflight_requests = {
+            finished_task: InflightRolloutInfo(
+                off_policy_steps=0,
+                client_config=SimpleNamespace(api_base_url="http://test"),
+                task="env_a",
+                group_id=0,
+            )
+        }
+        scheduler.groups = {
+            0: SimpleNamespace(
+                example={"task": "env_a"},
+                env_version=3,
+                rollouts_to_schedule=0,
+                completed_rollouts=[],
+            )
+        }
+        scheduler.buffer = SimpleNamespace(
+            update=MagicMock(side_effect=RuntimeError("boom")),
+            sample_rollouts=MagicMock(),
+        )
+
+        try:
+            await scheduler.generate_batch(step=0)
+        except RuntimeError as e:
+            assert str(e) == "boom"
+        else:
+            raise AssertionError("Expected generate_batch to propagate buffer failure")
+
+        env_registry.release_version.assert_called_once_with("env_a", 3)
+
+    asyncio.run(run())

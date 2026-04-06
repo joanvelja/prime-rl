@@ -162,11 +162,6 @@ class TrainEnvRegistry:
         state.versions[version.version] = version
         state.version_refcounts.setdefault(version.version, 0)
 
-    def activate_version(self, task: str, version: int) -> None:
-        state = self.states[task]
-        state.active_version = version
-        state.active_args = dict(state.versions[version].args)
-
     def retire_version(self, task: str, version: int) -> None:
         state = self.states[task]
         state.version_refcounts.pop(version, None)

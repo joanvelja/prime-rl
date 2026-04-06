@@ -469,9 +469,11 @@ class Scheduler:
                         await self.drop_group(group_id)
                     continue
 
-                self.buffer.update(completed_rollouts)
-                accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
-                self.env.release_version(rollout_info.task, group_state.env_version)
+                try:
+                    self.buffer.update(completed_rollouts)
+                    accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
+                finally:
+                    self.env.release_version(rollout_info.task, group_state.env_version)
 
                 batch_rollouts.extend(accepted_rollouts)
                 progress_increment = self.get_batch_progress_increment(accepted_rollouts)
