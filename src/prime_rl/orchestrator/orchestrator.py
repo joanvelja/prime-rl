@@ -164,7 +164,10 @@ async def orchestrate(config: OrchestratorConfig):
     # Read run_id AFTER setup_monitor so that newly registered runs are captured
     run_id = os.getenv("RUN_ID", "")
 
-    usage_reporter = UsageReporter()
+    if os.environ.get("PI_USAGE_BASE_URL"):
+        usage_reporter = UsageReporter()
+    else:
+        usage_reporter = None
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)
     heart = None
@@ -846,7 +849,7 @@ async def orchestrate(config: OrchestratorConfig):
             step=progress.step,
         )
 
-        if usage_reporter.is_enabled and run_id:
+        if usage_reporter and run_id:
             usage_reporter.report_training_usage(
                 run_id=run_id,
                 step=progress.step,
@@ -927,7 +930,8 @@ async def orchestrate(config: OrchestratorConfig):
     atexit.unregister(_cleanup_env_processes)
     _cleanup_env_processes()
 
-    usage_reporter.close()
+    if usage_reporter:
+        usage_reporter.close()
 
     logger.success("Orchestrator finished.")
 
