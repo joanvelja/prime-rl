@@ -529,7 +529,7 @@ def train(config: TrainerConfig):
         monitor.log(perf_metrics, step=progress.step)
 
         # Log optimizer metrics
-        optim_metrics: dict = {
+        optim_metrics = {
             "optim/lr": current_lr,
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
