@@ -38,7 +38,6 @@ COUNTER_RATE_NAMES = {
 
 
 _COUNTER_TOTAL_TO_NAME = {f"{name}_total": name for name in COUNTER_METRICS}
-_HISTOGRAM_SUFFIXES = {"_sum", "_count"}
 
 
 def parse_prometheus_text(text: str) -> tuple[dict[str, float], dict[str, float], dict[str, tuple[float, float]]]:
@@ -108,7 +107,10 @@ class InferenceMetricsCollector:
 
         async def poll_loop():
             while True:
-                await self._collect_and_log()
+                try:
+                    await self._collect_and_log()
+                except Exception as e:
+                    self.logger.debug(f"Inference metrics poll failed: {e!r}")
                 await asyncio.sleep(POLL_INTERVAL)
 
         self._task = asyncio.create_task(poll_loop())
