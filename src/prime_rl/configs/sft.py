@@ -272,6 +272,15 @@ class SFTConfig(BaseConfig):
     ### Validate configs (e.g. raise for unsupported (combinations of) configs)
 
     @model_validator(mode="after")
+    def deepep_incompatible_with_grad_clipping(self):
+        if self.model.ep_comm_backend == "deepep" and self.optim.max_norm is not None:
+            raise ValueError(
+                "Gradient clipping (optim.max_norm) is not compatible with DeepEP (model.ep_comm_backend='deepep'). "
+                "Set optim.max_norm to null to disable gradient clipping."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_deployment(self):
         if self.deployment.type == "multi_node" and self.slurm is None:
             raise ValueError("Must use SLURM for multi-node deployment.")
