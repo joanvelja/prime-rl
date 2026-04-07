@@ -570,7 +570,7 @@ def train(config: TrainerConfig):
                 step=progress.step,
                 loss=tensor_stats["loss/mean"],
                 throughput=throughput,
-                grad_norm=grad_norm.item() if grad_norm is not None else 0.0,
+                grad_norm=grad_norm.item() if grad_norm is not None else None,
                 peak_memory_gib=peak_memory,
                 learning_rate=current_lr,
                 mfu=mfu,
