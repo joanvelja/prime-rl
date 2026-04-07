@@ -110,6 +110,10 @@ async def orchestrate(config: OrchestratorConfig):
     for env_id in env_ids_to_install:
         install_env(env_id)
 
+    run_id = os.getenv("RUN_ID", "")
+    if run_id:
+        config.client.headers["X-Run-Id"] = run_id
+
     # Setup rollout inference pool (handles both static and elastic modes)
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
@@ -838,6 +842,19 @@ async def orchestrate(config: OrchestratorConfig):
             },
             step=progress.step,
         )
+
+        if usage_reporter.is_enabled and run_id:
+            usage_reporter.report_inference_usage(
+                run_id=run_id,
+                step=progress.step,
+                input_tokens=num_prefill_tokens,
+                output_tokens=num_decode_tokens,
+            )
+            usage_reporter.report_training_usage(
+                run_id=run_id,
+                step=progress.step,
+                tokens=num_prefill_tokens + num_decode_tokens,
+            )
 
         reward_mean = by_example.reward.mean().mean()
         val_reward_str = ""
