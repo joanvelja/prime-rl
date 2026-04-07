@@ -179,6 +179,27 @@ def chat_with_tokens(request: Request) -> OpenAIServingChatWithTokens | None:
     return request.app.state.openai_serving_chat_with_tokens
 
 
+def generate_handler(request: Request):
+    return request.app.state.openai_serving_generate
+
+
+@router.post("/v1/generate")
+@with_cancellation
+@load_aware_call
+async def _generate(raw_request: Request):
+    from prime_rl.inference.vllm.serving_generate import GenerateRequest
+
+    body = await raw_request.json()
+    request = GenerateRequest(**body)
+    handler = generate_handler(raw_request)
+    if handler is None:
+        return JSONResponse({"error": "generate endpoint not available"}, status_code=503)
+    result = await handler.generate(request, raw_request)
+    if isinstance(result, dict) and "error" in result:
+        return JSONResponse(result, status_code=500)
+    return JSONResponse(content=result.model_dump())
+
+
 @router.post("/pause")
 async def pause(request: Request):
     await engine_client(request).pause_generation(mode="keep", clear_cache=False)
@@ -282,6 +303,11 @@ async def custom_init_app_state(
         state.openai_serving_chat_with_tokens = serving_chat
     else:
         state.openai_serving_chat_with_tokens = None
+
+    # /v1/generate endpoint — tokens + optional images, no chat template
+    from prime_rl.inference.vllm.serving_generate import OpenAIServingGenerate
+
+    state.openai_serving_generate = OpenAIServingGenerate(engine_client)
 
 
 import vllm.entrypoints.openai.api_server
