@@ -359,9 +359,11 @@ async def orchestrate(config: OrchestratorConfig):
 
     logger.success("Inference pool ready")
 
-    # Start inference metrics collector
-    inference_metrics_collector = InferenceMetricsCollector(inference_pool)
-    await inference_metrics_collector.start()
+    # Start inference metrics collector (only when monitoring is enabled)
+    inference_metrics_collector: InferenceMetricsCollector | None = None
+    if config.wandb is not None:
+        inference_metrics_collector = InferenceMetricsCollector(inference_pool)
+        await inference_metrics_collector.start()
 
     # Check health of teacher inference server if configured
     if config.teacher_model and teacher_inference_pool:
@@ -905,14 +907,15 @@ async def orchestrate(config: OrchestratorConfig):
     # Stop scheduler
     await scheduler.stop()
 
+    # Stop inference metrics collector before pool (avoids fetching from closed clients)
+    if inference_metrics_collector is not None:
+        await inference_metrics_collector.stop()
+
     # Stop inference pool
     await inference_pool.stop()
 
     if teacher_inference_pool is not None:
         await teacher_inference_pool.stop()
-
-    # Stop inference metrics collector
-    await inference_metrics_collector.stop()
 
     # Cancel event loop lag monitor task
     event_loop_lag_monitor_task.cancel()
