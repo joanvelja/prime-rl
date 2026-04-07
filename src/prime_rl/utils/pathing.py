@@ -149,6 +149,47 @@ def validate_output_dir(output_dir: Path, *, resuming: bool, clean: bool, ckpt_o
             )
 
 
+def _get_step_dirs_after(directory: Path, step: int) -> list[Path]:
+    """Return step_N directories where N > step, sorted ascending."""
+    if not directory.exists():
+        return []
+    future = []
+    for p in directory.iterdir():
+        if p.is_dir() and p.name.startswith("step_"):
+            try:
+                n = int(p.name.split("_", 1)[1])
+            except ValueError:
+                continue
+            if n > step:
+                future.append(p)
+    return sorted(future, key=lambda p: p.name)
+
+
+def clean_future_steps(output_dir: Path, resume_step: int, ckpt_output_dir: Path | None = None) -> None:
+    """Remove rollouts, checkpoints, weights, and broadcasts from steps after resume_step.
+
+    Cleans both the trainer output_dir and the orchestrator run_default subdir.
+    If ckpt_output_dir is set, checkpoints and weights are cleaned there instead.
+    """
+    logger = get_logger()
+
+    ckpt_base = ckpt_output_dir if ckpt_output_dir is not None else output_dir
+
+    dirs_to_clean = [
+        get_rollout_dir(output_dir),
+        get_rollout_dir(output_dir / "run_default"),
+        get_broadcast_dir(output_dir),
+        get_broadcast_dir(output_dir / "run_default"),
+        get_ckpt_dir(ckpt_base),
+        get_weights_dir(ckpt_base),
+    ]
+
+    for directory in dirs_to_clean:
+        for step_dir in _get_step_dirs_after(directory, resume_step):
+            logger.info(f"Removing stale artifact: {step_dir}")
+            shutil.rmtree(step_dir)
+
+
 def sync_wait_for_path(path: Path, interval: int = 1, log_interval: int = 10) -> None:
     logger = get_logger()
     wait_time = 0
