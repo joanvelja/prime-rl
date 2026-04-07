@@ -37,6 +37,7 @@ from prime_rl.trainer.models.layers.checkpointing import (
     set_selective_activation_checkpointing,
     supports_selective_activation_checkpointing,
 )
+from prime_rl.trainer.models.layers.extra_expert import strip_extra_expert_from_state_dict
 from prime_rl.trainer.models.layers.lm_head import inject_prime_lm_head
 from prime_rl.trainer.models.layers.moe import LatentMoE, MoE
 from prime_rl.trainer.parallel_dims import ParallelDims
@@ -494,7 +495,11 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     # Only master loads the full state dict when conversion is actually needed.
     if isinstance(model, PreTrainedModelPrimeRL):
         snapshot_keys = dict.fromkeys(load_state_dict_keys(snapshot_path))
-        model_keys = dict.fromkeys(model.state_dict().keys())
+        raw_model_keys = model.state_dict().keys()
+        # Clean keys for format detection (LoRA/ExtraExpert wrappers change key prefixes)
+        model_keys = dict.fromkeys(
+            strip_extra_expert_from_state_dict(strip_lora_from_state_dict(dict.fromkeys(raw_model_keys))).keys()
+        )
 
         if model.is_hf_state_dict(snapshot_keys) and model.is_prime_state_dict(model_keys):
             logger.warning(
@@ -531,6 +536,7 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     load_dcp_start_time = time.perf_counter()
     state_dict = model.state_dict()
     state_dict = strip_lora_from_state_dict(state_dict)
+    state_dict = strip_extra_expert_from_state_dict(state_dict)
     if model.config.tie_word_embeddings:
         del state_dict["lm_head.weight"]
     dcp_load(
@@ -543,6 +549,10 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
     _init_buffers_post_meta()
 
     _move_buffers_to_cuda(model, config)
+
+    extra_expert_modules = [m for m in model.modules() if hasattr(m, "_init_extra_expert_parameters")]
+    for module in extra_expert_modules:
+        module._init_extra_expert_parameters()
 
     lora_modules = [m for m in model.modules() if hasattr(m, "_init_lora_parameters")]
     if lora_modules:
@@ -786,6 +796,15 @@ def setup_model(
     # Apply LoRA before FSDP setup
     if config.lora is not None:
         apply_lora_to_model(model, config.lora)
+
+    if config.extra_expert:
+        from prime_rl.trainer.models.layers.extra_expert import apply_extra_expert
+
+        apply_extra_expert(model, gate_bias_init=config.extra_expert_gate_bias_init)
+        # Freeze everything except the new expert params
+        for name, p in model.named_parameters():
+            if not any(k in name for k in ("new_w1", "new_w2", "new_w3", "new_gate_weight", "gate_bias")):
+                p.requires_grad = False
 
     if config.freeze_moe_router:
         freeze_moe_router(model)

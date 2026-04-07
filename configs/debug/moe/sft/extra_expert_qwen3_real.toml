@@ -1,0 +1,35 @@
+max_steps = 50
+output_dir = "outputs/extra_expert_qwen3_bias"
+clean_output_dir = true
+
+[model]
+name = "Qwen/Qwen3-30B-A3B"
+impl = "custom"
+attn = "sdpa"
+extra_expert = true
+extra_expert_gate_bias_init = -2.0
+moe_use_grouped_mm = true
+optim_cpu_offload = true
+
+[model.ac]
+mode = "full"
+freq = 1
+
+[model.compile]
+
+[optim]
+type = "sign_sgd"
+lr = 1e-4
+max_norm = 1.0
+
+[data]
+name = "PrimeIntellect/Reverse-Text-SFT"
+batch_size = 2
+seq_len = 2048
+
+[wandb]
+project = "prime-rl"
+name = "extra-expert-qwen3-30b-gate-bias-minus2"
+
+[deployment]
+num_gpus = 2
