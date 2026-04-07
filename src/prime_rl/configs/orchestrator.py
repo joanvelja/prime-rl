@@ -364,16 +364,6 @@ class EvalEnvConfig(EnvConfig):
         ),
     ] = 1
 
-    @model_validator(mode="after")
-    def resolve_num_workers(self):
-        if self.num_workers == "auto":
-            if self.num_examples == -1:
-                self.num_workers = 4  # default when dataset size unknown; set num_workers explicitly if more are needed
-            else:
-                max_concurrent = self.num_examples * self.rollouts_per_example
-                self.num_workers = max(1, math.ceil(max_concurrent / 256))
-        return self
-
 
 class TrainConfig(BaseConfig):
     """Configures training environments and their shared sampling settings."""
@@ -424,6 +414,18 @@ class EvalConfig(BaseConfig):
         description="Shared sampling configuration for evals; can differ from training sampling.",
     )
 
+    num_examples: Annotated[
+        int,
+        Field(
+            description="Default number of eval examples per environment. Set to -1 to use all. Can be overridden per env."
+        ),
+    ] = -1
+
+    rollouts_per_example: Annotated[
+        int,
+        Field(ge=1, description="Default number of rollouts per example. Can be overridden per env."),
+    ] = 1
+
     interval: Annotated[
         int,
         Field(
@@ -431,6 +433,23 @@ class EvalConfig(BaseConfig):
             description="Interval at which to evaluate the model.",
         ),
     ] = 100
+
+    @model_validator(mode="after")
+    def resolve_env_defaults(self):
+        """Fill per-env num_examples and rollouts_per_example from group defaults, then resolve num_workers."""
+        for env in self.env:
+            if "num_examples" not in env.model_fields_set:
+                env.num_examples = self.num_examples
+            if "rollouts_per_example" not in env.model_fields_set:
+                env.rollouts_per_example = self.rollouts_per_example
+            # Resolve num_workers now that num_examples and rollouts_per_example are set
+            if env.num_workers == "auto":
+                if env.num_examples == -1:
+                    env.num_workers = 4
+                else:
+                    max_concurrent = env.num_examples * env.rollouts_per_example
+                    env.num_workers = max(1, math.ceil(max_concurrent / 256))
+        return self
 
     @model_validator(mode="after")
     def validate_unique_env_names(self):
