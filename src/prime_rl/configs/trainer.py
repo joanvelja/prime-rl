@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -824,12 +825,14 @@ class TrainerConfig(BaseConfig):
     ] = 1
 
     @model_validator(mode="after")
-    def deepep_incompatible_with_grad_clipping(self):
+    def deepep_disables_grad_clipping(self):
         if self.model.ep_comm_backend == "deepep" and self.optim.max_norm is not None:
-            raise ValueError(
-                "Gradient clipping (optim.max_norm) is not compatible with DeepEP (model.ep_comm_backend='deepep'). "
-                "Set optim.max_norm to null to disable gradient clipping."
+            warnings.warn(
+                "Gradient clipping is not compatible with DeepEP. "
+                "Automatically setting optim.max_norm to None (disabled).",
+                stacklevel=1,
             )
+            self.optim.max_norm = None
         return self
 
     @model_validator(mode="after")
