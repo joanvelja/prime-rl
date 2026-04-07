@@ -142,13 +142,7 @@ class Env:
     def shutdown(self) -> None:
         if self._env_server_process is None:
             return
-        logger = get_logger()
         self._env_server_process.terminate()
-        self._env_server_process.join(timeout=25)
-        if self._env_server_process.is_alive():
-            logger.warning(f"Env server {self._env_server_process.pid} did not exit after 25s, force killing")
-            self._env_server_process.kill()
-            self._env_server_process.join(timeout=5)
         self._env_server_process = None
 
 
@@ -347,14 +341,22 @@ class Envs(Generic[EnvT]):
         atexit.register(self.shutdown)
 
     def shutdown(self) -> None:
-        """Terminate all spawned env server processes."""
+        """Terminate all spawned env server processes in parallel."""
         processes = [env._env_server_process for env in self if env._env_server_process is not None]
         if not processes:
             return
         logger = get_logger()
         logger.info(f"Shutting down {len(processes)} env server(s), waiting for sandbox cleanup...")
+        for p in processes:
+            p.terminate()
+        for p in processes:
+            p.join(timeout=25)
+            if p.is_alive():
+                logger.warning(f"Env server {p.pid} did not exit after 25s, force killing")
+                p.kill()
+                p.join(timeout=5)
         for env in self:
-            env.shutdown()
+            env._env_server_process = None
 
 
 class TrainEnvs(Envs[TrainEnv]):
