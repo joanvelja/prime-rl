@@ -329,16 +329,17 @@ class ModelConfig(BaseModelConfig):
     ] = None
 
     extra_expert: Annotated[
-        bool,
+        int,
         Field(
-            description="Whether to add a trainable extra expert to each MoE layer (PEFT). Freezes all other parameters.",
+            ge=0,
+            description="Number of trainable extra experts to add to each MoE layer (PEFT). 0 disables. Freezes all other parameters.",
         ),
-    ] = False
+    ] = 0
 
     extra_expert_gate_bias_init: Annotated[
         float,
         Field(
-            description="Initial value for the extra expert's learnable gate bias. Negative values reduce initial routing to the new expert.",
+            description="Initial value for the extra experts' learnable gate bias. Negative values reduce initial routing to new experts.",
         ),
     ] = -2.0
 

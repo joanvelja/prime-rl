@@ -1,9 +1,9 @@
 """
-Extra Expert: PEFT method that adds a trainable expert to a frozen MoE layer.
+Extra Expert: PEFT method that adds trainable experts to a frozen MoE layer.
 
-The new expert's down-projection (w2) is zero-initialized so the model's
-initial output is unchanged. Only the new expert's weights and its router
-gate column are trainable.
+The new experts' down-projection (w2) is zero-initialized so the model's
+initial output is unchanged. Only the new experts' weights and their router
+gate columns are trainable.
 """
 
 import torch
@@ -18,13 +18,13 @@ from prime_rl.trainer.models.layers.moe import (
 
 
 class ExtraExpert(nn.Module):
-    """Adds a single trainable expert to a frozen MoE layer.
+    """Adds trainable experts to a frozen MoE layer.
 
-    The new expert's w2 (down-projection) is zero-initialized so the expert
-    initially produces zero output, preserving the pretrained model's behavior.
+    The new experts' w2 (down-projection) is zero-initialized so they
+    initially produce zero output, preserving the pretrained model's behavior.
     """
 
-    def __init__(self, moe: MoE, gate_bias_init: float = 0.0):
+    def __init__(self, moe: MoE, num_extra: int = 1, gate_bias_init: float = 0.0):
         super().__init__()
 
         self.moe = moe
@@ -32,8 +32,9 @@ class ExtraExpert(nn.Module):
             p.requires_grad = False
 
         orig = moe.experts
+        self.num_extra = num_extra
         self.orig_num_experts = orig.num_experts
-        self.total_experts = orig.num_experts + 1
+        self.total_experts = orig.num_experts + num_extra
         self.top_k = moe.router.top_k
         self.score_func = moe.router.score_func
         self.route_norm = moe.router.route_norm
@@ -46,15 +47,15 @@ class ExtraExpert(nn.Module):
         device = orig.w1.device
         dtype = orig.w1.dtype
 
-        # New expert: w2 zero-initialized so output starts at zero
-        self.new_w1 = nn.Parameter(torch.empty(1, hidden_dim, dim, device=device, dtype=dtype))
-        self.new_w2 = nn.Parameter(torch.zeros(1, dim, hidden_dim, device=device, dtype=dtype))
-        self.new_w3 = nn.Parameter(torch.empty(1, hidden_dim, dim, device=device, dtype=dtype))
+        # New experts: w2 zero-initialized so output starts at zero
+        self.new_w1 = nn.Parameter(torch.empty(num_extra, hidden_dim, dim, device=device, dtype=dtype))
+        self.new_w2 = nn.Parameter(torch.zeros(num_extra, dim, hidden_dim, device=device, dtype=dtype))
+        self.new_w3 = nn.Parameter(torch.empty(num_extra, hidden_dim, dim, device=device, dtype=dtype))
 
-        # Router extension: gate column for the new expert
-        self.new_gate_weight = nn.Parameter(torch.empty(1, dim, device=device, dtype=dtype))
-        # Learnable bias on the new expert's logit
-        self.gate_bias = nn.Parameter(torch.tensor([gate_bias_init], device=device, dtype=dtype))
+        # Router extension: gate columns for the new experts
+        self.new_gate_weight = nn.Parameter(torch.empty(num_extra, dim, device=device, dtype=dtype))
+        # Learnable bias on the new experts' logits
+        self.gate_bias = nn.Parameter(torch.full((num_extra,), gate_bias_init, device=device, dtype=dtype))
 
         self._init_extra_expert_parameters()
 
@@ -81,7 +82,7 @@ class ExtraExpert(nn.Module):
 
         # Routing with extended gate
         scores = x_flat @ self._extended_gate().T
-        # Add learnable bias to new expert's logit (cat-based to avoid in-place ops for torch.compile)
+        # Add learnable bias to new experts' logits (cat-based to avoid in-place ops for torch.compile)
         bias = torch.cat(
             [
                 torch.zeros(self.orig_num_experts, device=scores.device, dtype=scores.dtype),
@@ -160,7 +161,7 @@ def strip_extra_expert_from_state_dict(state_dict: dict[str, torch.Tensor]) -> d
     return new_state_dict
 
 
-def apply_extra_expert(model: nn.Module, gate_bias_init: float = 0.0) -> nn.Module:
+def apply_extra_expert(model: nn.Module, num_extra: int = 1, gate_bias_init: float = 0.0) -> nn.Module:
     """Replace all MoE layers in a model with ExtraExpert wrappers.
 
     Only the new expert parameters are trainable; everything else is frozen.
@@ -171,7 +172,7 @@ def apply_extra_expert(model: nn.Module, gate_bias_init: float = 0.0) -> nn.Modu
             replacements.append((name, module))
 
     for name, module in replacements:
-        wrapper = ExtraExpert(module, gate_bias_init=gate_bias_init)
+        wrapper = ExtraExpert(module, num_extra=num_extra, gate_bias_init=gate_bias_init)
         parts = name.split(".")
         parent = model
         for part in parts[:-1]:

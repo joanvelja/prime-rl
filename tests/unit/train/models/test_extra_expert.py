@@ -47,14 +47,14 @@ def test_new_params_trainable():
     moe = make_moe()
     ee = ExtraExpert(moe)
     for name, p in ee.named_parameters():
-        if name.startswith("new_"):
+        if name.startswith("new_") or name == "gate_bias":
             assert p.requires_grad, f"New param {name} should be trainable"
 
 
 def test_total_experts_increased():
     moe = make_moe()
-    ee = ExtraExpert(moe)
-    assert ee.total_experts == NUM_EXPERTS + 1
+    ee = ExtraExpert(moe, num_extra=4)
+    assert ee.total_experts == NUM_EXPERTS + 4
 
 
 def test_forward_shape():
@@ -63,6 +63,19 @@ def test_forward_shape():
     x = torch.randn(BS, SLEN, DIM, device="cuda")
     out = ee(x)
     assert out.shape == (BS, SLEN, DIM)
+
+
+def test_forward_multi_extra():
+    moe = make_moe()
+    ee = ExtraExpert(moe, num_extra=4).cuda()
+    x = torch.randn(BS, SLEN, DIM, device="cuda")
+    out = ee(x)
+    assert out.shape == (BS, SLEN, DIM)
+    assert ee.new_w1.shape[0] == 4
+    assert ee.new_w2.shape[0] == 4
+    assert ee.new_w3.shape[0] == 4
+    assert ee.new_gate_weight.shape[0] == 4
+    assert ee.gate_bias.shape[0] == 4
 
 
 def test_new_expert_output_is_zero():
@@ -103,7 +116,7 @@ def test_gradients_flow_to_new_params():
     out.sum().backward()
 
     for name, p in ee.named_parameters():
-        if name.startswith("new_") and p.requires_grad:
+        if (name.startswith("new_") or name == "gate_bias") and p.requires_grad:
             assert p.grad is not None, f"No gradient for {name}"
 
 
@@ -138,10 +151,12 @@ def test_apply_extra_expert():
                 self.layer1.init_weights(init_std=0.02, buffer_device=torch.device("cuda"))
 
     model = DummyModel()
-    apply_extra_expert(model)
+    apply_extra_expert(model, num_extra=4)
 
     assert isinstance(model.layer0, ExtraExpert)
     assert isinstance(model.layer1, ExtraExpert)
+    assert model.layer0.num_extra == 4
+    assert model.layer1.num_extra == 4
 
 
 def test_with_shared_expert():
@@ -151,3 +166,10 @@ def test_with_shared_expert():
     out = ee(x)
     assert out.shape == (BS, SLEN, DIM)
     out.sum().backward()
+
+
+def test_gate_bias_init():
+    moe = make_moe()
+    ee = ExtraExpert(moe, num_extra=4, gate_bias_init=-3.0)
+    assert (ee.gate_bias == -3.0).all()
+    assert ee.gate_bias.shape == (4,)

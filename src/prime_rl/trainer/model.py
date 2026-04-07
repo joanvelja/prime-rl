@@ -797,10 +797,10 @@ def setup_model(
     if config.lora is not None:
         apply_lora_to_model(model, config.lora)
 
-    if config.extra_expert:
+    if config.extra_expert > 0:
         from prime_rl.trainer.models.layers.extra_expert import apply_extra_expert
 
-        apply_extra_expert(model, gate_bias_init=config.extra_expert_gate_bias_init)
+        apply_extra_expert(model, num_extra=config.extra_expert, gate_bias_init=config.extra_expert_gate_bias_init)
         # Freeze everything except the new expert params
         for name, p in model.named_parameters():
             if not any(k in name for k in ("new_w1", "new_w2", "new_w3", "new_gate_weight", "gate_bias")):
