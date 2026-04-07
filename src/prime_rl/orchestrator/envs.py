@@ -14,8 +14,9 @@ import verifiers as vf
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, EvalSamplingConfig, TrainEnvConfig
 from prime_rl.orchestrator.eval_utils import compute_pass_at_k
+from prime_rl.orchestrator.utils import get_eval_sampling_args, get_train_sampling_args
 from prime_rl.orchestrator.vf_utils import get_completion_len
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.monitor import get_monitor
@@ -327,10 +328,6 @@ class Envs(Generic[EnvT]):
     def get(self, name: str) -> EnvT:
         return self._envs[name]
 
-    def set_sampling_args(self, sampling_args: dict) -> None:
-        for env in self:
-            env.sampling_args = sampling_args
-
     def __iter__(self) -> Iterator[EnvT]:
         return iter(self._envs.values())
 
@@ -363,18 +360,22 @@ class Envs(Generic[EnvT]):
 class TrainEnvs(Envs[TrainEnv]):
     """Collection of training environments."""
 
-    def __init__(self, configs: Sequence[TrainEnvConfig]):
+    def __init__(self, configs: Sequence[TrainEnvConfig], is_vllm: bool = True):
         self._envs: dict[str, TrainEnv] = {}
         for config in configs:
             env = TrainEnv(config)
+            assert config.sampling is not None, "TrainEnvConfig.sampling must be resolved before constructing TrainEnvs"
+            env.sampling_args = get_train_sampling_args(config.sampling, is_vllm=is_vllm)
             self._envs[env.name] = env
 
 
 class EvalEnvs(Envs[EvalEnv]):
     """Collection of evaluation environments."""
 
-    def __init__(self, configs: Sequence[EvalEnvConfig]):
+    def __init__(self, configs: Sequence[EvalEnvConfig], sampling: EvalSamplingConfig | None = None):
         self._envs: dict[str, EvalEnv] = {}
         for config in configs:
             env = EvalEnv(config)
+            if sampling is not None:
+                env.sampling_args = get_eval_sampling_args(sampling)
             self._envs[env.name] = env

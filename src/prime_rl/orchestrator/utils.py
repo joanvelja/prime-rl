@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from verifiers.utils.client_utils import setup_openai_client
 
-from prime_rl.configs.orchestrator import EvalSamplingConfig, OrchestratorConfig, SamplingConfig
+from prime_rl.configs.orchestrator import EvalSamplingConfig, OrchestratorConfig, TrainSamplingConfig
 from prime_rl.transport import TrainingSample
 from prime_rl.utils.utils import (
     format_time,
@@ -21,8 +21,8 @@ from prime_rl.utils.utils import (
 )
 
 
-def get_train_sampling_args(sampling_config: SamplingConfig, is_vllm: bool = True) -> dict:
-    # Convert SamplingConfig to vLLM OAI sampling args
+def get_train_sampling_args(sampling_config: TrainSamplingConfig, is_vllm: bool = True) -> dict:
+    # Convert TrainSamplingConfig to vLLM OAI sampling args
     # https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters_2
     sampling_args = dict(sampling_config)
     sampling_args["top_p"] = 1.0

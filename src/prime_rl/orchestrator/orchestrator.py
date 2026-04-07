@@ -39,8 +39,6 @@ from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
-    get_eval_sampling_args,
-    get_train_sampling_args,
     get_weight_dir,
     print_benchmark,
     setup_external_rollout_model,
@@ -93,7 +91,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Install environments
     env_ids_to_install = set()
-    env_ids_to_install.update(get_env_ids_to_install(config.env))
+    env_ids_to_install.update(get_env_ids_to_install(config.train.env))
     if config.eval is not None:
         env_ids_to_install.update(get_env_ids_to_install(config.eval.env))
 
@@ -162,8 +160,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Load environments
     logger.info("Loading training environments")
-    train_envs = TrainEnvs(config.train_envs)
-    train_envs.set_sampling_args(get_train_sampling_args(config.sampling, is_vllm=config.teacher_rollout_model is None))
+    train_envs = TrainEnvs(config.train.env, is_vllm=config.teacher_rollout_model is None)
     logger.info(f"Loaded {len(train_envs)} training environment(s) ({', '.join(train_envs.names)})")
 
     await train_envs.start(
@@ -176,8 +173,7 @@ async def orchestrate(config: OrchestratorConfig):
     eval_envs: EvalEnvs | None = None
     if config.eval:
         logger.info("Loading eval environment(s)")
-        eval_envs = EvalEnvs(config.eval_envs)
-        eval_envs.set_sampling_args(get_eval_sampling_args(config.eval.sampling))
+        eval_envs = EvalEnvs(config.eval.env, sampling=config.eval.sampling)
         logger.info(f"Loaded {len(eval_envs)} eval environment(s) ({', '.join(eval_envs.names)})")
 
         await eval_envs.start(
@@ -577,7 +573,6 @@ async def orchestrate(config: OrchestratorConfig):
             "reward/all/mean": by_example.reward.mean().mean(),
             "reward/all/max": by_example.reward.mean().max(),
             "reward/all/min": by_example.reward.mean().min(),
-            "sampling/temperature": config.sampling.temperature,
             # Solve / batch metrics
             "solve_none/all": solve_none,
             "solve_all/all": solve_all,

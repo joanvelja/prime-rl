@@ -190,13 +190,13 @@ def test_buffer_env_ratios_validation():
     """Validates that env ratios must be positive and all-or-nothing."""
     from pydantic import ValidationError
 
-    from prime_rl.configs.orchestrator import TrainEnvsConfig
+    from prime_rl.configs.orchestrator import TrainConfig, TrainEnvConfig
 
     with pytest.raises(ValidationError):
         EnvConfig(id="env_a", ratio=-0.3)
 
     with pytest.raises(ValidationError, match="mix of set and unset"):
-        TrainEnvsConfig(env=[EnvConfig(id="a", ratio=0.5), EnvConfig(id="b")])
+        TrainConfig(env=[TrainEnvConfig(id="a", ratio=0.5), TrainEnvConfig(id="b")])
 
 
 def test_buffer_no_cross_env_pool_assignment(mock_openai_client, tmp_path):

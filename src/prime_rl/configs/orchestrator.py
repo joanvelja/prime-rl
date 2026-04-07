@@ -68,7 +68,7 @@ class ModelConfig(BaseModelConfig):
     ] = None
 
 
-class SamplingConfig(BaseConfig):
+class TrainSamplingConfig(BaseConfig):
     """Configures how tokens are sampled from the model for training. Largely follows the vLLM sampling parameters."""
 
     temperature: Annotated[
@@ -335,7 +335,15 @@ class EnvConfig(BaseConfig):
         return self
 
 
-TrainEnvConfig = EnvConfig
+class TrainEnvConfig(EnvConfig):
+    """Configures a training environment."""
+
+    sampling: Annotated[
+        TrainSamplingConfig | None,
+        Field(
+            description="Per-env sampling overrides. When set, these values override the group-level train sampling config for this env.",
+        ),
+    ] = None
 
 
 class EvalEnvConfig(EnvConfig):
@@ -367,10 +375,24 @@ class EvalEnvConfig(EnvConfig):
         return self
 
 
-class TrainEnvsConfig(BaseConfig):
-    """Configures all training environments."""
+class TrainConfig(BaseConfig):
+    """Configures training environments and their shared sampling settings."""
 
     env: list[TrainEnvConfig] = [TrainEnvConfig()]
+
+    sampling: TrainSamplingConfig = TrainSamplingConfig()
+
+    @model_validator(mode="after")
+    def resolve_sampling(self):
+        """Resolve each env's sampling by merging group defaults with per-env overrides."""
+        for env in self.env:
+            if env.sampling is None:
+                env.sampling = self.sampling
+            else:
+                merged = self.sampling.model_dump()
+                merged.update(env.sampling.model_dump(exclude_unset=True))
+                env.sampling = TrainSamplingConfig(**merged)
+        return self
 
     @model_validator(mode="after")
     def validate_unique_env_names(self):
@@ -392,24 +414,10 @@ class TrainEnvsConfig(BaseConfig):
         return self
 
 
-class EvalEnvsConfig(BaseConfig):
-    """Configures all evaluation environments."""
+class EvalConfig(BaseConfig):
+    """Configures evaluation using verifiers environments."""
 
     env: list[EvalEnvConfig] = [EvalEnvConfig()]
-
-    @model_validator(mode="after")
-    def validate_unique_env_names(self):
-        env_names = [env.resolved_name for env in self.env]
-        duplicates = [n for n in env_names if env_names.count(n) > 1]
-        if duplicates:
-            raise ValueError(
-                f"Duplicate evaluation environment names: {set(duplicates)}. Each env must have a unique name."
-            )
-        return self
-
-
-class EvalConfig(EvalEnvsConfig):
-    """Configures evaluation using verifiers environments."""
 
     sampling: EvalSamplingConfig = Field(
         default_factory=EvalSamplingConfig,
@@ -423,6 +431,16 @@ class EvalConfig(EvalEnvsConfig):
             description="Interval at which to evaluate the model.",
         ),
     ] = 100
+
+    @model_validator(mode="after")
+    def validate_unique_env_names(self):
+        env_names = [env.resolved_name for env in self.env]
+        duplicates = [n for n in env_names if env_names.count(n) > 1]
+        if duplicates:
+            raise ValueError(
+                f"Duplicate evaluation environment names: {set(duplicates)}. Each env must have a unique name."
+            )
+        return self
 
     eval_base_model: Annotated[
         bool,
@@ -713,8 +731,11 @@ class TeacherRolloutModelConfig(BaseConfig):
     ] = ModelConfig()
 
 
-class OrchestratorConfig(TrainEnvsConfig):
+class OrchestratorConfig(BaseConfig):
     """Configures the orchestrator for RL training."""
+
+    # Training environments and sampling
+    train: TrainConfig = TrainConfig()
 
     # The OAI client configuration
     client: ClientConfig = ClientConfig()
@@ -745,9 +766,6 @@ class OrchestratorConfig(TrainEnvsConfig):
             ),
         ),
     ] = None
-
-    # The sampling configuration
-    sampling: SamplingConfig = SamplingConfig()
 
     # The evaluation configuration
     eval: EvalConfig | None = None
@@ -902,15 +920,20 @@ class OrchestratorConfig(TrainEnvsConfig):
         ),
     ] = True
 
-    @property
-    def train_envs(self) -> list[TrainEnvConfig]:
-        return self.env
-
-    @property
-    def eval_envs(self) -> list[EvalEnvConfig]:
-        if self.eval is None:
-            return []
-        return self.eval.env
+    @model_validator(mode="before")
+    @classmethod
+    def _env_to_train(cls, data: Any) -> Any:
+        """Allow [[env]] and [sampling] as shorthand for [train] with [[train.env]] and [train.sampling]."""
+        if not isinstance(data, dict):
+            return data
+        if "env" in data or "sampling" in data:
+            train = data.setdefault("train", {})
+            if isinstance(train, dict):
+                if "env" in data:
+                    train.setdefault("env", data.pop("env"))
+                if "sampling" in data:
+                    train.setdefault("sampling", data.pop("sampling"))
+        return data
 
     @model_validator(mode="after")
     def validate_unique_filter_types(self):
@@ -958,7 +981,7 @@ class OrchestratorConfig(TrainEnvsConfig):
             raise ValueError("max_inflight_rollouts must be at least the number of rollouts per example")
 
         # Resolve train env num_workers from max_inflight_rollouts
-        for env_cfg in self.env:
+        for env_cfg in self.train.env:
             if env_cfg.num_workers == "auto":
                 assert self.max_inflight_rollouts is not None
                 env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
@@ -990,6 +1013,6 @@ class OrchestratorConfig(TrainEnvsConfig):
     @model_validator(mode="after")
     def resolve_env_config(self):
         """Populate extra_env_kwargs from top-level fields."""
-        for env in self.env:
+        for env in self.train.env:
             env.extra_env_kwargs.update(max_seq_len=self.seq_len)
         return self
