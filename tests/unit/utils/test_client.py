@@ -33,6 +33,18 @@ def test_is_retryable_lora_error_returns_false_for_non_http_error():
     assert _is_retryable_lora_error(ValueError("some error")) is False
 
 
+def test_is_retryable_lora_error_returns_true_for_timeout():
+    # A read timeout from a stuck server must be retryable, otherwise the
+    # per-call httpx timeout would just propagate as a hard failure on the
+    # first hiccup instead of giving the server a chance to recover.
+    assert _is_retryable_lora_error(httpx.ReadTimeout("read timed out")) is True
+    assert _is_retryable_lora_error(httpx.ConnectTimeout("connect timed out")) is True
+
+
+def test_is_retryable_lora_error_returns_true_for_transport_error():
+    assert _is_retryable_lora_error(httpx.ConnectError("connection refused")) is True
+
+
 def test_load_lora_adapter_succeeds_on_first_attempt():
     mock_client = AsyncMock()
     mock_response = MagicMock()
@@ -41,10 +53,12 @@ def test_load_lora_adapter_succeeds_on_first_attempt():
 
     asyncio.run(load_lora_adapter([mock_client], "test-lora", Path("/test/path")))
 
-    mock_client.post.assert_called_once_with(
-        "/load_lora_adapter",
-        json={"lora_name": "test-lora", "lora_path": "/test/path"},
-    )
+    assert mock_client.post.call_count == 1
+    call = mock_client.post.call_args
+    assert call.args == ("/load_lora_adapter",)
+    assert call.kwargs["json"] == {"lora_name": "test-lora", "lora_path": "/test/path"}
+    # Per-call timeout must be set so a stuck server cannot wedge the orchestrator.
+    assert isinstance(call.kwargs["timeout"], httpx.Timeout)
 
 
 def test_load_lora_adapter_retries_on_404_then_succeeds():
@@ -83,3 +97,24 @@ def test_load_lora_adapter_raises_non_retryable_error_immediately():
 
     assert exc_info.value.response.status_code == 400
     assert mock_client.post.call_count == 1
+
+
+def test_load_lora_adapter_retries_on_timeout_then_succeeds():
+    mock_client = AsyncMock()
+    success_response = MagicMock()
+    success_response.raise_for_status = MagicMock()
+
+    call_count = 0
+
+    async def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ReadTimeout("simulated stuck server")
+        return success_response
+
+    mock_client.post = mock_post
+
+    asyncio.run(load_lora_adapter([mock_client], "test-lora", Path("/test/path")))
+
+    assert call_count == 2
