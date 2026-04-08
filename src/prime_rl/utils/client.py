@@ -15,6 +15,8 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
 
+RENDERER_UPSTREAM_BASE_URL_HEADER = "X-Renderer-Upstream-Base-URL"
+
 
 @runtime_checkable
 class InferencePool(Protocol):
@@ -94,6 +96,58 @@ class StaticInferencePool:
 
     async def stop(self) -> None:
         pass
+
+
+class ProxiedInferencePool:
+    """Wrap an inference pool so requests flow through the local rendering proxy."""
+
+    def __init__(
+        self,
+        upstream_inference_pool: InferencePool,
+        proxy_base_url: str,
+        client_type: str = "openai_chat_completions",
+    ):
+        self._upstream_pool = upstream_inference_pool
+        self._proxy_base_url = proxy_base_url
+        self._client_type = client_type
+
+    @property
+    def clients(self) -> list[vf.ClientConfig]:
+        return [self._to_proxy_client(client) for client in self._upstream_pool.clients]
+
+    @property
+    def admin_clients(self) -> list[AsyncClient]:
+        return self._upstream_pool.admin_clients
+
+    def update_model_name(self, model_name: str) -> None:
+        self._upstream_pool.update_model_name(model_name)
+
+    async def get_next_client(self) -> vf.ClientConfig:
+        return self._to_proxy_client(await self._upstream_pool.get_next_client())
+
+    async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
+        await self._upstream_pool.wait_for_ready(model_name, timeout=timeout)
+
+    async def update_weights(self, weight_dir: Path | None, lora_name: str | None = None, step: int = 0) -> None:
+        await self._upstream_pool.update_weights(weight_dir, lora_name=lora_name, step=step)
+
+    def get_metrics(self) -> dict[str, float]:
+        return self._upstream_pool.get_metrics()
+
+    async def stop(self) -> None:
+        await self._upstream_pool.stop()
+
+    def _to_proxy_client(self, client: vf.ClientConfig) -> vf.ClientConfig:
+        headers = dict(client.extra_headers)
+        headers[RENDERER_UPSTREAM_BASE_URL_HEADER] = client.api_base_url
+        return client.model_copy(
+            update={
+                "client_type": self._client_type,
+                "api_base_url": self._proxy_base_url,
+                "extra_headers": headers,
+            },
+            deep=True,
+        )
 
 
 async def setup_inference_pool(

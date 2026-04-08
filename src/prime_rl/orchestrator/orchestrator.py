@@ -60,10 +60,8 @@ from prime_rl.orchestrator.vf_utils import (
     wait_for_env_servers,
 )
 from prime_rl.utils.client import (
-    StaticInferencePool,
+    ProxiedInferencePool,
     init_nccl_broadcast,
-    setup_admin_clients,
-    setup_clients,
     setup_inference_pool,
 )
 from prime_rl.utils.config import cli
@@ -154,23 +152,27 @@ async def orchestrate(config: OrchestratorConfig):
     import uvicorn
     from renderers.proxy import RenderingProxy
 
-    proxy = RenderingProxy(renderer, vllm_base_url=rollout_client_config.base_url[0], processor=processor)
+    proxy = RenderingProxy(
+        renderer,
+        vllm_base_url=rollout_client_config.base_url[0] if rollout_client_config.base_url else None,
+        processor=processor,
+    )
     proxy_port = 18100
     proxy_server = uvicorn.Server(uvicorn.Config(proxy.app, host="127.0.0.1", port=proxy_port, log_level="warning"))
     proxy_server_task = asyncio.create_task(proxy_server.serve())
-    logger.info(f"Started rendering proxy on port {proxy_port} → {rollout_client_config.base_url[0]}")
-
-    from copy import deepcopy
-
-    proxy_client_config = deepcopy(rollout_client_config)
-    proxy_client_config.base_url = [f"http://127.0.0.1:{proxy_port}/v1"]
+    logger.info(f"Started rendering proxy on port {proxy_port}")
 
     # Rollout clients go through proxy (standard chat format), admin clients talk to vLLM directly
     client_type = "openai_chat_completions"
-    inference_pool = StaticInferencePool(
-        clients=setup_clients(proxy_client_config, client_type=client_type),
-        admin_clients=setup_admin_clients(rollout_client_config),
-        skip_model_check=rollout_client_config.skip_model_check,
+    upstream_inference_pool = await setup_inference_pool(
+        rollout_client_config,
+        model_name=rollout_model_name,
+        client_type=client_type,
+    )
+    inference_pool = ProxiedInferencePool(
+        upstream_inference_pool=upstream_inference_pool,
+        proxy_base_url=f"http://127.0.0.1:{proxy_port}/v1",
+        client_type=client_type,
     )
 
     # Setup monitor
