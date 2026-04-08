@@ -54,6 +54,7 @@ class GenerateRequest(BaseModel):
     repetition_penalty: float = 1.0
     min_tokens: int = 0
     prompt_logprobs: bool = False
+    priority: int = 0
 
 
 class GenerateChoiceResponse(BaseModel):
@@ -112,16 +113,20 @@ class OpenAIServingGenerate:
         routed_experts_map: dict[int, dict] = {}
         final_output: RequestOutput | None = None
         data_parallel_rank = None
+        lora_request = None
         trace_headers = None
         if self.chat_handler is not None:
             data_parallel_rank = self.chat_handler._get_data_parallel_rank(raw_request)
             trace_headers = await self.chat_handler._get_trace_headers(raw_request.headers)
+            lora_request = self.chat_handler._maybe_get_adapters(request)
 
         generator = self.engine_client.generate(
             engine_prompt,
             sampling_params,
             request_id,
+            lora_request=lora_request,
             trace_headers=trace_headers,
+            priority=request.priority,
             data_parallel_rank=data_parallel_rank,
         )
 

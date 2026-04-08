@@ -7,6 +7,9 @@ from prime_rl.inference.vllm.serving_generate import GenerateRequest, OpenAIServ
 
 
 class _FakeChatHandler:
+    def __init__(self):
+        self.lora_request = object()
+
     def _get_data_parallel_rank(self, raw_request):
         assert raw_request.headers["X-data-parallel-rank"] == "3"
         return 3
@@ -14,6 +17,10 @@ class _FakeChatHandler:
     async def _get_trace_headers(self, headers):
         assert headers["traceparent"] == "trace"
         return {"traceparent": headers["traceparent"]}
+
+    def _maybe_get_adapters(self, request):
+        assert request.model == "test-model"
+        return self.lora_request
 
 
 class _FakeEngineClient:
@@ -65,6 +72,7 @@ def test_generate_returns_prompt_logprobs_and_forwards_request_metadata():
             prompt_token_ids=[10, 11, 12],
             max_tokens=1,
             prompt_logprobs=True,
+            priority=7,
         )
 
         response = await handler.generate(request, _FakeRawRequest())
@@ -77,6 +85,8 @@ def test_generate_returns_prompt_logprobs_and_forwards_request_metadata():
         call = engine_client.calls[0]
         assert call["engine_prompt"] == {"prompt_token_ids": [10, 11, 12]}
         assert call["sampling_params"].prompt_logprobs == 1
+        assert call["kwargs"]["lora_request"] is handler.chat_handler.lora_request
+        assert call["kwargs"]["priority"] == 7
         assert call["kwargs"]["data_parallel_rank"] == 3
         assert call["kwargs"]["trace_headers"] == {"traceparent": "trace"}
 
