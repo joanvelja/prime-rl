@@ -4,9 +4,10 @@ from collections.abc import AsyncGenerator, AsyncIterator
 import numpy as np
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, RequestResponseMetadata
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
