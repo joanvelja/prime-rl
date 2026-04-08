@@ -1,0 +1,22 @@
+max_steps = 5
+output_dir = "outputs/nemotron-sft-cp-test"
+clean_output_dir = true
+
+[deployment]
+num_gpus = 2
+
+[model]
+name = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+impl = "custom"
+attn = "flash_attention_2"
+cp = 2
+
+[model.debug]
+random_init = true
+num_layers = 4
+
+[data]
+type = "fake"
+batch_size = 1
+micro_batch_size = 1
+seq_len = 512
