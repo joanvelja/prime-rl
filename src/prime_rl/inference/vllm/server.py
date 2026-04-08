@@ -1,19 +1,16 @@
 from argparse import Namespace
-from http import HTTPStatus
 from typing import Any
 
 import uvloop
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import init_app_state
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.lora.protocol import LoadLoRAAdapterRequest
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
@@ -137,7 +134,6 @@ from prime_rl.inference.patches import (
     monkey_patch_tokenize_params_validation,
 )
 from prime_rl.inference.vllm.serving_chat_with_tokens import (
-    ChatCompletionRequestWithTokens,
     OpenAIServingChatWithTokens,
 )
 
@@ -173,10 +169,6 @@ WORKER_EXTENSION_CLS = {
     "nccl": "prime_rl.inference.vllm.worker.nccl.NCCLWeightUpdateWorker",
     "filesystem": "prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker",
 }
-
-
-def chat_with_tokens(request: Request) -> OpenAIServingChatWithTokens | None:
-    return request.app.state.openai_serving_chat_with_tokens
 
 
 def generate_handler(request: Request):
@@ -253,35 +245,6 @@ async def init_broadcaster(request: Request):
     return {"status": "ok"}
 
 
-@router.post(
-    "/v1/chat/completions/tokens",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def _chat_with_tokens(request: ChatCompletionRequestWithTokens, raw_request: Request):
-    handler = chat_with_tokens(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
-    try:
-        generator = await handler.create_chat_completion_with_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
 async def custom_init_app_state(
     engine_client: EngineClient,
     state: State,
@@ -291,7 +254,8 @@ async def custom_init_app_state(
     """
     Modifies init_app_state:
     1. Call the original init_app_state to set up standard state.
-    2. Replace the serving_chat with our OpenAIServingChatWithTokens wrapper.
+    2. Replace the serving_chat with our wrapper so chat responses can still
+       expose routed experts when requested.
     """
     await init_app_state(engine_client, state, args, supported_tasks)
 
@@ -300,14 +264,13 @@ async def custom_init_app_state(
         serving_chat = object.__new__(OpenAIServingChatWithTokens)
         serving_chat.__dict__.update(original_chat.__dict__)
         state.openai_serving_chat = serving_chat
-        state.openai_serving_chat_with_tokens = serving_chat
     else:
-        state.openai_serving_chat_with_tokens = None
+        serving_chat = None
 
     # /v1/generate endpoint — tokens + optional images, no chat template
     from prime_rl.inference.vllm.serving_generate import OpenAIServingGenerate
 
-    state.openai_serving_generate = OpenAIServingGenerate(engine_client)
+    state.openai_serving_generate = OpenAIServingGenerate(engine_client, chat_handler=serving_chat)
 
 
 import vllm.entrypoints.openai.api_server

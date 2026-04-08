@@ -128,7 +128,8 @@ class BaseModelConfig(BaseConfig):
         Field(
             description=(
                 "Renderer to use for chat template tokenization. "
-                "Options: 'auto' (detect from tokenizer), 'qwen3', 'qwen3.5', 'glm5', 'glm4.5', 'minimax-m2', 'default'."
+                "Options: 'auto' (detect from tokenizer), 'qwen3', 'qwen3_vl', "
+                "'qwen3.5', 'glm5', 'glm4.5', 'minimax-m2', 'default'."
             ),
         ),
     ] = "auto"

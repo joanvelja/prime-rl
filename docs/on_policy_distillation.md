@@ -71,7 +71,6 @@ Use this mode when you want to train from teacher-generated completions directly
 type = "sft"
 
 [orchestrator]
-use_token_client = false
 
 [orchestrator.teacher_rollout_model.client]
 base_url = ["https://your-openai-compatible-endpoint/v1"]

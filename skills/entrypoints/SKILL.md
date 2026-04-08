@@ -17,6 +17,16 @@ uv run rl @ examples/reverse_text/rl.toml @ examples/reverse_text/slurm_rl.toml 
 uv run rl @ examples/reverse_text/rl.toml --dry-run # generate scripts without running
 ```
 
+When running from a fresh worktree, include optional extras required by the config. For example, VLM color-codeword debugging needs FlashAttention and the env packages:
+
+```bash
+uv run --extra flash-attn --extra envs rl @ configs/multimodal/rl_color_codeword_test.toml
+```
+
+Short debug runs can write large filesystem weight-broadcast snapshots. If `/` is low on space, put the debug `--output-dir` on `/dev/shm` and clean it up afterward.
+
+For ad-hoc `CliAgentEnv`/`ComposableEnv` sandbox smoke tests that call back through Prime Tunnel using Python stdlib `urllib`, set an explicit non-default `User-Agent` header such as `curl/7.81.0`. The tunnel can reject Python's default `urllib` user agent from inside Prime sandboxes with HTTP 403 / code 1010. Prefer uploading an agent script into the sandbox and running `python3 /tmp/agent.py` over passing a heredoc directly as a `start_background_job` command.
+
 - **Config:** `RLConfig` (`src/prime_rl/configs/rl.py`)
 - **Entrypoint:** `src/prime_rl/entrypoints/rl.py`
 - **SLURM:** yes — single-node and multi-node
@@ -49,7 +59,7 @@ uv run inference --model.name Qwen/Qwen3-0.6B --model.enforce-eager
 Always use the `inference` entrypoint — never `vllm serve` directly.
 
 Custom endpoints beyond standard OpenAI API:
-- `/v1/chat/completions/tokens` — accepts token IDs as prompt input
+- `/v1/generate` — accepts token IDs as prompt input, with optional images
 - `/update_weights` — hot-reload model weights from the trainer
 - `/load_lora_adapter` — load LoRA adapters at runtime
 - `/init_broadcaster` — initialize weight broadcast for distributed training

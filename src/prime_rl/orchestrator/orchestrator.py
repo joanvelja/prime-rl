@@ -4,6 +4,7 @@ import gc
 import multiprocessing as mp
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 
 import tomli_w
 
@@ -156,7 +157,7 @@ async def orchestrate(config: OrchestratorConfig):
     proxy = RenderingProxy(renderer, vllm_base_url=rollout_client_config.base_url[0], processor=processor)
     proxy_port = 18100
     proxy_server = uvicorn.Server(uvicorn.Config(proxy.app, host="127.0.0.1", port=proxy_port, log_level="warning"))
-    asyncio.create_task(proxy_server.serve())
+    proxy_server_task = asyncio.create_task(proxy_server.serve())
     logger.info(f"Started rendering proxy on port {proxy_port} → {rollout_client_config.base_url[0]}")
 
     from copy import deepcopy
@@ -925,6 +926,15 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Stop inference pool
     await inference_pool.stop()
+
+    proxy_server.should_exit = True
+    try:
+        await asyncio.wait_for(proxy_server_task, timeout=5)
+    except TimeoutError:
+        proxy_server_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await proxy_server_task
+    await proxy.close()
 
     if teacher_inference_pool is not None:
         await teacher_inference_pool.stop()
