@@ -83,7 +83,7 @@ from prime_rl.utils.utils import (
 # still running after this many seconds, we force-exit the process so the run
 # pod terminates instead of sitting wedged forever. The training checkpoint
 # and artifacts are persisted *before* this point, so a forced exit is safe.
-SHUTDOWN_TIMEOUT_S = 60
+SHUTDOWN_TIMEOUT_S = 300
 
 
 @clean_exit
