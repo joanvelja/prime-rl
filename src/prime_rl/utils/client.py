@@ -164,11 +164,18 @@ def setup_admin_clients(client_config: ClientConfig) -> list[AsyncClient]:
         # Strip /v1 suffix since admin endpoints are at root level
         base_url = base_url.rstrip("/").removesuffix("/v1")
 
+        # Bounded timeouts on every phase. `read` is generous because LoRA loads
+        # and weight updates legitimately take a few minutes on large adapters,
+        # but it must NOT be `None` — an unresponsive inference server with an
+        # unbounded timeout will wedge the orchestrator forever (the gather over
+        # admin clients in `update_weights` / `load_lora_adapter` makes one
+        # stuck server stall the whole call). Tenacity-level retries on top of
+        # this turn a stuck server into a bounded retry loop instead of a hang.
         return AsyncClient(
             base_url=base_url,
             headers=headers,
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-            timeout=httpx.Timeout(None),
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0),
         )
 
     return [_setup_admin_client(base_url) for base_url in urls]
@@ -295,6 +302,12 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 404 (adapter not found) or 500 (server error during loading)
         return exception.response.status_code in (404, 500)
+    # Retry on any transport-level failure (connect/read/write/pool timeouts,
+    # connection resets, etc.). Without this, the bounded admin-client timeouts
+    # would just propagate as a hard failure on the first stuck server instead
+    # of giving it a few attempts to recover.
+    if isinstance(exception, (httpx.TimeoutException, httpx.TransportError)):
+        return True
     return False
 
 
