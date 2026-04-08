@@ -10,7 +10,7 @@ import httpx
 import verifiers as vf
 from httpx import AsyncClient
 from openai import NotFoundError
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, stop_after_delay, wait_exponential
 
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
@@ -303,17 +303,15 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     return False
 
 
-# Per-call read timeout for `/load_lora_adapter`. The admin AsyncClient is
-# configured with `timeout=None` (necessary for legitimately long-running
-# operations like NCCL weight broadcasts on the static-pool path), but a LoRA
-# load is bounded — adapter weights are tiny relative to the base model and
-# the server-side handler completes in seconds to low minutes. Without a
-# bound here, an unresponsive inference server wedges the orchestrator
-# forever inside `ElasticInferencePool._sync_server_adapter`, which is what
-# this fix exists to prevent. 300s gives slow NFS / large adapters plenty of
-# headroom; tenacity (above) retries on any transport-level failure so a
-# transient stall recovers automatically.
-LORA_LOAD_READ_TIMEOUT_S = 300.0
+# Per-attempt and total bounds for `/load_lora_adapter`. A LoRA load is fast
+# (small adapter file + KV cache reset, single-digit seconds in practice) but
+# the global admin AsyncClient uses `timeout=None`, so a stuck server hangs
+# the orchestrator forever inside `ElasticInferencePool._sync_server_adapter`.
+# `_PER_ATTEMPT` converts a hang into a TimeoutException so tenacity retries;
+# `_TOTAL` is the wall-clock budget across all retries — pick whichever
+# stop condition fires first.
+LORA_LOAD_READ_TIMEOUT_S = 30.0
+LORA_LOAD_TOTAL_TIMEOUT_S = 120.0
 
 
 async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_path: Path) -> None:
@@ -330,8 +328,8 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
 
     @retry(
         retry=retry_if_exception(_is_retryable_lora_error),
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_delay(LORA_LOAD_TOTAL_TIMEOUT_S) | stop_after_attempt(10),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
     async def _load_lora_adapter(admin_client: AsyncClient) -> None:
