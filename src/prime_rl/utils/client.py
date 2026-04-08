@@ -399,9 +399,7 @@ async def init_nccl_broadcast(
     # waits up to `timeout` seconds for all ranks to arrive) by a comfortable
     # margin. Without this, the default 300s admin-client read timeout would
     # abort a perfectly healthy NCCL init for any timeout > 300s.
-    init_broadcaster_timeout = httpx.Timeout(
-        connect=10.0, read=float(timeout) + 300.0, write=60.0, pool=10.0
-    )
+    init_broadcaster_timeout = httpx.Timeout(connect=10.0, read=float(timeout) + 300.0, write=60.0, pool=10.0)
 
     async def _init_nccl_broadcast(admin_client: AsyncClient, rank_offset: int) -> None:
         try:
