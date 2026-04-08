@@ -89,9 +89,6 @@ mamba = [
 ]
 all = [
     "prime-rl[flash-attn]",
-    "prime-rl[flash-attn-3]",
-    "prime-rl[flash-attn-cute]",
-    "prime-rl[mamba]",
     "prime-rl[disagg]",
     "prime-rl[quack]",
 ]
