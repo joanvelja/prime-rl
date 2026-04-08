@@ -26,7 +26,7 @@ class UsageReporter:
         self._api_key = os.environ.get("PI_USAGE_API_KEY")
         self._base_url = os.environ.get("PI_USAGE_BASE_URL", "").rstrip("/")
         self._runner = BackgroundAsync(client_timeout=30.0)
-        self.logger.info("Usage reporter initialized (base_url=%s)", self._base_url)
+        self.logger.debug(f"Usage reporter initialized (base_url={self._base_url})")
 
     def report_training_usage(self, run_id: str, step: int, tokens: int) -> None:
         url = f"{self._base_url}/usage"
