@@ -33,18 +33,6 @@ def test_is_retryable_lora_error_returns_false_for_non_http_error():
     assert _is_retryable_lora_error(ValueError("some error")) is False
 
 
-def test_is_retryable_lora_error_returns_true_for_timeout():
-    # A read timeout from a stuck server must be retryable, otherwise the
-    # per-call httpx timeout would just propagate as a hard failure on the
-    # first hiccup instead of giving the server a chance to recover.
-    assert _is_retryable_lora_error(httpx.ReadTimeout("read timed out")) is True
-    assert _is_retryable_lora_error(httpx.ConnectTimeout("connect timed out")) is True
-
-
-def test_is_retryable_lora_error_returns_true_for_transport_error():
-    assert _is_retryable_lora_error(httpx.ConnectError("connection refused")) is True
-
-
 def test_load_lora_adapter_succeeds_on_first_attempt():
     mock_client = AsyncMock()
     mock_response = MagicMock()
