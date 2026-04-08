@@ -89,9 +89,7 @@ def _fwd_kernel_ep_scatter_2_int64(
                 )
 
                 output_tensor_ptr = output_tensor + dest_token_index_i64 * output_tensor_stride0
-                output_tensor_scale_ptr = (
-                    output_tensor_scale + dest_token_index * output_tensor_scale_stride0
-                )
+                output_tensor_scale_ptr = output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
                 tl.store(output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s)
 
