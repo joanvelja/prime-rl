@@ -927,6 +927,11 @@ async def orchestrate(config: OrchestratorConfig):
         )
         os._exit(0)
 
+    # asyncio.wait swallows task exceptions; re-raise so a fast cleanup
+    # failure surfaces the same way as it did when each step was awaited
+    # directly.
+    await shutdown_task
+
     logger.success("Orchestrator finished.")
 
     # Optionally, print benchmark table
