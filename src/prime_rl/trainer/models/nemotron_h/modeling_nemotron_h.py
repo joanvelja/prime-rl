@@ -9,6 +9,7 @@ Hybrid Mamba-Transformer-MoE architecture with three distinct layer types:
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 from torch import Tensor, nn
 from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
@@ -28,6 +29,7 @@ from prime_rl.trainer.models.nemotron_h.converting_nemotron_h import (
     convert_prime_layer_to_hf,
     convert_prime_to_hf,
 )
+from prime_rl.utils.cp import gather_for_cp, shard_for_cp
 
 logger = logging.get_logger(__name__)
 
@@ -113,7 +115,12 @@ def _ensure_zamba2_compat(config: NemotronHConfig):
 
 
 class NemotronHMambaLayer(GradientCheckpointingLayer):
-    """Mamba-2 SSM layer: norm -> NemotronHMamba2Mixer -> residual."""
+    """Mamba-2 SSM layer: norm -> NemotronHMamba2Mixer -> residual.
+
+    With context parallelism, gathers the full sequence before the Mamba kernel
+    (which has sequential dependencies via SSM recurrence and causal conv1d)
+    and shards back after.
+    """
 
     def __init__(self, config: NemotronHConfig, layer_idx: int):
         super().__init__()
@@ -122,6 +129,15 @@ class NemotronHMambaLayer(GradientCheckpointingLayer):
         self.norm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.layer_norm_epsilon))
         self.mamba = NemotronHMamba2Mixer(config, layer_idx=layer_idx)
         self.mlp = None  # No MoE in this layer type
+
+    def set_context_parallel_attributes(self, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
+        self._cp_group = cp_group
+        self._cp_rank = cp_rank
+        self._cp_world_size = cp_world_size
+
+    @property
+    def cp_enabled(self) -> bool:
+        return hasattr(self, "_cp_group")
 
     def forward(
         self,
@@ -132,7 +148,11 @@ class NemotronHMambaLayer(GradientCheckpointingLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
+        if self.cp_enabled:
+            hidden_states = gather_for_cp(hidden_states, self._cp_group)
         hidden_states = self.mamba(hidden_states)
+        if self.cp_enabled:
+            hidden_states = shard_for_cp(hidden_states, self._cp_rank, self._cp_world_size)
         return residual + hidden_states
 
 
