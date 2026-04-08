@@ -164,9 +164,17 @@ async def orchestrate(config: OrchestratorConfig):
     # Read run_id AFTER setup_monitor so that newly registered runs are captured
     run_id = os.getenv("RUN_ID", "")
 
-    if os.environ.get("PI_USAGE_BASE_URL"):
+    # Usage reporter requires BOTH the base URL and the API key. Activating
+    # with only one set used to crash every POST inside httpx (None header
+    # value), so we now gate construction on both being present and log a
+    # clear warning when half-configured.
+    usage_base_url = os.environ.get("PI_USAGE_BASE_URL")
+    usage_api_key = os.environ.get("PI_USAGE_API_KEY")
+    if usage_base_url and usage_api_key:
         usage_reporter = UsageReporter()
     else:
+        if usage_base_url and not usage_api_key:
+            logger.warning("PI_USAGE_BASE_URL is set but PI_USAGE_API_KEY is missing; usage reporting disabled.")
         usage_reporter = None
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)

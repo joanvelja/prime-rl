@@ -23,8 +23,18 @@ class UsageReporter:
 
     def __init__(self) -> None:
         self.logger = get_logger()
-        self._api_key = os.environ.get("PI_USAGE_API_KEY")
-        self._base_url = os.environ.get("PI_USAGE_BASE_URL", "").rstrip("/")
+        api_key = os.environ.get("PI_USAGE_API_KEY")
+        base_url = os.environ.get("PI_USAGE_BASE_URL", "").rstrip("/")
+        # Both must be set. The orchestrator already gates on this, but
+        # validate here too so any future caller fails fast at construction
+        # rather than crashing inside httpx (which rejects None header
+        # values with an obscure .encode() error on every retry).
+        if not api_key or not base_url:
+            raise ValueError(
+                "UsageReporter requires PI_USAGE_BASE_URL and PI_USAGE_API_KEY to be set in the environment."
+            )
+        self._api_key = api_key
+        self._base_url = base_url
         self._runner = BackgroundAsync(client_timeout=30.0)
         self.logger.debug(f"Usage reporter initialized (base_url={self._base_url})")
 
