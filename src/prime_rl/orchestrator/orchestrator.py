@@ -31,7 +31,10 @@ monkey_patch_chat_completion_logprobs()
 # Import environment before any other imports
 
 import pandas as pd
+import uvicorn
 import verifiers as vf
+from renderers.base import create_renderer
+from renderers.proxy import RenderingProxy
 from transformers import AutoProcessor, AutoTokenizer
 
 from prime_rl.configs.orchestrator import BufferConfig, OrchestratorConfig
@@ -141,38 +144,13 @@ async def orchestrate(config: OrchestratorConfig):
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
 
-    # Create renderer and start rendering proxy.
-    # The proxy sits between verifiers and vLLM: verifiers sends standard chat
-    # messages → proxy renders to tokens via Renderer → forwards to vLLM /v1/generate.
-    from renderers.base import create_renderer as _create_renderer
-
-    renderer = _create_renderer(tokenizer, renderer=config.model.renderer)
-    logger.info(f"Initialized {type(renderer).__name__} for {config.model.name}")
-
-    import uvicorn
-    from renderers.proxy import RenderingProxy
-
-    proxy = RenderingProxy(
-        renderer,
-        vllm_base_url=rollout_client_config.base_url[0] if rollout_client_config.base_url else None,
+    renderer, inference_pool, proxy, proxy_server, proxy_server_task = await setup_rollout_inference_pool(
+        config=config,
+        rollout_client_config=rollout_client_config,
+        rollout_model_name=rollout_model_name,
+        tokenizer=tokenizer,
         processor=processor,
-    )
-    proxy_port = 18100
-    proxy_server = uvicorn.Server(uvicorn.Config(proxy.app, host="127.0.0.1", port=proxy_port, log_level="warning"))
-    proxy_server_task = asyncio.create_task(proxy_server.serve())
-    logger.info(f"Started rendering proxy on port {proxy_port}")
-
-    # Rollout clients go through proxy (standard chat format), admin clients talk to vLLM directly
-    client_type = "openai_chat_completions"
-    upstream_inference_pool = await setup_inference_pool(
-        rollout_client_config,
-        model_name=rollout_model_name,
-        client_type=client_type,
-    )
-    inference_pool = ProxiedInferencePool(
-        upstream_inference_pool=upstream_inference_pool,
-        proxy_base_url=f"http://127.0.0.1:{proxy_port}/v1",
-        client_type=client_type,
+        logger=logger,
     )
 
     # Setup monitor
@@ -929,14 +907,15 @@ async def orchestrate(config: OrchestratorConfig):
     # Stop inference pool
     await inference_pool.stop()
 
-    proxy_server.should_exit = True
-    try:
-        await asyncio.wait_for(proxy_server_task, timeout=5)
-    except TimeoutError:
-        proxy_server_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await proxy_server_task
-    await proxy.close()
+    if proxy_server is not None and proxy_server_task is not None and proxy is not None:
+        proxy_server.should_exit = True
+        try:
+            await asyncio.wait_for(proxy_server_task, timeout=5)
+        except TimeoutError:
+            proxy_server_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await proxy_server_task
+        await proxy.close()
 
     if teacher_inference_pool is not None:
         await teacher_inference_pool.stop()
@@ -959,6 +938,52 @@ def main():
     """Main entry-point for orchestrator. Run using `uv run orchestrator`"""
     set_proc_title("Orchestrator")
     asyncio.run(orchestrate(cli(OrchestratorConfig)))
+
+
+async def setup_rollout_inference_pool(
+    *,
+    config: OrchestratorConfig,
+    rollout_client_config,
+    rollout_model_name: str,
+    tokenizer,
+    processor,
+    logger,
+):
+    """Set up rollout inference for either local renderer/vLLM or external hard distillation."""
+    client_type = "openai_chat_completions"
+    if config.teacher_rollout_model is not None:
+        logger.info("Using external rollout model without renderer proxy")
+        inference_pool = await setup_inference_pool(
+            rollout_client_config,
+            model_name=rollout_model_name,
+            client_type=client_type,
+        )
+        return None, inference_pool, None, None, None
+
+    renderer = create_renderer(tokenizer, renderer=config.model.renderer)
+    logger.info(f"Initialized {type(renderer).__name__} for {config.model.name}")
+
+    proxy = RenderingProxy(
+        renderer,
+        vllm_base_url=rollout_client_config.base_url[0] if rollout_client_config.base_url else None,
+        processor=processor,
+    )
+    proxy_port = 18100
+    proxy_server = uvicorn.Server(uvicorn.Config(proxy.app, host="127.0.0.1", port=proxy_port, log_level="warning"))
+    proxy_server_task = asyncio.create_task(proxy_server.serve())
+    logger.info(f"Started rendering proxy on port {proxy_port}")
+
+    upstream_inference_pool = await setup_inference_pool(
+        rollout_client_config,
+        model_name=rollout_model_name,
+        client_type=client_type,
+    )
+    inference_pool = ProxiedInferencePool(
+        upstream_inference_pool=upstream_inference_pool,
+        proxy_base_url=f"http://127.0.0.1:{proxy_port}/v1",
+        client_type=client_type,
+    )
+    return renderer, inference_pool, proxy, proxy_server, proxy_server_task
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ uv run --extra flash-attn --extra envs rl @ configs/multimodal/rl_color_codeword
 
 Short debug runs can write large filesystem weight-broadcast snapshots. If `/` is low on space, put the debug `--output-dir` on `/dev/shm` and clean it up afterward.
 
+For hard-distillation with `orchestrator.teacher_rollout_model`, omit `[inference]`. That mode talks directly to the external OpenAI-compatible rollout endpoint and reconstructs training tokens from messages; it does not use the local renderer proxy or `/v1/generate`.
+
+For LoRA RL smoke runs against local vLLM, set `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` in the environment or adapter load/update requests will fail.
+
 For ad-hoc `CliAgentEnv`/`ComposableEnv` sandbox smoke tests that call back through Prime Tunnel using Python stdlib `urllib`, set an explicit non-default `User-Agent` header such as `curl/7.81.0`. The tunnel can reject Python's default `urllib` user agent from inside Prime sandboxes with HTTP 403 / code 1010. Prefer uploading an agent script into the sandbox and running `python3 /tmp/agent.py` over passing a heredoc directly as a `start_background_job` command.
 
 - **Config:** `RLConfig` (`src/prime_rl/configs/rl.py`)
