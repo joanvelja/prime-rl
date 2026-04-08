@@ -164,18 +164,11 @@ def setup_admin_clients(client_config: ClientConfig) -> list[AsyncClient]:
         # Strip /v1 suffix since admin endpoints are at root level
         base_url = base_url.rstrip("/").removesuffix("/v1")
 
-        # Bounded timeouts on every phase. `read` is generous because LoRA loads
-        # and weight updates legitimately take a few minutes on large adapters,
-        # but it must NOT be `None` — an unresponsive inference server with an
-        # unbounded timeout will wedge the orchestrator forever (the gather over
-        # admin clients in `update_weights` / `load_lora_adapter` makes one
-        # stuck server stall the whole call). Tenacity-level retries on top of
-        # this turn a stuck server into a bounded retry loop instead of a hang.
         return AsyncClient(
             base_url=base_url,
             headers=headers,
             limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-            timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0),
+            timeout=httpx.Timeout(None),
         )
 
     return [_setup_admin_client(base_url) for base_url in urls]
@@ -228,15 +221,6 @@ async def check_health(
 
 NCCL_READY_MARKER = "NCCL_READY"
 
-# Per-call read-timeout override for the two admin endpoints whose server-side
-# work runs an NCCL collective (`/init_broadcaster` does the rendezvous,
-# `/update_weights` does the broadcast). Both can legitimately take many
-# minutes; sized to comfortably exceed the default
-# `NCCLWeightBroadcastConfig.timeout` (1200s) plus headroom. The default
-# admin-client timeout (300s) is intentionally tighter so health checks,
-# model checks and LoRA loads still detect a stuck server quickly.
-NCCL_OP_READ_TIMEOUT_S = 1500.0
-
 
 async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
     """Pause all inference engines, waiting for in-flight requests to drain."""
@@ -287,11 +271,7 @@ async def update_weights(
     else:
 
         async def _update_weights(admin_client: AsyncClient, weight_dir: str | None) -> None:
-            response = await admin_client.post(
-                "/update_weights",
-                json={"weight_dir": weight_dir},
-                timeout=httpx.Timeout(connect=10.0, read=NCCL_OP_READ_TIMEOUT_S, write=60.0, pool=10.0),
-            )
+            response = await admin_client.post("/update_weights", json={"weight_dir": weight_dir})
             response.raise_for_status()
 
         # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
@@ -315,13 +295,25 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 404 (adapter not found) or 500 (server error during loading)
         return exception.response.status_code in (404, 500)
-    # Retry on any transport-level failure (connect/read/write/pool timeouts,
-    # connection resets, etc.). Without this, the bounded admin-client timeouts
-    # would just propagate as a hard failure on the first stuck server instead
-    # of giving it a few attempts to recover.
+    # Retry on transport-level failures (timeouts, connection resets, etc.) so
+    # the per-call read timeout below turns a stuck server into a bounded retry
+    # loop instead of propagating as a hard failure on the first hiccup.
     if isinstance(exception, (httpx.TimeoutException, httpx.TransportError)):
         return True
     return False
+
+
+# Per-call read timeout for `/load_lora_adapter`. The admin AsyncClient is
+# configured with `timeout=None` (necessary for legitimately long-running
+# operations like NCCL weight broadcasts on the static-pool path), but a LoRA
+# load is bounded — adapter weights are tiny relative to the base model and
+# the server-side handler completes in seconds to low minutes. Without a
+# bound here, an unresponsive inference server wedges the orchestrator
+# forever inside `ElasticInferencePool._sync_server_adapter`, which is what
+# this fix exists to prevent. 300s gives slow NFS / large adapters plenty of
+# headroom; tenacity (above) retries on any transport-level failure so a
+# transient stall recovers automatically.
+LORA_LOAD_READ_TIMEOUT_S = 300.0
 
 
 async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_path: Path) -> None:
@@ -347,6 +339,7 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
         response = await admin_client.post(
             "/load_lora_adapter",
             json={"lora_name": lora_name, "lora_path": lora_path_posix},
+            timeout=httpx.Timeout(connect=10.0, read=LORA_LOAD_READ_TIMEOUT_S, write=60.0, pool=10.0),
         )
         response.raise_for_status()
 
@@ -395,12 +388,6 @@ async def init_nccl_broadcast(
         f"inference_world_size={inference_world_size}, gpus_per_server={gpus_per_server}"
     )
 
-    # Allow the HTTP call to outlive the server-side rendezvous (which itself
-    # waits up to `timeout` seconds for all ranks to arrive) by a comfortable
-    # margin. Without this, the default 300s admin-client read timeout would
-    # abort a perfectly healthy NCCL init for any timeout > 300s.
-    init_broadcaster_timeout = httpx.Timeout(connect=10.0, read=float(timeout) + 300.0, write=60.0, pool=10.0)
-
     async def _init_nccl_broadcast(admin_client: AsyncClient, rank_offset: int) -> None:
         try:
             response = await admin_client.post(
@@ -414,7 +401,6 @@ async def init_nccl_broadcast(
                     "timeout": timeout,
                     "quantize_in_weight_transfer": quantize_in_weight_transfer,
                 },
-                timeout=init_broadcaster_timeout,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
