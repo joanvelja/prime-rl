@@ -228,6 +228,15 @@ async def check_health(
 
 NCCL_READY_MARKER = "NCCL_READY"
 
+# Per-call read-timeout override for the two admin endpoints whose server-side
+# work runs an NCCL collective (`/init_broadcaster` does the rendezvous,
+# `/update_weights` does the broadcast). Both can legitimately take many
+# minutes; sized to comfortably exceed the default
+# `NCCLWeightBroadcastConfig.timeout` (1200s) plus headroom. The default
+# admin-client timeout (300s) is intentionally tighter so health checks,
+# model checks and LoRA loads still detect a stuck server quickly.
+NCCL_OP_READ_TIMEOUT_S = 1500.0
+
 
 async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
     """Pause all inference engines, waiting for in-flight requests to drain."""
@@ -278,7 +287,11 @@ async def update_weights(
     else:
 
         async def _update_weights(admin_client: AsyncClient, weight_dir: str | None) -> None:
-            response = await admin_client.post("/update_weights", json={"weight_dir": weight_dir})
+            response = await admin_client.post(
+                "/update_weights",
+                json={"weight_dir": weight_dir},
+                timeout=httpx.Timeout(connect=10.0, read=NCCL_OP_READ_TIMEOUT_S, write=60.0, pool=10.0),
+            )
             response.raise_for_status()
 
         # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
@@ -382,6 +395,14 @@ async def init_nccl_broadcast(
         f"inference_world_size={inference_world_size}, gpus_per_server={gpus_per_server}"
     )
 
+    # Allow the HTTP call to outlive the server-side rendezvous (which itself
+    # waits up to `timeout` seconds for all ranks to arrive) by a comfortable
+    # margin. Without this, the default 300s admin-client read timeout would
+    # abort a perfectly healthy NCCL init for any timeout > 300s.
+    init_broadcaster_timeout = httpx.Timeout(
+        connect=10.0, read=float(timeout) + 300.0, write=60.0, pool=10.0
+    )
+
     async def _init_nccl_broadcast(admin_client: AsyncClient, rank_offset: int) -> None:
         try:
             response = await admin_client.post(
@@ -395,6 +416,7 @@ async def init_nccl_broadcast(
                     "timeout": timeout,
                     "quantize_in_weight_transfer": quantize_in_weight_transfer,
                 },
+                timeout=init_broadcaster_timeout,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
