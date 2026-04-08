@@ -84,16 +84,19 @@ disagg = [
 quack = [
     "quack-kernels>=0.3.3",
 ]
+mamba = [
+    "mamba-ssm>=2.3.0",
+]
 all = [
     "prime-rl[flash-attn]",
+    "prime-rl[flash-attn-3]",
+    "prime-rl[flash-attn-cute]",
+    "prime-rl[mamba]",
     "prime-rl[disagg]",
     "prime-rl[quack]",
 ]
 
 [dependency-groups]
-mamba-ssm = [
-    "mamba-ssm>=2.3.0",
-]
 dev = [
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",
