@@ -604,13 +604,13 @@ async def orchestrate(config: OrchestratorConfig):
         rollout_samples_per_rollout: list[int] = []
         num_prefill_tokens = 0
         num_decode_tokens = 0
-        for rollout, advantage, samples in zip(train_rollouts, advantages, results):
+        for rollout, samples in zip(train_rollouts, results):
             rollout_prefill_tokens = 0
             rollout_decode_tokens = 0
             if samples is not None:
                 rollout_samples_per_rollout.append(len(samples))
                 for sample in samples:
-                    sample.advantage = advantage
+                    sample.advantage = rollout["advantage"]
                     sample.reward = rollout["reward"]
                     sample_decode_tokens = sum(sample.completion_mask)
                     sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
@@ -835,7 +835,7 @@ async def orchestrate(config: OrchestratorConfig):
         monitor.log_distributions(
             distributions={
                 "rewards": rewards,
-                "advantages": advantages,
+                "advantages": [r["advantage"] for r in train_rollouts],
             },
             step=progress.step,
         )
