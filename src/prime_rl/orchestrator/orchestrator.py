@@ -110,14 +110,17 @@ async def orchestrate(config: OrchestratorConfig):
     # Setup rollout inference pool (handles both static and elastic modes)
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
-    client_type = "openai_chat_completions_token" if config.use_token_client else "openai_chat_completions"
+    train_client_type = "openai_chat_completions_token" if config.use_token_client else "openai_chat_completions"
     if config.use_token_client:
         logger.warning(
             "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
             "history and the chat template has the extension property."
         )
     inference_pool = await setup_inference_pool(
-        rollout_client_config, model_name=rollout_model_name, client_type=client_type
+        rollout_client_config,
+        model_name=rollout_model_name,
+        train_client_type=train_client_type,
+        eval_client_type="openai_chat_completions",
     )
 
     # Setup teacher inference pool if configured
@@ -378,7 +381,7 @@ async def orchestrate(config: OrchestratorConfig):
                 *[
                     eval_env.evaluate(
                         model_name=scheduler.model_name,
-                        get_client=inference_pool.get_next_client,
+                        get_client=inference_pool.get_eval_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
@@ -703,7 +706,7 @@ async def orchestrate(config: OrchestratorConfig):
             *[
                 eval_env.evaluate(
                     model_name=scheduler.model_name,
-                    get_client=inference_pool.get_next_client,
+                    get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
