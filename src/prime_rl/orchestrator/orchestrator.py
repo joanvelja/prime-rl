@@ -548,33 +548,22 @@ async def orchestrate(config: OrchestratorConfig):
                     f"VLM offloaded {num_offloaded} unique images to disk in {time.perf_counter() - offload_start:.2f}s"
                 )
 
-        # Apply rollout filters (zeros reward/mask for degenerate generations)
-        filter_metrics = apply_filters(rollout_filters, train_rollouts)
-
-        # Compute advantages
+        # Compute advantages (in-place)
         example_ids = [r["example_id"] for r in train_rollouts]
         num_rollouts = len(train_rollouts)
         num_unique_examples = len(set(example_ids))
         rewards = [r["reward"] for r in train_rollouts]
         completion_lens = [get_completion_len(r) for r in train_rollouts]
-        advantages = compute_advantages(
+        compute_advantages(
+            train_rollouts,
             rewards,
             completion_lens,
             config.rollouts_per_example,
             config.advantage,
         )
 
-        # Store advantages on rollouts for filtering
-        for rollout, advantage in zip(train_rollouts, advantages):
-            rollout["advantage"] = advantage
-
-        # Apply zero advantage filter if configured
-        if config.filter_zero_advantages:
-            from prime_rl.orchestrator.filters import ZeroAdvantageFilter
-
-            zero_advantage_filter = ZeroAdvantageFilter(name="zero_advantage", enforce=True)
-            zero_advantage_metrics = apply_filters([zero_advantage_filter], train_rollouts)
-            filter_metrics.update(zero_advantage_metrics)
+        # Apply rollout filters (zeros reward/mask for degenerate generations)
+        filter_metrics = apply_filters(rollout_filters, train_rollouts)
 
         # Convert rollouts to training samples
         parallel_preprocess_start = time.perf_counter()

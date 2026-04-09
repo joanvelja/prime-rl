@@ -129,6 +129,11 @@ def setup_filter(config: FilterConfig, vocab_size: int) -> RolloutFilter:
             logprob_threshold=math.log(config.prob_threshold),
             enforce=config.enforce,
         )
+    elif config.type == "zero_advantage":
+        return ZeroAdvantageFilter(
+            name="zero_advantage",
+            enforce=config.enforce,
+        )
     raise ValueError(f"Unknown filter type: {config.type}")
 
 
