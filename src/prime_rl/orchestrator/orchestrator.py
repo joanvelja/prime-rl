@@ -739,8 +739,6 @@ async def orchestrate(config: OrchestratorConfig):
         train_envs.shutdown()
         if eval_envs is not None:
             eval_envs.shutdown()
-        if usage_reporter:
-            usage_reporter.close()
 
     shutdown_task = asyncio.create_task(_graceful_shutdown())
     _, pending = await asyncio.wait({shutdown_task}, timeout=SHUTDOWN_TIMEOUT_S)
@@ -756,6 +754,9 @@ async def orchestrate(config: OrchestratorConfig):
     # failure surfaces the same way as it did when each step was awaited
     # directly.
     await shutdown_task
+
+    if usage_reporter:
+        usage_reporter.close()
 
     logger.success("Orchestrator finished.")
 
