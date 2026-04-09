@@ -230,7 +230,9 @@ def _patch_lora_key_prefix():
     The trainer's broadcast saves LoRA weights without the base_model.model.
     prefix that vLLM 0.19's check_unexpected_modules() expects. This patch
     rewrites the safetensors file in-place to add the prefix before vLLM loads it.
+    Uses a file lock to prevent race conditions between concurrent workers.
     """
+    import fcntl
     from pathlib import Path
 
     from safetensors.torch import load_file, save_file
@@ -240,21 +242,28 @@ def _patch_lora_key_prefix():
 
     @classmethod
     def _patched_from_local_checkpoint(cls, lora_dir, *args, **kwargs):
-        # Check if the safetensors file needs key prefix normalization
         st_path = Path(lora_dir) / "adapter_model.safetensors"
+        lock_path = Path(lora_dir) / ".lora_key_fix.lock"
         if st_path.exists():
-            tensors = load_file(str(st_path))
-            needs_fix = any(("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors)
-            if needs_fix:
-                fixed = {
-                    (
-                        f"base_model.model.{k}"
-                        if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
-                        else k
-                    ): v
-                    for k, v in tensors.items()
-                }
-                save_file(fixed, str(st_path))
+            with open(lock_path, "w") as lock_fd:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    tensors = load_file(str(st_path))
+                    needs_fix = any(
+                        ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors
+                    )
+                    if needs_fix:
+                        fixed = {
+                            (
+                                f"base_model.model.{k}"
+                                if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
+                                else k
+                            ): v
+                            for k, v in tensors.items()
+                        }
+                        save_file(fixed, str(st_path))
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
         return _original_from_local_checkpoint.__func__(cls, lora_dir, *args, **kwargs)
 
