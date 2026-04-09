@@ -244,13 +244,14 @@ def _patch_lora_key_prefix():
         st_path = Path(lora_dir) / "adapter_model.safetensors"
         if st_path.exists():
             tensors = load_file(str(st_path))
-            needs_fix = any(
-                ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
-                for k in tensors
-            )
+            needs_fix = any(("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors)
             if needs_fix:
                 fixed = {
-                    (f"base_model.model.{k}" if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") else k): v
+                    (
+                        f"base_model.model.{k}"
+                        if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
+                        else k
+                    ): v
                     for k, v in tensors.items()
                 }
                 save_file(fixed, str(st_path))
