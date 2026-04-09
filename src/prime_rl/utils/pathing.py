@@ -159,7 +159,7 @@ def clean_future_steps(output_dir: Path, resume_step: int) -> None:
     ]
 
     for directory in dirs:
-        steps_to_delete = [step for step in get_all_ckpt_steps(directory) if step >= resume_step]
+        steps_to_delete = [step for step in get_all_ckpt_steps(directory) if step > resume_step]
         if not steps_to_delete:
             continue
         get_logger().info(
