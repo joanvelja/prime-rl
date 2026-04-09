@@ -465,6 +465,12 @@ async def setup_inference_pool(
     """Create an inference pool from config."""
     logger = get_logger()
 
+    if train_client_type == "openai_chat_completions_token":
+        logger.warning(
+            "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
+            "history and the chat template has the extension property."
+        )
+
     if client_config.is_elastic:
         logger.info(
             f"Initializing elastic inference pool (hostname={client_config.elastic.hostname}, "

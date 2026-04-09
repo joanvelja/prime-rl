@@ -111,11 +111,6 @@ async def orchestrate(config: OrchestratorConfig):
     rollout_client_config, rollout_model_name, enable_policy_updates = setup_external_rollout_model(config, logger)
 
     train_client_type = "openai_chat_completions_token" if config.use_token_client else "openai_chat_completions"
-    if config.use_token_client:
-        logger.warning(
-            "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
-            "history and the chat template has the extension property."
-        )
     inference_pool = await setup_inference_pool(
         rollout_client_config,
         model_name=rollout_model_name,
