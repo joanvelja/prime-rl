@@ -180,6 +180,21 @@ class EvalSamplingConfig(BaseConfig):
         ),
     ] = 1.0
 
+    top_k: Annotated[
+        int,
+        Field(
+            description="Number of top tokens to consider. If -1, all tokens are considered.",
+        ),
+    ] = -1
+
+    min_p: Annotated[
+        float,
+        Field(
+            ge=0,
+            description="Minimum probability for a token to be considered, relative to the probability of the most likely token. If 0, all tokens are considered.",
+        ),
+    ] = 0.0
+
     max_completion_tokens: Annotated[
         int | None,
         Field(
@@ -233,6 +248,10 @@ class EvalSamplingConfig(BaseConfig):
             args["seed"] = self.seed
 
         extra_body = dict(self.extra_body)
+        if self.top_k != -1:
+            extra_body["top_k"] = self.top_k
+        if self.min_p != 0.0:
+            extra_body["min_p"] = self.min_p
         if self.min_tokens > 0:
             extra_body["min_tokens"] = self.min_tokens
         if self.repetition_penalty != 1.0:
