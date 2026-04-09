@@ -7,7 +7,6 @@ import verifiers as vf
 
 from prime_rl.orchestrator.scheduler import InflightRolloutInfo, Scheduler
 from prime_rl.utils.async_utils import safe_cancel
-from prime_rl.utils.client import RENDERER_UPSTREAM_BASE_URL_HEADER
 
 
 def make_scheduler() -> Scheduler:
@@ -164,20 +163,14 @@ def test_stop_cancels_inflight_policy_update_task():
     asyncio.run(run())
 
 
-def test_client_identity_distinguishes_renderer_upstreams():
+def test_client_identity_distinguishes_base_url_and_dp_rank():
     client_a = vf.ClientConfig(
-        api_base_url="http://127.0.0.1:18100/v1",
-        extra_headers={
-            "X-data-parallel-rank": "0",
-            RENDERER_UPSTREAM_BASE_URL_HEADER: "http://worker-a:8000/v1",
-        },
+        api_base_url="http://worker-a:8000/v1",
+        extra_headers={"X-data-parallel-rank": "0"},
     )
     client_b = vf.ClientConfig(
-        api_base_url="http://127.0.0.1:18100/v1",
-        extra_headers={
-            "X-data-parallel-rank": "0",
-            RENDERER_UPSTREAM_BASE_URL_HEADER: "http://worker-b:8000/v1",
-        },
+        api_base_url="http://worker-a:8000/v1",
+        extra_headers={"X-data-parallel-rank": "1"},
     )
 
     assert Scheduler._client_identity(client_a) != Scheduler._client_identity(client_b)

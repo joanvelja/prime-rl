@@ -36,8 +36,8 @@ class _RoutedExpertsCapture:
                 choice.routed_experts = self.routed_experts[choice.index]
 
 
-class OpenAIServingChatWithTokens(OpenAIServingChat):
-    """OpenAI-compatible generate API that allows token-in and routed experts capture."""
+class OpenAIServingChatWithRoutedExperts(OpenAIServingChat):
+    """OpenAI chat serving wrapper that preserves routed expert metadata."""
 
     async def chat_completion_full_generator(
         self,
@@ -50,12 +50,6 @@ class OpenAIServingChatWithTokens(OpenAIServingChat):
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
-        # We need to override the full_generator to be able to capture the routed experts
-        # By default, VLLM does not save the routed experts into ChatCompletionResponse.choices, so we need to capture them manually
-        # How this works:
-        # 1. We create a custom generator that encapsulates the original result_generator in self._generator
-        # 2. We override it's __aiter__ method to also capture the routed experts as an extra field in ChatCompletionResponse.choices
-        # 3. We override the full_generator method to use the custom generator instead of the original one if expert routing is enabled
         if self.model_config.enable_return_routed_experts:
             capture = _RoutedExpertsCapture(result_generator)
             result_generator = capture

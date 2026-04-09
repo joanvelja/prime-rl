@@ -133,8 +133,8 @@ from prime_rl.inference.patches import (
     monkey_patch_load_lora_adapter,
     monkey_patch_tokenize_params_validation,
 )
-from prime_rl.inference.vllm.serving_chat_with_tokens import (
-    OpenAIServingChatWithTokens,
+from prime_rl.inference.vllm.serving_chat_with_routed_experts import (
+    OpenAIServingChatWithRoutedExperts,
 )
 
 # NOTE: Fix harmony stop token propagation for GPT-OSS models
@@ -254,14 +254,14 @@ async def custom_init_app_state(
     """
     Modifies init_app_state:
     1. Call the original init_app_state to set up standard state.
-    2. Replace the serving_chat with our wrapper so chat responses can still
-       expose routed experts when requested.
+    2. Replace the serving_chat with our routed-experts wrapper so chat responses
+       can still expose routed experts when requested.
     """
     await init_app_state(engine_client, state, args, supported_tasks)
 
     if "generate" in supported_tasks and state.openai_serving_chat is not None:
         original_chat = state.openai_serving_chat
-        serving_chat = object.__new__(OpenAIServingChatWithTokens)
+        serving_chat = object.__new__(OpenAIServingChatWithRoutedExperts)
         serving_chat.__dict__.update(original_chat.__dict__)
         state.openai_serving_chat = serving_chat
     else:

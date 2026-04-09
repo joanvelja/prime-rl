@@ -3231,13 +3231,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "httpx", marker = "extra == 'proxy'", specifier = ">=0.27.0" },
-    { name = "starlette", marker = "extra == 'proxy'", specifier = ">=0.40.0" },
-    { name = "transformers", specifier = ">=4.50.0" },
-    { name = "uvicorn", marker = "extra == 'proxy'", specifier = ">=0.30.0" },
-]
-provides-extras = ["proxy"]
+requires-dist = [{ name = "transformers", specifier = ">=4.50.0" }]
 
 [[package]]
 name = "requests"

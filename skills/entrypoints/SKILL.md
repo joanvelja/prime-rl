@@ -25,7 +25,7 @@ uv run --extra flash-attn --extra envs rl @ configs/multimodal/rl_color_codeword
 
 Short debug runs can write large filesystem weight-broadcast snapshots. If `/` is low on space, put the debug `--output-dir` on `/dev/shm` and clean it up afterward.
 
-For hard-distillation with `orchestrator.teacher_rollout_model`, omit `[inference]`. That mode talks directly to the external OpenAI-compatible rollout endpoint and reconstructs training tokens from messages; it does not use the local renderer proxy or `/v1/generate`.
+For hard-distillation with `orchestrator.teacher_rollout_model`, omit `[inference]`. That mode talks directly to the external OpenAI-compatible rollout endpoint and reconstructs training tokens from messages; it does not use the local direct renderer client or `/v1/generate`.
 
 For LoRA RL smoke runs against local vLLM, set `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` in the environment or adapter load/update requests will fail.
 

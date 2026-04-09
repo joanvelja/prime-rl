@@ -15,8 +15,6 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
 
-RENDERER_UPSTREAM_BASE_URL_HEADER = "X-Renderer-Upstream-Base-URL"
-
 
 @runtime_checkable
 class InferencePool(Protocol):
@@ -98,60 +96,11 @@ class StaticInferencePool:
         pass
 
 
-class ProxiedInferencePool:
-    """Wrap an inference pool so requests flow through the local rendering proxy."""
-
-    def __init__(
-        self,
-        upstream_inference_pool: InferencePool,
-        proxy_base_url: str,
-        client_type: str = "openai_chat_completions",
-    ):
-        self._upstream_pool = upstream_inference_pool
-        self._proxy_base_url = proxy_base_url
-        self._client_type = client_type
-
-    @property
-    def clients(self) -> list[vf.ClientConfig]:
-        return [self._to_proxy_client(client) for client in self._upstream_pool.clients]
-
-    @property
-    def admin_clients(self) -> list[AsyncClient]:
-        return self._upstream_pool.admin_clients
-
-    def update_model_name(self, model_name: str) -> None:
-        self._upstream_pool.update_model_name(model_name)
-
-    async def get_next_client(self) -> vf.ClientConfig:
-        return self._to_proxy_client(await self._upstream_pool.get_next_client())
-
-    async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
-        await self._upstream_pool.wait_for_ready(model_name, timeout=timeout)
-
-    async def update_weights(self, weight_dir: Path | None, lora_name: str | None = None, step: int = 0) -> None:
-        await self._upstream_pool.update_weights(weight_dir, lora_name=lora_name, step=step)
-
-    def get_metrics(self) -> dict[str, float]:
-        return self._upstream_pool.get_metrics()
-
-    async def stop(self) -> None:
-        await self._upstream_pool.stop()
-
-    def _to_proxy_client(self, client: vf.ClientConfig) -> vf.ClientConfig:
-        headers = dict(client.extra_headers)
-        headers[RENDERER_UPSTREAM_BASE_URL_HEADER] = client.api_base_url
-        return client.model_copy(
-            update={
-                "client_type": self._client_type,
-                "api_base_url": self._proxy_base_url,
-                "extra_headers": headers,
-            },
-            deep=True,
-        )
-
-
 async def setup_inference_pool(
-    client_config: ClientConfig, model_name: str, client_type: str = "openai_chat_completions"
+    client_config: ClientConfig,
+    model_name: str,
+    client_type: str = "openai_chat_completions",
+    renderer_name: str = "auto",
 ) -> InferencePool:
     """Create an inference pool from config (static or elastic)."""
     logger = get_logger()
@@ -159,7 +108,12 @@ async def setup_inference_pool(
     if client_config.is_elastic:
         from prime_rl.utils.elastic import ElasticInferencePool
 
-        return await ElasticInferencePool.from_config(client_config, model_name=model_name, client_type=client_type)
+        return await ElasticInferencePool.from_config(
+            client_config,
+            model_name=model_name,
+            client_type=client_type,
+            renderer_name=renderer_name,
+        )
 
     logger.info(
         f"Initializing static inference pool (base_url={', '.join(client_config.base_url)}, "
@@ -167,13 +121,23 @@ async def setup_inference_pool(
         f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
     )
     return StaticInferencePool(
-        clients=setup_clients(client_config, client_type=client_type),
+        clients=setup_clients(
+            client_config,
+            client_type=client_type,
+            renderer_name=renderer_name,
+            renderer_model_name=model_name if client_type == "renderer" else None,
+        ),
         admin_clients=setup_admin_clients(client_config),
         skip_model_check=client_config.skip_model_check,
     )
 
 
-def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_completions") -> list[vf.ClientConfig]:
+def setup_clients(
+    client_config: ClientConfig,
+    client_type: str = "openai_chat_completions",
+    renderer_name: str = "auto",
+    renderer_model_name: str | None = None,
+) -> list[vf.ClientConfig]:
     clients = []
     client_idx = 0
     for base_url in client_config.base_url:
@@ -185,6 +149,8 @@ def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_c
                 vf.ClientConfig(
                     client_idx=client_idx,
                     client_type=client_type,
+                    renderer=renderer_name,
+                    renderer_model_name=renderer_model_name,
                     api_base_url=base_url,
                     api_key_var=client_config.api_key_var,
                     timeout=client_config.timeout,

@@ -14,10 +14,7 @@ from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.utils import get_sampling_args
 from prime_rl.orchestrator.vf_utils import get_seq_len, run_rollout
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
-from prime_rl.utils.client import (
-    RENDERER_UPSTREAM_BASE_URL_HEADER,
-    InferencePool,
-)
+from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.temp_scheduling import compute_temperature
 from prime_rl.utils.utils import (
@@ -160,11 +157,10 @@ class Scheduler:
         self.cancelled_rollouts_count += count
 
     @staticmethod
-    def _client_identity(c: vf.ClientConfig) -> tuple[str, str | None, str | None]:
+    def _client_identity(c: vf.ClientConfig) -> tuple[str, str | None]:
         return (
             c.api_base_url,
             c.extra_headers.get("X-data-parallel-rank"),
-            c.extra_headers.get(RENDERER_UPSTREAM_BASE_URL_HEADER),
         )
 
     async def _select_least_loaded_client(self) -> vf.ClientConfig:
