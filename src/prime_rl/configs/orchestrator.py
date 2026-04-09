@@ -412,11 +412,12 @@ class TrainConfig(BaseConfig):
     @model_validator(mode="after")
     def resolve_sampling(self):
         """Resolve each env's sampling by merging group defaults with per-env overrides."""
+        group = self.sampling.model_dump()
         for env in self.env:
             if "sampling" not in env.model_fields_set:
-                env.sampling = self.sampling
+                env.sampling = TrainSamplingConfig(**group)
             else:
-                merged = self.sampling.model_dump()
+                merged = group.copy()
                 merged.update(env.sampling.model_dump(exclude_unset=True))
                 env.sampling = TrainSamplingConfig(**merged)
         return self
@@ -474,11 +475,12 @@ class EvalConfig(BaseConfig):
     @model_validator(mode="after")
     def resolve_sampling(self):
         """Resolve each env's sampling by merging group defaults with per-env overrides."""
+        group = self.sampling.model_dump()
         for env in self.env:
             if "sampling" not in env.model_fields_set:
-                env.sampling = self.sampling
+                env.sampling = EvalSamplingConfig(**group)
             else:
-                merged = self.sampling.model_dump()
+                merged = group.copy()
                 merged.update(env.sampling.model_dump(exclude_unset=True))
                 env.sampling = EvalSamplingConfig(**merged)
         return self
