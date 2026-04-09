@@ -364,7 +364,7 @@ async def orchestrate(config: OrchestratorConfig):
 
         if envs_to_eval:
             env_names = ", ".join(e.name for e in envs_to_eval)
-            logger.info(f"Running evals at {ckpt_step=} for [{env_names}]")
+            logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
