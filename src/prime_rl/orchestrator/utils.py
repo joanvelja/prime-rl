@@ -20,7 +20,6 @@ from prime_rl.utils.utils import (
     get_broadcast_dir,
     get_ckpt_dir,
     get_step_path,
-    get_weights_dir,
 )
 
 SEMAPHORE: AsyncContextManager | None = None
@@ -196,20 +195,15 @@ def get_weight_dir(output_dir: Path, step: int, check_exists: bool = True, wait_
             If None, no waiting is performed.
     """
     ckpt_weight_dir = get_step_path(get_ckpt_dir(output_dir), step) / "weight"
-    weights_dir = get_step_path(get_weights_dir(output_dir), step)
     broadcast_weight_dir = get_step_path(get_broadcast_dir(output_dir), step)
 
     def find_stable_dir() -> Path | None:
-        # Trainer checkpoints: checkpoints/step_{step}/STABLE with weights in checkpoints/step_{step}/weight/
+        # For checkpoint weights, check STABLE file in parent directory (checkpoints/step_{step}/STABLE)
         ckpt_step_dir = get_step_path(get_ckpt_dir(output_dir), step)
         if (ckpt_step_dir / "STABLE").exists() and ckpt_weight_dir.exists():
             return ckpt_weight_dir
 
-        # Weight-only checkpoints: weights/step_{step}/STABLE
-        if (weights_dir / "STABLE").exists() and weights_dir.exists():
-            return weights_dir
-
-        # Broadcast weights: broadcasts/step_{step}/STABLE
+        # For broadcast weights, check STABLE file in the broadcast directory itself
         if (broadcast_weight_dir / "STABLE").exists() and broadcast_weight_dir.exists():
             return broadcast_weight_dir
 
