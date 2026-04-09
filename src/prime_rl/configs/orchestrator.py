@@ -383,12 +383,12 @@ class EvalEnvConfig(EnvConfig):
     ] = 1
 
     interval: Annotated[
-        int | None,
+        int,
         Field(
             ge=1,
             description="Per-env eval interval. If unset, inherits from the group-level eval interval.",
         ),
-    ] = None
+    ] = 100
 
 
 class TrainConfig(BaseConfig):
