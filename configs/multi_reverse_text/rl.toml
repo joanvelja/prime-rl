@@ -8,16 +8,16 @@ name = "PrimeIntellect/Qwen3-0.6B-Reverse-Text-SFT"
 batch_size = 128
 rollouts_per_example = 16
 
-[orchestrator.sampling]
-max_tokens = 128
+[orchestrator.train.sampling]
+max_completion_tokens = 128
 
-[[orchestrator.env]]
+[[orchestrator.train.env]]
 id = "reverse-text"
 
-[orchestrator.env.sampling]
-max_tokens = 127
+[orchestrator.train.env.sampling]
+max_completion_tokens = 127
 
-[[orchestrator.env]]
+[[orchestrator.train.env]]
 id = "reverse-text"
 name = "reverse-text-2"
 
@@ -25,7 +25,7 @@ name = "reverse-text-2"
 interval = 5
 
 [orchestrator.eval.sampling]
-max_tokens = 512
+max_completion_tokens = 512
 
 [[orchestrator.eval.env]]
 id = "reverse-text"
