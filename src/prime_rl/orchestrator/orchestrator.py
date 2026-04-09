@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,6 +18,7 @@ from prime_rl.orchestrator.trajectories import (
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
 from prime_rl.utils.pathing import get_log_dir
+from prime_rl.utils.usage_reporter import UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
 monkey_patch_oai_iterable_types()
@@ -64,6 +66,13 @@ from prime_rl.utils.utils import (
     resolve_latest_ckpt_step,
     to_col_format,
 )
+
+# Hard wall-clock budget for the orchestrator's post-training cleanup. If the
+# graceful shutdown sequence (scheduler / inference pool / env teardown) is
+# still running after this many seconds, we force-exit the process so the run
+# pod terminates instead of sitting wedged forever. The training checkpoint
+# and artifacts are persisted *before* this point, so a forced exit is safe.
+SHUTDOWN_TIMEOUT_S = 300
 
 
 @clean_exit
@@ -137,7 +146,7 @@ async def orchestrate(config: OrchestratorConfig):
             config.model.name, trust_remote_code=config.model.trust_remote_code, use_fast=True
         )
 
-    # Setup monitor
+    # Setup monitor (may register the run and set RUN_ID in the environment)
     logger.info(f"Initializing monitor (wandb={config.wandb}, prime_monitor={config.prime_monitor})")
     monitor = setup_monitor(
         wandb_config=config.wandb,
@@ -146,6 +155,22 @@ async def orchestrate(config: OrchestratorConfig):
         tokenizer=tokenizer,
         run_config=config,
     )
+
+    # Read run_id AFTER setup_monitor so that newly registered runs are captured
+    run_id = os.getenv("RUN_ID", "")
+
+    # Usage reporter requires BOTH the base URL and the API key. Activating
+    # with only one set used to crash every POST inside httpx (None header
+    # value), so we now gate construction on both being present and log a
+    # clear warning when half-configured.
+    usage_base_url = os.environ.get("PI_USAGE_BASE_URL")
+    usage_api_key = os.environ.get("PI_USAGE_API_KEY")
+    if usage_base_url and usage_api_key:
+        usage_reporter = UsageReporter()
+    else:
+        if usage_base_url and not usage_api_key:
+            logger.warning("PI_USAGE_BASE_URL is set but PI_USAGE_API_KEY is missing; usage reporting disabled.")
+        usage_reporter = None
 
     # Setup heartbeat (only on rank 0, orchestrator is single process)
     heart = None
@@ -646,6 +671,13 @@ async def orchestrate(config: OrchestratorConfig):
             step=progress.step,
         )
 
+        if usage_reporter and run_id:
+            usage_reporter.report_training_usage(
+                run_id=run_id,
+                step=progress.step,
+                tokens=num_prefill_tokens + num_decode_tokens,
+            )
+
         reward_mean = by_example.reward.mean().mean()
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
         logger.success(step_message)
@@ -688,28 +720,42 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info("Writing final checkpoint")
         ckpt_manager.save(progress, buffer, step=progress.step)
 
-    # Close training batch sender
-    training_batch_sender.close()
+    # Bounded best-effort cleanup. Each await below may block on a remote peer
+    # (env-server ZMQ recv, inference admin httpx aclose, etc.). The outer
+    # asyncio.wait gives the whole sequence a single deadline; if anything
+    # wedges past SHUTDOWN_TIMEOUT_S we force-exit the process. Individual
+    # awaits intentionally do NOT have their own timeouts — asyncio.wait_for
+    # would itself hang on an uncancellable await, which is exactly the
+    # failure mode we're guarding against.
+    async def _graceful_shutdown() -> None:
+        training_batch_sender.close()
+        rollout_executor.shutdown(wait=False)
+        await scheduler.stop()
+        await inference_pool.stop()
+        if teacher_inference_pool is not None:
+            await teacher_inference_pool.stop()
+        event_loop_lag_monitor_task.cancel()
+        # Shutdown env processes (also registered as atexit handler for crash safety)
+        train_envs.shutdown()
+        if eval_envs is not None:
+            eval_envs.shutdown()
+        if usage_reporter:
+            usage_reporter.close()
 
-    # Shutdown rollout executor
-    rollout_executor.shutdown(wait=False)
+    shutdown_task = asyncio.create_task(_graceful_shutdown())
+    _, pending = await asyncio.wait({shutdown_task}, timeout=SHUTDOWN_TIMEOUT_S)
 
-    # Stop scheduler
-    await scheduler.stop()
+    if pending:
+        logger.warning(
+            f"Orchestrator shutdown did not complete within {SHUTDOWN_TIMEOUT_S}s; "
+            "forcing process exit. Training artifacts are already persisted."
+        )
+        os._exit(0)
 
-    # Stop inference pool
-    await inference_pool.stop()
-
-    if teacher_inference_pool is not None:
-        await teacher_inference_pool.stop()
-
-    # Cancel event loop lag monitor task
-    event_loop_lag_monitor_task.cancel()
-
-    # Shutdown env processes (also registered as atexit handler for crash safety)
-    train_envs.shutdown()
-    if eval_envs is not None:
-        eval_envs.shutdown()
+    # asyncio.wait swallows task exceptions; re-raise so a fast cleanup
+    # failure surfaces the same way as it did when each step was awaited
+    # directly.
+    await shutdown_task
 
     logger.success("Orchestrator finished.")
 
