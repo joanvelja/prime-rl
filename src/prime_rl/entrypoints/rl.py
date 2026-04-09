@@ -488,7 +488,7 @@ def rl_slurm(config: RLConfig):
         write_config(config, config_dir, exclude={"slurm", "dry_run", "clean_output_dir"})
         logger.info(f"Wrote config to {config_dir / RL_TOML}")
 
-        train_env_names = [env.resolved_name for env in config.orchestrator.env]
+        train_env_names = [env.resolved_name for env in config.orchestrator.train.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         log_message = format_log_message(
@@ -503,7 +503,7 @@ def rl_slurm(config: RLConfig):
         write_subconfigs(config, config_dir)
         logger.info(f"Wrote subconfigs to {config_dir}")
 
-        train_env_names = [env.resolved_name for env in config.orchestrator.env]
+        train_env_names = [env.resolved_name for env in config.orchestrator.train.env]
         eval_env_names = [env.resolved_name for env in config.orchestrator.eval.env] if config.orchestrator.eval else []
 
         has_infer = config.deployment.num_infer_nodes > 0
