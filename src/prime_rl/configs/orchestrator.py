@@ -235,11 +235,16 @@ class EvalSamplingConfig(BaseConfig):
     ] = {}
 
     def to_sampling_args(self) -> dict[str, Any]:
-        """Convert to OAI-compatible sampling args dict, omitting None values."""
-        args: dict[str, Any] = {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
+        """Convert to OAI-compatible sampling args dict.
+
+        Only includes fields that differ from defaults so the inference server
+        can apply its own defaults for unspecified parameters.
+        """
+        args: dict[str, Any] = {}
+        if self.temperature != 1.0:
+            args["temperature"] = self.temperature
+        if self.top_p != 1.0:
+            args["top_p"] = self.top_p
         if self.max_completion_tokens is not None:
             args["max_completion_tokens"] = self.max_completion_tokens
         if self.reasoning_effort is not None:
