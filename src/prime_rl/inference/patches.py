@@ -243,27 +243,33 @@ def _patch_lora_key_prefix():
     @classmethod
     def _patched_from_local_checkpoint(cls, lora_dir, *args, **kwargs):
         st_path = Path(lora_dir) / "adapter_model.safetensors"
-        lock_path = Path(lora_dir) / ".lora_key_fix.lock"
         if st_path.exists():
-            with open(lock_path, "w") as lock_fd:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                try:
-                    tensors = load_file(str(st_path))
-                    needs_fix = any(
-                        ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors
-                    )
-                    if needs_fix:
-                        fixed = {
-                            (
-                                f"base_model.model.{k}"
-                                if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
-                                else k
-                            ): v
-                            for k, v in tensors.items()
-                        }
-                        save_file(fixed, str(st_path))
-                finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            # Read-only check first — no lock or write needed if keys are fine
+            tensors = load_file(str(st_path))
+            needs_fix = any(("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors)
+            if needs_fix:
+                # Only acquire lock and write when rewrite is actually needed
+                lock_path = Path(lora_dir) / ".lora_key_fix.lock"
+                with open(lock_path, "w") as lock_fd:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                    try:
+                        # Re-read under lock in case another worker already fixed it
+                        tensors = load_file(str(st_path))
+                        needs_fix = any(
+                            ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors
+                        )
+                        if needs_fix:
+                            fixed = {
+                                (
+                                    f"base_model.model.{k}"
+                                    if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
+                                    else k
+                                ): v
+                                for k, v in tensors.items()
+                            }
+                            save_file(fixed, str(st_path))
+                    finally:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
         return _original_from_local_checkpoint.__func__(cls, lora_dir, *args, **kwargs)
 
