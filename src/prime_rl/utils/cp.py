@@ -68,7 +68,7 @@ def setup_sparse_mla_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: 
         return
 
     for layer in model.model.layers:
-        if not hasattr(layer, "set_context_parallel_attributes"):
+        if not hasattr(layer, "set_context_parallel_attributes") or not hasattr(layer, "self_attn"):
             continue
 
         layer.set_context_parallel_attributes(cp_group, cp_rank, cp_world_size)
