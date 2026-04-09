@@ -398,6 +398,28 @@ class TrainConfig(BaseConfig):
 
     sampling: TrainSamplingConfig = TrainSamplingConfig()
 
+    num_workers: Annotated[
+        int | Literal["auto"],
+        Field(
+            description="Default number of worker processes for env servers. Can be overridden per env.",
+        ),
+    ] = "auto"
+
+    max_retries: Annotated[
+        int,
+        Field(ge=0, description="Default number of retries for failed rollouts. Can be overridden per env."),
+    ] = 0
+
+    @model_validator(mode="after")
+    def resolve_env_defaults(self):
+        """Fill per-env num_workers and max_retries from group defaults."""
+        for env in self.env:
+            if "num_workers" not in env.model_fields_set:
+                env.num_workers = self.num_workers
+            if "max_retries" not in env.model_fields_set:
+                env.max_retries = self.max_retries
+        return self
+
     @model_validator(mode="after")
     def resolve_sampling(self):
         """Resolve each env's sampling by merging group defaults with per-env overrides."""
@@ -453,6 +475,18 @@ class EvalConfig(BaseConfig):
         Field(ge=1, description="Default number of rollouts per example. Can be overridden per env."),
     ] = 1
 
+    num_workers: Annotated[
+        int | Literal["auto"],
+        Field(
+            description="Default number of worker processes for env servers. Can be overridden per env.",
+        ),
+    ] = "auto"
+
+    max_retries: Annotated[
+        int,
+        Field(ge=0, description="Default number of retries for failed rollouts. Can be overridden per env."),
+    ] = 0
+
     interval: Annotated[
         int,
         Field(
@@ -476,7 +510,7 @@ class EvalConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_defaults(self):
-        """Fill per-env num_examples, rollouts_per_example, and interval from group defaults, then resolve num_workers."""
+        """Fill per-env defaults from group-level values, then resolve auto num_workers."""
         for env in self.env:
             if "num_examples" not in env.model_fields_set:
                 env.num_examples = self.num_examples
@@ -484,6 +518,10 @@ class EvalConfig(BaseConfig):
                 env.rollouts_per_example = self.rollouts_per_example
             if "interval" not in env.model_fields_set:
                 env.interval = self.interval
+            if "num_workers" not in env.model_fields_set:
+                env.num_workers = self.num_workers
+            if "max_retries" not in env.model_fields_set:
+                env.max_retries = self.max_retries
             # Resolve num_workers now that num_examples and rollouts_per_example are set
             if env.num_workers == "auto":
                 if env.num_examples == -1:
