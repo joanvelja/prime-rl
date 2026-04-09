@@ -312,6 +312,7 @@ class EnvConfig(BaseConfig):
         int,
         Field(ge=0, description="Number of times the env server retries a failed rollout before returning an error."),
     ] = 0
+
     max_total_completion_tokens: Annotated[
         int,
         Field(
@@ -359,6 +360,13 @@ class TrainEnvConfig(EnvConfig):
 class EvalEnvConfig(EnvConfig):
     """Configures an evaluation environment."""
 
+    sampling: Annotated[
+        EvalSamplingConfig,
+        Field(
+            description="Per-env sampling overrides. Unset fields inherit from the group-level eval sampling config.",
+        ),
+    ] = EvalSamplingConfig()
+
     num_examples: Annotated[
         int,
         Field(
@@ -373,13 +381,6 @@ class EvalEnvConfig(EnvConfig):
             description="Number of rollouts generated per example. Used for pass@k estimation (e.g. rollouts_per_example=8 enables pass@1 through pass@8).",
         ),
     ] = 1
-
-    sampling: Annotated[
-        EvalSamplingConfig,
-        Field(
-            description="Per-env sampling overrides. Unset fields inherit from the group-level eval sampling config.",
-        ),
-    ] = EvalSamplingConfig()
 
 
 class TrainConfig(BaseConfig):
