@@ -59,12 +59,16 @@ class FileSystemWeightBroadcast(WeightBroadcast):
             if adapter_only:
                 # For adapter-only, MultiRunManager creates state dict directly for each run
                 # All ranks must participate in DTensor gathering, but only master saves
-                state_dict = self.multi_run_manager.get_state_dict_for_run(idx)
-                for key, value in state_dict.items():
+                raw_state_dict = self.multi_run_manager.get_state_dict_for_run(idx)
+                state_dict = {}
+                for key, value in raw_state_dict.items():
                     if isinstance(value, DTensor):
                         value = value.full_tensor()
                     if self.world.is_master:
-                        state_dict[key] = value.to("cpu", non_blocking=False)
+                        # Prepend base_model.model. prefix for PEFT/vLLM compatibility.
+                        # vLLM's parse_fine_tuned_lora_name() expects this prefix to
+                        # correctly strip it and match module names against target_modules.
+                        state_dict[f"base_model.model.{key}"] = value.to("cpu", non_blocking=False)
 
             # TODO: Broadcast ready to update in sync, then we dont need to gather on not ready
             if self.world.is_master:
