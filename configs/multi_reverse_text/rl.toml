@@ -14,6 +14,9 @@ max_tokens = 128
 [[orchestrator.env]]
 id = "reverse-text"
 
+[orchestrator.env.sampling]
+max_tokens = 127
+
 [[orchestrator.env]]
 id = "reverse-text"
 name = "reverse-text-2"

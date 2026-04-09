@@ -32,6 +32,7 @@ class Env:
         self.config = config
         self.sampling_args: dict = {}
 
+        get_logger().info(f"Initializing {config.resolved_name} ({config})")
         self._env: vf.Environment = vf.load_environment(config.stripped_id, **config.args)
         self._env_client: ZMQEnvClient | None = None
         self._env_server_process: BaseProcess | None = None
