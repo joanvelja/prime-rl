@@ -155,95 +155,71 @@ class TrainSamplingConfig(BaseConfig):
 
 
 class EvalSamplingConfig(BaseConfig):
-    """Configures how tokens are sampled from the model for evaluation. Largely follows the vLLM sampling parameters."""
+    """Configures how tokens are sampled from the model for evaluation.
+
+    All sampling fields default to None, meaning the inference server's own
+    default is used. Only explicitly set fields are forwarded.
+    """
 
     temperature: Annotated[
-        float,
-        Field(
-            ge=0,
-            description="Scales the output probability distribution. Lower values => more deterministic, higher values => more random. If 0, will sample greedily.",
-        ),
-    ] = 1.0
+        float | None,
+        Field(ge=0, description="Sampling temperature. None defers to the inference server default."),
+    ] = None
 
     repetition_penalty: Annotated[
-        float,
-        Field(
-            ge=0,
-            description="Penalty for repeating tokens. Values > 1.0 discourage repetition, values < 1.0 encourage repetition, and 1.0 means no penalty.",
-        ),
-    ] = 1.0
+        float | None,
+        Field(ge=0, description="Repetition penalty. None defers to the inference server default."),
+    ] = None
 
     top_p: Annotated[
-        float,
-        Field(
-            description="Cumulative probability of the top tokens to consider. If 1, all tokens are considered.",
-        ),
-    ] = 1.0
+        float | None,
+        Field(description="Nucleus sampling threshold. None defers to the inference server default."),
+    ] = None
 
     top_k: Annotated[
-        int,
-        Field(
-            description="Number of top tokens to consider. If -1, all tokens are considered.",
-        ),
-    ] = -1
+        int | None,
+        Field(description="Top-k sampling. None defers to the inference server default."),
+    ] = None
 
     min_p: Annotated[
-        float,
-        Field(
-            ge=0,
-            description="Minimum probability for a token to be considered, relative to the probability of the most likely token. If 0, all tokens are considered.",
-        ),
-    ] = 0.0
+        float | None,
+        Field(ge=0, description="Min-p sampling threshold. None defers to the inference server default."),
+    ] = None
 
     max_completion_tokens: Annotated[
         int | None,
         Field(
             validation_alias=AliasChoices("max_completion_tokens", "max_tokens"),
-            description="Maximum number of output tokens to generate per turn. If None, will generate until maximum context length or EOS token is hit.",
+            description="Maximum output tokens per turn. None defers to the inference server default.",
         ),
     ] = None
 
     min_tokens: Annotated[
-        int,
-        Field(
-            ge=0,
-            description="Minimum number of output tokens to generate per sequence.",
-        ),
-    ] = 0
+        int | None,
+        Field(ge=0, description="Minimum output tokens per sequence. None defers to the inference server default."),
+    ] = None
 
     reasoning_effort: Annotated[
         Literal["minimal", "low", "medium", "high"] | None,
-        Field(
-            description="Constrains effort on reasoning for reasoning models. Currently supported values are minimal, low, medium, and high.",
-        ),
+        Field(description="Reasoning effort constraint for reasoning models."),
     ] = None
 
     seed: Annotated[
         int | None,
-        Field(
-            description="Random seed to use for sampling. If None, no seeding is used.",
-        ),
+        Field(description="Random seed for sampling. None means no seeding."),
     ] = None
 
-    # Strictly speaking, extra_body is not a sampling parameter, but it is the
-    # easiest way to pass arbitrary extra parameters to the server via verifiers
     extra_body: Annotated[
         dict[str, Any],
-        Field(
-            description="Extra body to use for the OpenAI API. By default, it is set to an empty dictionary.",
-        ),
+        Field(description="Extra body parameters forwarded to the inference server."),
     ] = {}
 
     def to_sampling_args(self) -> dict[str, Any]:
-        """Convert to OAI-compatible sampling args dict.
-
-        Only includes fields that differ from defaults so the inference server
-        can apply its own defaults for unspecified parameters.
-        """
+        """Convert to OAI-compatible sampling args dict. Only includes non-None fields."""
         args: dict[str, Any] = {}
-        if self.temperature != 1.0:
+        if self.temperature is not None:
             args["temperature"] = self.temperature
-        if self.top_p != 1.0:
+        if self.top_p is not None:
             args["top_p"] = self.top_p
         if self.max_completion_tokens is not None:
             args["max_completion_tokens"] = self.max_completion_tokens
@@ -253,13 +229,13 @@ class EvalSamplingConfig(BaseConfig):
             args["seed"] = self.seed
 
         extra_body = dict(self.extra_body)
-        if self.top_k != -1:
+        if self.top_k is not None:
             extra_body["top_k"] = self.top_k
-        if self.min_p != 0.0:
+        if self.min_p is not None:
             extra_body["min_p"] = self.min_p
-        if self.min_tokens > 0:
+        if self.min_tokens is not None:
             extra_body["min_tokens"] = self.min_tokens
-        if self.repetition_penalty != 1.0:
+        if self.repetition_penalty is not None:
             extra_body["repetition_penalty"] = self.repetition_penalty
         if extra_body:
             args["extra_body"] = extra_body
