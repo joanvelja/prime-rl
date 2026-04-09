@@ -84,3 +84,22 @@ def test_simulate_full_run():
         prev_ckpt_step = ckpt_step
 
     assert eval_triggered_at == [0, 25, 50, 75]
+
+
+def test_per_env_intervals():
+    """Simulate two eval envs with different intervals (5 and 10) over 20 steps."""
+    env_intervals = {"fast": 5, "slow": 10}
+    last_eval_steps = {name: -1 for name in env_intervals}
+    triggered = {name: [] for name in env_intervals}
+
+    prev_ckpt_step = -1
+    for ckpt_step in range(21):
+        for name, interval in env_intervals.items():
+            result = compute_eval_ckpt_step(ckpt_step, prev_ckpt_step, last_eval_steps[name], interval)
+            if result is not None:
+                triggered[name].append(result)
+                last_eval_steps[name] = ckpt_step
+        prev_ckpt_step = ckpt_step
+
+    assert triggered["fast"] == [0, 5, 10, 15, 20]
+    assert triggered["slow"] == [0, 10, 20]

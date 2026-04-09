@@ -38,6 +38,7 @@ id = "reverse-text"
 name = "eval-custom"
 num_examples = 16
 rollouts_per_example = 2
+interval = 10
 
 [orchestrator.eval.env.sampling]
 max_completion_tokens = 256

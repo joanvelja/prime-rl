@@ -382,6 +382,14 @@ class EvalEnvConfig(EnvConfig):
         ),
     ] = 1
 
+    interval: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description="Per-env eval interval. If unset, inherits from the group-level eval interval.",
+        ),
+    ] = None
+
 
 class TrainConfig(BaseConfig):
     """Configures training environments and their shared sampling settings."""
@@ -468,12 +476,14 @@ class EvalConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_defaults(self):
-        """Fill per-env num_examples and rollouts_per_example from group defaults, then resolve num_workers."""
+        """Fill per-env num_examples, rollouts_per_example, and interval from group defaults, then resolve num_workers."""
         for env in self.env:
             if "num_examples" not in env.model_fields_set:
                 env.num_examples = self.num_examples
             if "rollouts_per_example" not in env.model_fields_set:
                 env.rollouts_per_example = self.rollouts_per_example
+            if "interval" not in env.model_fields_set:
+                env.interval = self.interval
             # Resolve num_workers now that num_examples and rollouts_per_example are set
             if env.num_workers == "auto":
                 if env.num_examples == -1:
