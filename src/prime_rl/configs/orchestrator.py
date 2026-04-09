@@ -412,25 +412,18 @@ class TrainConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_defaults(self):
-        """Fill per-env num_workers and max_retries from group defaults."""
+        """Resolve per-env overrides: inherit group-level sampling, num_workers, and max_retries."""
+        group_sampling = self.sampling.model_dump()
         for env in self.env:
+            if "sampling" not in env.model_fields_set:
+                env.sampling = TrainSamplingConfig(**group_sampling)
+            else:
+                merged = group_sampling | env.sampling.model_dump(exclude_unset=True)
+                env.sampling = TrainSamplingConfig(**merged)
             if "num_workers" not in env.model_fields_set:
                 env.num_workers = self.num_workers
             if "max_retries" not in env.model_fields_set:
                 env.max_retries = self.max_retries
-        return self
-
-    @model_validator(mode="after")
-    def resolve_sampling(self):
-        """Resolve each env's sampling by merging group defaults with per-env overrides."""
-        group = self.sampling.model_dump()
-        for env in self.env:
-            if "sampling" not in env.model_fields_set:
-                env.sampling = TrainSamplingConfig(**group)
-            else:
-                merged = group.copy()
-                merged.update(env.sampling.model_dump(exclude_unset=True))
-                env.sampling = TrainSamplingConfig(**merged)
         return self
 
     @model_validator(mode="after")
@@ -496,22 +489,15 @@ class EvalConfig(BaseConfig):
     ] = 100
 
     @model_validator(mode="after")
-    def resolve_sampling(self):
-        """Resolve each env's sampling by merging group defaults with per-env overrides."""
-        group = self.sampling.model_dump()
+    def resolve_env_defaults(self):
+        """Resolve per-env overrides: inherit group-level sampling, num_workers, max_retries, num_examples, rollouts_per_example, and interval. Then resolve auto num_workers."""
+        group_sampling = self.sampling.model_dump()
         for env in self.env:
             if "sampling" not in env.model_fields_set:
-                env.sampling = EvalSamplingConfig(**group)
+                env.sampling = EvalSamplingConfig(**group_sampling)
             else:
-                merged = group.copy()
-                merged.update(env.sampling.model_dump(exclude_unset=True))
+                merged = group_sampling | env.sampling.model_dump(exclude_unset=True)
                 env.sampling = EvalSamplingConfig(**merged)
-        return self
-
-    @model_validator(mode="after")
-    def resolve_env_defaults(self):
-        """Fill per-env defaults from group-level values, then resolve auto num_workers."""
-        for env in self.env:
             if "num_examples" not in env.model_fields_set:
                 env.num_examples = self.num_examples
             if "rollouts_per_example" not in env.model_fields_set:
@@ -522,7 +508,7 @@ class EvalConfig(BaseConfig):
                 env.num_workers = self.num_workers
             if "max_retries" not in env.model_fields_set:
                 env.max_retries = self.max_retries
-            # Resolve num_workers now that num_examples and rollouts_per_example are set
+            # Resolve auto num_workers now that num_examples and rollouts_per_example are set
             if env.num_workers == "auto":
                 if env.num_examples == -1:
                     env.num_workers = 4
