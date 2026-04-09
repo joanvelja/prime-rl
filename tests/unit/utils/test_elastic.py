@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from prime_rl.configs.shared import ClientConfig, ElasticConfig
-from prime_rl.utils.client import ElasticInferencePool
 from prime_rl.utils.elastic import (
     AdapterState,
+    ElasticInferencePool,
     check_server_model,
     discover_ready_servers,
     discover_server_ips,
