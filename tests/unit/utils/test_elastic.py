@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from prime_rl.configs.shared import ClientConfig, ElasticConfig
-from prime_rl.utils.client import InferencePool
+from prime_rl.utils.client import ElasticInferencePool
 from prime_rl.utils.elastic import (
     AdapterState,
     check_server_model,
@@ -184,14 +184,14 @@ def test_adapter_state_creation():
 # InferencePool adapter matching tests
 
 
-def _make_elastic_pool(**overrides) -> InferencePool:
-    """Helper to create an InferencePool in elastic mode for testing."""
+def _make_elastic_pool(**overrides) -> ElasticInferencePool:
+    """Helper to create an ElasticInferencePool for testing."""
     config = ClientConfig(
         elastic=ElasticConfig(hostname="test.hostname"),
         base_url=["http://localhost:8000/v1"],
     )
     with patch("prime_rl.utils.client.get_logger"):
-        return InferencePool(
+        return ElasticInferencePool(
             client_config=config,
             model_name=overrides.get("model_name", "base-model"),
         )
@@ -281,7 +281,7 @@ def test_get_loaded_adapter_finds_correct_adapter_when_multiple_loaded():
         ]
     }
     mock_admin.get.return_value = mock_response
-    pool._elastic_admin_clients["10.0.0.1"] = mock_admin
+    pool._admin_clients["10.0.0.1"] = mock_admin
 
     result = asyncio.run(pool._get_loaded_adapter("10.0.0.1"))
 
@@ -310,7 +310,7 @@ def test_get_loaded_adapter_returns_none_when_desired_adapter_not_found():
         ]
     }
     mock_admin.get.return_value = mock_response
-    pool._elastic_admin_clients["10.0.0.1"] = mock_admin
+    pool._admin_clients["10.0.0.1"] = mock_admin
 
     result = asyncio.run(pool._get_loaded_adapter("10.0.0.1"))
 
@@ -332,7 +332,7 @@ def test_get_loaded_adapter_parses_step_from_path():
         ]
     }
     mock_admin.get.return_value = mock_response
-    pool._elastic_admin_clients["10.0.0.1"] = mock_admin
+    pool._admin_clients["10.0.0.1"] = mock_admin
 
     result = asyncio.run(pool._get_loaded_adapter("10.0.0.1"))
 
@@ -355,7 +355,7 @@ def test_get_loaded_adapter_handles_step_dash_format():
         ]
     }
     mock_admin.get.return_value = mock_response
-    pool._elastic_admin_clients["10.0.0.1"] = mock_admin
+    pool._admin_clients["10.0.0.1"] = mock_admin
 
     result = asyncio.run(pool._get_loaded_adapter("10.0.0.1"))
 

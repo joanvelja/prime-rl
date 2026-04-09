@@ -16,14 +16,60 @@ from prime_rl.utils.elastic import AdapterState, ServerState, discover_server_ip
 from prime_rl.utils.logger import get_logger
 
 
-class InferencePool:
-    """Unified inference pool supporting both static and elastic (DNS-discovery) modes.
+class StaticInferencePool:
+    """Static inference pool with fixed client list."""
 
-    Static mode: Fixed client list from base_url, no service discovery.
-    Elastic mode: DNS-based discovery with LoRA adapter sync.
+    def __init__(
+        self,
+        client_config: ClientConfig,
+        model_name: str,
+        train_client_type: str = "openai_chat_completions_token",
+        eval_client_type: str = "openai_chat_completions",
+    ):
+        self._train_clients = setup_clients(client_config, client_type=train_client_type)
+        self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
+        self._admin_clients = setup_admin_clients(client_config)
+        self._skip_model_check = client_config.skip_model_check
+        self._eval_index = 0
+        self.model_name = model_name
 
-    Holds two sets of inference clients (train + eval) differing only in client_type.
-    """
+    @property
+    def clients(self) -> list[vf.ClientConfig]:
+        return self._train_clients
+
+    @property
+    def eval_clients(self) -> list[vf.ClientConfig]:
+        return self._eval_clients
+
+    @property
+    def admin_clients(self) -> list[AsyncClient]:
+        return self._admin_clients
+
+    def update_model_name(self, model_name: str) -> None:
+        self.model_name = model_name
+
+    async def get_eval_client(self) -> vf.ClientConfig:
+        clients = self._eval_clients
+        client = clients[self._eval_index % len(clients)]
+        self._eval_index += 1
+        return client
+
+    async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
+        await check_health(self._admin_clients, timeout=timeout)
+        await maybe_check_has_model(self._admin_clients, model_name, skip_model_check=self._skip_model_check)
+
+    async def update_weights(self, weight_dir: Path | None, lora_name: str | None = None, step: int = 0) -> None:
+        await update_weights(self._admin_clients, weight_dir, lora_name=lora_name, step=step)
+
+    def get_metrics(self) -> dict[str, float]:
+        return {}
+
+    async def stop(self) -> None:
+        pass
+
+
+class ElasticInferencePool:
+    """Elastic inference pool with DNS-based discovery and LoRA adapter sync."""
 
     def __init__(
         self,
@@ -38,33 +84,21 @@ class InferencePool:
         self.base_model_name = model_name
         self.train_client_type = train_client_type
         self.eval_client_type = eval_client_type
-        self._skip_model_check = client_config.skip_model_check
+        self._router_url = client_config.router_url
         self._eval_index = 0
 
-        # Elastic config (None for static mode)
-        self._elastic = client_config.elastic
-        self._router_url = client_config.router_url
-
-        # Inference clients
+        # Inference clients (rebuilt when ready URLs change)
         self._train_clients: list[vf.ClientConfig] = []
         self._eval_clients: list[vf.ClientConfig] = []
         self._client_urls: list[str] = []
 
-        # Admin clients — static: flat list, elastic: dict keyed by IP
-        self._static_admin_clients: list[AsyncClient] = []
-        self._elastic_admin_clients: dict[str, AsyncClient] = {}
-
-        # Elastic-specific state
+        # Elastic state
         self._servers: dict[str, ServerState] = {}
+        self._admin_clients: dict[str, AsyncClient] = {}
         self._desired: AdapterState = AdapterState()
         self._lock = asyncio.Lock()
         self._sync_task: asyncio.Task | None = None
         self._started = False
-
-        if not self._elastic:
-            self._train_clients = setup_clients(client_config, client_type=train_client_type)
-            self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
-            self._static_admin_clients = setup_admin_clients(client_config)
 
     @classmethod
     async def create(
@@ -73,35 +107,42 @@ class InferencePool:
         model_name: str,
         train_client_type: str = "openai_chat_completions_token",
         eval_client_type: str = "openai_chat_completions",
-    ) -> InferencePool:
+    ) -> ElasticInferencePool:
         pool = cls(client_config, model_name, train_client_type, eval_client_type)
-        if pool._elastic:
-            await pool._start()
+        await pool._start()
         return pool
 
     # --- Properties ---
 
     @property
+    def _port(self) -> int:
+        return self.client_config.elastic.port
+
+    @property
+    def _sync_interval(self) -> float:
+        return self.client_config.elastic.sync_interval
+
+    @property
+    def _hostname(self) -> str:
+        return self.client_config.elastic.hostname
+
+    @property
     def ready_urls(self) -> list[str]:
-        return [f"http://{ip}:{self._elastic.port}/v1" for ip, s in self._servers.items() if s.status == "ready"]
+        return [f"http://{ip}:{self._port}/v1" for ip, s in self._servers.items() if s.status == "ready"]
 
     @property
     def clients(self) -> list[vf.ClientConfig]:
-        if self._elastic:
-            self._rebuild_elastic_clients()
+        self._rebuild_clients()
         return self._train_clients
 
     @property
     def eval_clients(self) -> list[vf.ClientConfig]:
-        if self._elastic:
-            self._rebuild_elastic_clients()
+        self._rebuild_clients()
         return self._eval_clients
 
     @property
     def admin_clients(self) -> list[AsyncClient]:
-        if self._elastic:
-            return list(self._elastic_admin_clients.values())
-        return self._static_admin_clients
+        return list(self._admin_clients.values())
 
     # --- Public methods ---
 
@@ -109,34 +150,39 @@ class InferencePool:
         self.model_name = model_name
 
     async def get_eval_client(self) -> vf.ClientConfig:
-        """Get next eval client in round-robin fashion."""
         clients = self.eval_clients
-        sync_interval = self._elastic.sync_interval if self._elastic else 1.0
         while not clients:
-            await asyncio.sleep(sync_interval)
+            await asyncio.sleep(self._sync_interval)
             clients = self.eval_clients
         client = clients[self._eval_index % len(clients)]
         self._eval_index += 1
         return client
 
-    async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
-        if self._elastic:
-            await self._wait_for_elastic_ready(model_name, timeout)
-        else:
-            await check_health(self._static_admin_clients, timeout=timeout)
-            await maybe_check_has_model(self._static_admin_clients, model_name, skip_model_check=self._skip_model_check)
+    async def wait_for_ready(self, model_name: str = "", timeout: int = 1800, min_servers: int = 1) -> None:
+        start = time.time()
+        while time.time() - start < timeout:
+            await self.sync()
+            ready = sum(1 for s in self._servers.values() if s.status == "ready")
+            if ready >= min_servers:
+                return
+            self.logger.debug(f"Waiting for servers: {ready}/{min_servers} ready")
+            await asyncio.sleep(self._sync_interval)
+
+        ready = sum(1 for s in self._servers.values() if s.status == "ready")
+        raise TimeoutError(f"Timed out waiting for {min_servers} ready servers (got {ready})")
 
     async def update_weights(self, weight_dir: Path | None, lora_name: str | None = None, step: int = 0) -> None:
-        if self._elastic:
-            if lora_name is None:
-                raise ValueError("Elastic inference pool requires LoRA training (lora_name must be set)")
-            await self._sync_weights(weight_dir, lora_name, step)
-        else:
-            await update_weights(self._static_admin_clients, weight_dir, lora_name=lora_name, step=step)
+        if lora_name is None:
+            raise ValueError("Elastic inference pool requires LoRA training (lora_name must be set)")
+        async with self._lock:
+            self._desired = AdapterState(
+                name=lora_name,
+                path=weight_dir if lora_name else None,
+                step=step,
+            )
+            await asyncio.gather(*[self._sync_server_adapter(ip) for ip in self._servers.keys()])
 
     def get_metrics(self) -> dict[str, float]:
-        if not self._elastic:
-            return {}
         return {
             "elastic/num_servers": len(self._servers),
             "elastic/num_ready_servers": sum(1 for s in self._servers.values() if s.status == "ready"),
@@ -144,29 +190,28 @@ class InferencePool:
         }
 
     async def stop(self) -> None:
-        if self._elastic:
-            if self._sync_task:
-                self._sync_task.cancel()
-                try:
-                    await self._sync_task
-                except asyncio.CancelledError:
-                    pass
+        if self._sync_task:
+            self._sync_task.cancel()
+            try:
+                await self._sync_task
+            except asyncio.CancelledError:
+                pass
 
-            for ip in list(self._servers.keys()):
-                await self._remove_server(ip)
+        for ip in list(self._servers.keys()):
+            await self._remove_server(ip)
 
-            self._train_clients = []
-            self._eval_clients = []
-            self._client_urls = []
-            self._started = False
+        self._train_clients = []
+        self._eval_clients = []
+        self._client_urls = []
+        self._started = False
 
-    # --- Elastic internals ---
+    # --- Internals ---
 
     def _build_url(self, ip: str) -> str:
-        return f"http://{ip}:{self._elastic.port}"
+        return f"http://{ip}:{self._port}"
 
-    def _rebuild_elastic_clients(self) -> None:
-        """Rebuild inference clients when elastic pool's ready URLs change."""
+    def _rebuild_clients(self) -> None:
+        """Rebuild inference clients when ready URLs change."""
         if self._router_url and self.ready_urls:
             urls = [self._router_url]
         else:
@@ -204,11 +249,11 @@ class InferencePool:
         return setup_admin_clients(config)[0]
 
     async def _get_loaded_adapter(self, ip: str) -> AdapterState | None:
-        if ip not in self._elastic_admin_clients:
+        if ip not in self._admin_clients:
             return None
 
         try:
-            admin = self._elastic_admin_clients[ip]
+            admin = self._admin_clients[ip]
             response = await admin.get("/v1/models")
             response.raise_for_status()
             data = response.json()
@@ -277,7 +322,7 @@ class InferencePool:
         if self._desired.name and self._desired.path:
             try:
                 self.logger.debug(f"Loading adapter {self._desired.name} on {ip}")
-                await load_lora_adapter([self._elastic_admin_clients[ip]], self._desired.name, self._desired.path)
+                await load_lora_adapter([self._admin_clients[ip]], self._desired.name, self._desired.path)
             except Exception as e:
                 server.status = "unhealthy"
                 server.sync_failures += 1
@@ -337,7 +382,7 @@ class InferencePool:
             return False
 
         self.logger.debug(f"Discovered new inference server: {ip}")
-        self._elastic_admin_clients[ip] = admin_client
+        self._admin_clients[ip] = admin_client
         self._servers[ip] = ServerState(ip=ip, url=self._build_url(ip), status="discovering")
         await self._sync_server_adapter(ip)
         return True
@@ -345,13 +390,13 @@ class InferencePool:
     async def _remove_server(self, ip: str) -> None:
         self.logger.debug(f"Inference server removed: {ip}")
         self._servers.pop(ip, None)
-        if ip in self._elastic_admin_clients:
-            await self._elastic_admin_clients.pop(ip).aclose()
+        if ip in self._admin_clients:
+            await self._admin_clients.pop(ip).aclose()
 
     async def sync(self) -> tuple[int, int]:
         async with self._lock:
             discovered_ips = set(
-                await asyncio.get_event_loop().run_in_executor(None, discover_server_ips, self._elastic.hostname)
+                await asyncio.get_event_loop().run_in_executor(None, discover_server_ips, self._hostname)
             )
             known_ips = set(self._servers.keys())
 
@@ -367,9 +412,9 @@ class InferencePool:
                 removed += 1
 
             for ip in list(self._servers.keys()):
-                if ip not in self._elastic_admin_clients:
+                if ip not in self._admin_clients:
                     continue
-                if not await self._check_server_health(self._elastic_admin_clients[ip], ip):
+                if not await self._check_server_health(self._admin_clients[ip], ip):
                     self.logger.debug(f"Server {ip} failed health check, removing")
                     await self._remove_server(ip)
                     removed += 1
@@ -389,12 +434,12 @@ class InferencePool:
                     )
             except Exception as e:
                 self.logger.error(f"Error in elastic sync loop: {e}")
-            await asyncio.sleep(self._elastic.sync_interval)
+            await asyncio.sleep(self._sync_interval)
 
     async def _start(self) -> None:
         if self._started:
             return
-        self.logger.debug(f"Starting elastic inference pool (hostname={self._elastic.hostname})")
+        self.logger.debug(f"Starting elastic inference pool (hostname={self._hostname})")
         await self.sync()
         self.logger.debug(
             f"Initial discovery: {len(self._servers)} server(s), "
@@ -403,27 +448,9 @@ class InferencePool:
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._started = True
 
-    async def _sync_weights(self, weights_path: Path | None, lora_name: str | None = None, step: int = 0) -> None:
-        async with self._lock:
-            self._desired = AdapterState(
-                name=lora_name,
-                path=weights_path if lora_name else None,
-                step=step,
-            )
-            await asyncio.gather(*[self._sync_server_adapter(ip) for ip in self._servers.keys()])
 
-    async def _wait_for_elastic_ready(self, model_name: str = "", timeout: int = 1800, min_servers: int = 1) -> None:
-        start = time.time()
-        while time.time() - start < timeout:
-            await self.sync()
-            ready = sum(1 for s in self._servers.values() if s.status == "ready")
-            if ready >= min_servers:
-                return
-            self.logger.debug(f"Waiting for servers: {ready}/{min_servers} ready")
-            await asyncio.sleep(self._elastic.sync_interval)
-
-        ready = sum(1 for s in self._servers.values() if s.status == "ready")
-        raise TimeoutError(f"Timed out waiting for {min_servers} ready servers (got {ready})")
+# --- Type alias for both pool types ---
+InferencePool = StaticInferencePool | ElasticInferencePool
 
 
 # --- Factory ---
@@ -434,7 +461,7 @@ async def setup_inference_pool(
     model_name: str,
     train_client_type: str = "openai_chat_completions",
     eval_client_type: str = "openai_chat_completions",
-) -> InferencePool:
+) -> StaticInferencePool | ElasticInferencePool:
     """Create an inference pool from config."""
     logger = get_logger()
 
@@ -443,14 +470,16 @@ async def setup_inference_pool(
             f"Initializing elastic inference pool (hostname={client_config.elastic.hostname}, "
             f"port={client_config.elastic.port}, router_url={client_config.router_url})"
         )
-    else:
-        logger.info(
-            f"Initializing static inference pool (base_url={', '.join(client_config.base_url)}, "
-            f"dp_rank_count={client_config.dp_rank_count}, "
-            f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
+        return await ElasticInferencePool.create(
+            client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
         )
 
-    return await InferencePool.create(
+    logger.info(
+        f"Initializing static inference pool (base_url={', '.join(client_config.base_url)}, "
+        f"dp_rank_count={client_config.dp_rank_count}, "
+        f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
+    )
+    return StaticInferencePool(
         client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
     )
 
