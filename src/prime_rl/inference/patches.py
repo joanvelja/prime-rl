@@ -227,66 +227,35 @@ def _patch_qwen35_lora():
 def _patch_lora_key_prefix():
     """Patch vLLM's LoRA loading to handle keys without base_model.model. prefix.
 
-    The trainer's filesystem broadcast saves LoRA weights with raw model keys
-    (e.g. language_model.model.layers.0.mlp.experts.0.down_proj.lora_A.weight)
-    without the base_model.model. prefix that vLLM's parse_fine_tuned_lora_name()
-    expects. vLLM 0.19 added check_unexpected_modules() which rejects these keys.
-
-    This patch wraps from_local_checkpoint to normalize keys by prepending
-    base_model.model. when missing, so both old checkpoints and new broadcasts
-    work correctly.
+    The trainer's broadcast saves LoRA weights without the base_model.model.
+    prefix that vLLM 0.19's check_unexpected_modules() expects. This patch
+    rewrites the safetensors file in-place to add the prefix before vLLM loads it.
     """
-    import safetensors
+    from pathlib import Path
+
+    from safetensors.torch import load_file, save_file
     from vllm.lora.lora_model import LoRAModel
 
     _original_from_local_checkpoint = LoRAModel.from_local_checkpoint
 
     @classmethod
-    def _patched_from_local_checkpoint(cls, *args, **kwargs):
-        # Intercept safetensors loading to fix key prefixes
-        _original_safe_open = safetensors.safe_open
+    def _patched_from_local_checkpoint(cls, lora_dir, *args, **kwargs):
+        # Check if the safetensors file needs key prefix normalization
+        st_path = Path(lora_dir) / "adapter_model.safetensors"
+        if st_path.exists():
+            tensors = load_file(str(st_path))
+            needs_fix = any(
+                ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
+                for k in tensors
+            )
+            if needs_fix:
+                fixed = {
+                    (f"base_model.model.{k}" if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") else k): v
+                    for k, v in tensors.items()
+                }
+                save_file(fixed, str(st_path))
 
-        class _PrefixFixWrapper:
-            """Wraps a safetensors file handle to prepend base_model.model. to keys."""
-
-            def __init__(self, handle):
-                self._handle = handle
-                self._needs_prefix = False
-                self._keys = list(handle.keys())
-                # Check if any LoRA key is missing the expected prefix
-                for k in self._keys:
-                    if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model."):
-                        self._needs_prefix = True
-                        break
-
-            def keys(self):
-                if self._needs_prefix:
-                    return [f"base_model.model.{k}" if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") else k for k in self._keys]
-                return self._keys
-
-            def get_tensor(self, name):
-                if self._needs_prefix and name.startswith("base_model.model."):
-                    original_name = name[len("base_model.model."):]
-                    if original_name in self._keys:
-                        return self._handle.get_tensor(original_name)
-                return self._handle.get_tensor(name)
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return self._handle.__exit__(*args)
-
-        def _patched_safe_open(path, framework="pt", device="cpu"):
-            handle = _original_safe_open(path, framework=framework, device=device)
-            return _PrefixFixWrapper(handle)
-
-        # Temporarily replace safe_open during from_local_checkpoint
-        safetensors.safe_open = _patched_safe_open
-        try:
-            return _original_from_local_checkpoint.__func__(cls, *args, **kwargs)
-        finally:
-            safetensors.safe_open = _original_safe_open
+        return _original_from_local_checkpoint.__func__(cls, lora_dir, *args, **kwargs)
 
     LoRAModel.from_local_checkpoint = _patched_from_local_checkpoint
 
