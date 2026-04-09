@@ -119,6 +119,30 @@ class TrainSamplingConfig(BaseConfig):
         ),
     ] = {}
 
+    def to_sampling_args(self) -> dict[str, Any]:
+        """Convert to OAI-compatible sampling args dict, omitting None values."""
+        # Top-level OAI params
+        args: dict[str, Any] = {
+            "temperature": self.temperature,
+            "top_p": 1.0,
+            "logprobs": True,
+        }
+        if self.max_completion_tokens is not None:
+            args["max_completion_tokens"] = self.max_completion_tokens
+        if self.seed is not None:
+            args["seed"] = self.seed
+
+        # vLLM extra_body params
+        extra_body = dict(self.extra_body)
+        if self.min_tokens > 0:
+            extra_body["min_tokens"] = self.min_tokens
+        if self.repetition_penalty != 1.0:
+            extra_body["repetition_penalty"] = self.repetition_penalty
+        if extra_body:
+            args["extra_body"] = extra_body
+
+        return args
+
     @model_validator(mode="before")
     @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
@@ -134,41 +158,27 @@ class EvalSamplingConfig(BaseConfig):
     """Configures how tokens are sampled from the model for evaluation. Largely follows the vLLM sampling parameters."""
 
     temperature: Annotated[
-        float | None,
+        float,
         Field(
             ge=0,
-            description="Scales the output probability distribution. Lower values => more deterministic, higher values => more random. If 0, will sample greedily. Defaults to None, which means we fall back to the inference server's default value.",
+            description="Scales the output probability distribution. Lower values => more deterministic, higher values => more random. If 0, will sample greedily.",
         ),
-    ] = None
+    ] = 1.0
 
     repetition_penalty: Annotated[
-        float | None,
+        float,
         Field(
             ge=0,
-            description="Penalty for repeating tokens. Values > 1.0 discourage repetition, values < 1.0 encourage repetition, and 1.0 means no penalty. Defaults to None, which means we fall back to the inference server's default value.",
+            description="Penalty for repeating tokens. Values > 1.0 discourage repetition, values < 1.0 encourage repetition, and 1.0 means no penalty.",
         ),
-    ] = None
+    ] = 1.0
 
     top_p: Annotated[
-        float | None,
+        float,
         Field(
-            description="Cumulative probability of the top tokens to consider. If 1, all tokens are considered. Defaults to None, which means we fall back to the inference server's default value.",
+            description="Cumulative probability of the top tokens to consider. If 1, all tokens are considered.",
         ),
-    ] = None
-
-    top_k: Annotated[
-        int | None,
-        Field(
-            description="Number of top tokens to consider. If -1, all tokens are considered. Defaults to None, which means we fall back to the inference server's default value.",
-        ),
-    ] = None
-
-    min_p: Annotated[
-        float | None,
-        Field(
-            description="Minimum probability for a token to be considered, relative to the probability of the most likely token. If 0, all tokens are considered. Defaults to None, which means we fall back to the inference server's default value.",
-        ),
-    ] = None
+    ] = 1.0
 
     max_completion_tokens: Annotated[
         int | None,
@@ -179,23 +189,24 @@ class EvalSamplingConfig(BaseConfig):
     ] = None
 
     min_tokens: Annotated[
-        int | None,
+        int,
         Field(
-            description="Minimum number of output tokens to generate per sequence. Defaults to None, which means we fall back to the inference server's default value.",
+            ge=0,
+            description="Minimum number of output tokens to generate per sequence.",
         ),
-    ] = None
+    ] = 0
 
     reasoning_effort: Annotated[
         Literal["minimal", "low", "medium", "high"] | None,
         Field(
-            description="Constrains effort on reasoning for reasoning models. Currently supported values are minimal, low, medium, and high. Defaults to None, which means we fall back to the inference server's default value.",
+            description="Constrains effort on reasoning for reasoning models. Currently supported values are minimal, low, medium, and high.",
         ),
     ] = None
 
     seed: Annotated[
         int | None,
         Field(
-            description="Random seed to use for sampling. If None, no seeding is used. Defaults to None, which means we fall back to the inference server's default value.",
+            description="Random seed to use for sampling. If None, no seeding is used.",
         ),
     ] = None
 
@@ -207,6 +218,29 @@ class EvalSamplingConfig(BaseConfig):
             description="Extra body to use for the OpenAI API. By default, it is set to an empty dictionary.",
         ),
     ] = {}
+
+    def to_sampling_args(self) -> dict[str, Any]:
+        """Convert to OAI-compatible sampling args dict, omitting None values."""
+        args: dict[str, Any] = {
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+        }
+        if self.max_completion_tokens is not None:
+            args["max_completion_tokens"] = self.max_completion_tokens
+        if self.reasoning_effort is not None:
+            args["reasoning_effort"] = self.reasoning_effort
+        if self.seed is not None:
+            args["seed"] = self.seed
+
+        extra_body = dict(self.extra_body)
+        if self.min_tokens > 0:
+            extra_body["min_tokens"] = self.min_tokens
+        if self.repetition_penalty != 1.0:
+            extra_body["repetition_penalty"] = self.repetition_penalty
+        if extra_body:
+            args["extra_body"] = extra_body
+
+        return args
 
     @model_validator(mode="before")
     @classmethod
@@ -345,11 +379,11 @@ class TrainEnvConfig(EnvConfig):
     """Configures a training environment."""
 
     sampling: Annotated[
-        TrainSamplingConfig | None,
+        TrainSamplingConfig,
         Field(
-            description="Per-env sampling overrides. When set, these values override the group-level train sampling config for this env.",
+            description="Per-env sampling overrides. Unset fields inherit from the group-level train sampling config.",
         ),
-    ] = None
+    ] = TrainSamplingConfig()
 
 
 class EvalEnvConfig(EnvConfig):
@@ -370,6 +404,13 @@ class EvalEnvConfig(EnvConfig):
         ),
     ] = 1
 
+    sampling: Annotated[
+        EvalSamplingConfig,
+        Field(
+            description="Per-env sampling overrides. Unset fields inherit from the group-level eval sampling config.",
+        ),
+    ] = EvalSamplingConfig()
+
 
 class TrainConfig(BaseConfig):
     """Configures training environments and their shared sampling settings."""
@@ -382,7 +423,7 @@ class TrainConfig(BaseConfig):
     def resolve_sampling(self):
         """Resolve each env's sampling by merging group defaults with per-env overrides."""
         for env in self.env:
-            if env.sampling is None:
+            if "sampling" not in env.model_fields_set:
                 env.sampling = self.sampling
             else:
                 merged = self.sampling.model_dump()
@@ -439,6 +480,18 @@ class EvalConfig(BaseConfig):
             description="Interval at which to evaluate the model.",
         ),
     ] = 100
+
+    @model_validator(mode="after")
+    def resolve_sampling(self):
+        """Resolve each env's sampling by merging group defaults with per-env overrides."""
+        for env in self.env:
+            if "sampling" not in env.model_fields_set:
+                env.sampling = self.sampling
+            else:
+                merged = self.sampling.model_dump()
+                merged.update(env.sampling.model_dump(exclude_unset=True))
+                env.sampling = EvalSamplingConfig(**merged)
+        return self
 
     @model_validator(mode="after")
     def resolve_env_defaults(self):
@@ -1045,7 +1098,12 @@ class OrchestratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_config(self):
-        """Populate extra_env_kwargs from top-level fields."""
+        """Populate extra_env_kwargs and vLLM sampling defaults from top-level fields."""
+        is_vllm = self.teacher_rollout_model is None
         for env in self.train.env:
             env.extra_env_kwargs.update(max_seq_len=self.seq_len)
+            if is_vllm:
+                env.sampling.extra_body.setdefault("top_k", -1)
+                env.sampling.extra_body.setdefault("min_p", 0.0)
+                env.sampling.extra_body.setdefault("return_token_ids", True)
         return self

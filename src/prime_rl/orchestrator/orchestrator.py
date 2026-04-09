@@ -185,7 +185,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Load environments
     logger.info("Loading training environments")
-    train_envs = TrainEnvs(config.train.env, is_vllm=config.teacher_rollout_model is None)
+    train_envs = TrainEnvs(config.train.env)
     logger.info(f"Loaded {len(train_envs)} training environment(s) ({', '.join(train_envs.names)})")
 
     await train_envs.start(
@@ -198,7 +198,7 @@ async def orchestrate(config: OrchestratorConfig):
     eval_envs: EvalEnvs | None = None
     if config.eval:
         logger.info("Loading eval environment(s)")
-        eval_envs = EvalEnvs(config.eval.env, sampling=config.eval.sampling)
+        eval_envs = EvalEnvs(config.eval.env)
         logger.info(f"Loaded {len(eval_envs)} eval environment(s) ({', '.join(eval_envs.names)})")
 
         await eval_envs.start(

@@ -14,9 +14,8 @@ import verifiers as vf
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, EvalSamplingConfig, TrainEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
 from prime_rl.orchestrator.eval_utils import compute_pass_at_k
-from prime_rl.orchestrator.utils import get_eval_sampling_args, get_train_sampling_args
 from prime_rl.orchestrator.vf_utils import get_completion_len
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.monitor import get_monitor
@@ -152,6 +151,7 @@ class TrainEnv(Env):
 
     def __init__(self, config: TrainEnvConfig):
         super().__init__(config)
+        self.sampling_args = config.sampling.to_sampling_args()
 
     def get_dataset(self, seed: int | None = None):
         return self.env.get_dataset(seed=seed)
@@ -162,6 +162,7 @@ class EvalEnv(Env):
 
     def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
+        self.sampling_args = config.sampling.to_sampling_args()
         self.examples = self.env.get_eval_dataset(n=config.num_examples).to_list()
 
     async def evaluate(
@@ -363,22 +364,18 @@ class Envs(Generic[EnvT]):
 class TrainEnvs(Envs[TrainEnv]):
     """Collection of training environments."""
 
-    def __init__(self, configs: Sequence[TrainEnvConfig], is_vllm: bool = True):
+    def __init__(self, configs: Sequence[TrainEnvConfig]):
         self._envs: dict[str, TrainEnv] = {}
         for config in configs:
             env = TrainEnv(config)
-            assert config.sampling is not None, "TrainEnvConfig.sampling must be resolved before constructing TrainEnvs"
-            env.sampling_args = get_train_sampling_args(config.sampling, is_vllm=is_vllm)
             self._envs[env.name] = env
 
 
 class EvalEnvs(Envs[EvalEnv]):
     """Collection of evaluation environments."""
 
-    def __init__(self, configs: Sequence[EvalEnvConfig], sampling: EvalSamplingConfig | None = None):
+    def __init__(self, configs: Sequence[EvalEnvConfig]):
         self._envs: dict[str, EvalEnv] = {}
         for config in configs:
             env = EvalEnv(config)
-            if sampling is not None:
-                env.sampling_args = get_eval_sampling_args(sampling)
             self._envs[env.name] = env

@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from verifiers.utils.client_utils import setup_openai_client
 
-from prime_rl.configs.orchestrator import EvalSamplingConfig, OrchestratorConfig, TrainSamplingConfig
+from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.transport import TrainingSample
 from prime_rl.utils.utils import (
     format_time,
@@ -19,62 +19,6 @@ from prime_rl.utils.utils import (
     get_ckpt_dir,
     get_step_path,
 )
-
-
-def get_train_sampling_args(sampling_config: TrainSamplingConfig, is_vllm: bool = True) -> dict:
-    # Convert TrainSamplingConfig to vLLM OAI sampling args
-    # https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#extra-parameters_2
-    sampling_args = dict(sampling_config)
-    sampling_args["top_p"] = 1.0
-    sampling_args["logprobs"] = True
-    extra_body = dict(sampling_config.extra_body)
-
-    min_tokens = sampling_args.pop("min_tokens")
-    repetition_penalty = sampling_args.pop("repetition_penalty")
-
-    if min_tokens > 0:
-        extra_body["min_tokens"] = min_tokens
-    if repetition_penalty != 1.0:
-        extra_body["repetition_penalty"] = repetition_penalty
-
-    if is_vllm:
-        extra_body["top_k"] = -1
-        extra_body["min_p"] = 0.0
-        extra_body["return_token_ids"] = True
-
-    if extra_body:
-        sampling_args["extra_body"] = extra_body
-
-    return sampling_args
-
-
-def get_eval_sampling_args(sampling_config: EvalSamplingConfig) -> dict[str, Any]:
-    """Get sampling args for evaluation."""
-    sampling_args: dict[str, Any] = {}
-
-    if sampling_config.temperature is not None:
-        sampling_args["temperature"] = sampling_config.temperature
-    if sampling_config.max_completion_tokens is not None:
-        sampling_args["max_completion_tokens"] = sampling_config.max_completion_tokens
-    if sampling_config.top_p is not None:
-        sampling_args["top_p"] = sampling_config.top_p
-    if sampling_config.reasoning_effort is not None:
-        sampling_args["reasoning_effort"] = sampling_config.reasoning_effort
-
-    extra_body: dict[str, Any] = sampling_config.extra_body.copy()
-
-    if sampling_config.top_k is not None:
-        extra_body["top_k"] = sampling_config.top_k
-    if sampling_config.min_p is not None:
-        extra_body["min_p"] = sampling_config.min_p
-    if sampling_config.min_tokens is not None:
-        extra_body["min_tokens"] = sampling_config.min_tokens
-    if sampling_config.repetition_penalty is not None:
-        extra_body["repetition_penalty"] = sampling_config.repetition_penalty
-
-    sampling_args["extra_body"] = extra_body
-
-    return sampling_args
 
 
 def print_benchmark(history: dict[str, list[Any]]) -> None:
