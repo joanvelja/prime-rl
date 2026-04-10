@@ -56,6 +56,7 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
             prefill_port=config.deployment.prefill_port,
             decode_port=config.deployment.decode_port,
             router_port=config.deployment.router_port,
+            router_policy=config.deployment.router_policy,
             data_parallel_rpc_port=config.data_parallel_rpc_port,
             use_deep_gemm=config.use_deep_gemm,
             prefill_env_overrides=config.deployment.prefill_env_overrides,
@@ -72,6 +73,7 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
         template_vars.update(
             router_port=config.deployment.router_port,
             backend_port=config.deployment.backend_port,
+            router_policy=config.deployment.router_policy,
         )
 
     script = template.render(**template_vars)

@@ -140,6 +140,9 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
     router_port: Annotated[int, Field(description="Port for the vllm-router.")] = 8000
     backend_port: Annotated[int, Field(description="Port for vLLM backend instances.")] = 8100
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
 
 
 class KVCacheOffloadConfig(BaseModel):
@@ -191,6 +194,9 @@ class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
     router_port: Annotated[int, Field(description="Port for the vllm-router on each replica.")] = 8000
     prefill_port: Annotated[int, Field(description="Port for prefill vLLM instances.")] = 8100
     decode_port: Annotated[int, Field(description="Port for decode vLLM instances.")] = 8200
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
 
     prefill_env_overrides: Annotated[
         dict[str, str],
