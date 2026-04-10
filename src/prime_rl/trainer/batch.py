@@ -129,6 +129,10 @@ def packed_samples_into_micro_bs(
                     if bin_content.routed_experts is None:
                         bin_content.routed_experts = []
                     bin_content.routed_experts.extend(sample.routed_experts)
+                if sample.mm_token_type_ids is not None:
+                    if bin_content.mm_token_type_ids is None:
+                        bin_content.mm_token_type_ids = []
+                    bin_content.mm_token_type_ids.extend(sample.mm_token_type_ids)
                 bin_content.position_ids.extend(sample.position_ids)
                 bin_content.lora_num_tokens[idx] += len(sample.input_ids)
                 break
