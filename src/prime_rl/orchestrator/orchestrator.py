@@ -30,13 +30,12 @@ monkey_patch_chat_completion_logprobs()
 
 import pandas as pd
 import verifiers as vf
-from aiolimiter import AsyncLimiter
 from transformers import AutoProcessor, AutoTokenizer
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
-from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RateLimiter
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import EvalScheduler, Scheduler
@@ -226,7 +225,7 @@ async def orchestrate(config: OrchestratorConfig):
             checkpoint_step = config.ckpt.resume_step
 
     concurrency_limiter = ConcurrencyLimiter(config.max_inflight_rollouts)
-    rate_limiter = AsyncLimiter(max_rate=config.tasks_per_minute, time_period=60) if config.tasks_per_minute else None
+    rate_limiter = RateLimiter(max_rate=config.tasks_per_minute, time_period=60) if config.tasks_per_minute else None
     scheduler = Scheduler(
         train_envs=train_envs,
         buffer=buffer,

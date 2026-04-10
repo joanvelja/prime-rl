@@ -2,6 +2,23 @@ from __future__ import annotations
 
 import asyncio
 
+from aiolimiter import AsyncLimiter
+
+
+class RateLimiter:
+    """Rate limiter that supports variable-cost acquire (N rollouts at once).
+
+    Wraps aiolimiter.AsyncLimiter, which rejects acquire(amount) when amount
+    exceeds max_rate. We loop instead so group-scoring envs work correctly.
+    """
+
+    def __init__(self, max_rate: float, time_period: float = 60):
+        self._limiter = AsyncLimiter(max_rate=max_rate, time_period=time_period)
+
+    async def acquire(self, count: int = 1) -> None:
+        for _ in range(count):
+            await self._limiter.acquire()
+
 
 class ConcurrencyLimiter:
     """Shared concurrency limiter that gates both train and eval rollouts.

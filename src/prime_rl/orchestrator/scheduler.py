@@ -7,11 +7,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import verifiers as vf
-from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
-from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RateLimiter
 from prime_rl.orchestrator.envs import EvalEnv, TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -67,7 +66,7 @@ class Scheduler:
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
-        rate_limiter: AsyncLimiter | None = None,
+        rate_limiter: RateLimiter | None = None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
     ):
@@ -202,8 +201,7 @@ class Scheduler:
             rollout_count = 1
 
         if self.rate_limiter:
-            for _ in range(rollout_count):
-                await self.rate_limiter.acquire()
+            await self.rate_limiter.acquire(rollout_count)
 
         if not self.limiter.try_acquire(rollout_count):
             return
@@ -577,7 +575,7 @@ class EvalScheduler:
         self,
         concurrency_limiter: ConcurrencyLimiter,
         inference_pool: InferencePool,
-        rate_limiter: AsyncLimiter | None = None,
+        rate_limiter: RateLimiter | None = None,
     ):
         self.logger = get_logger()
         self.limiter = concurrency_limiter
@@ -615,8 +613,7 @@ class EvalScheduler:
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
                 try:
                     if self.rate_limiter:
-                        for _ in range(cost_per_coro):
-                            await self.rate_limiter.acquire()
+                        await self.rate_limiter.acquire(cost_per_coro)
                     await self.limiter.acquire(cost_per_coro)
                     client = await self.inference_pool.get_eval_client()
                     outputs = await eval_env.run_group(
