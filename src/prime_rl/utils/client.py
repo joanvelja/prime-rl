@@ -119,8 +119,9 @@ async def setup_inference_pool(
 
     if train_client_type == "openai_chat_completions_token":
         logger.warning(
-            "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
-            "history and the chat template has the extension property."
+            "Token-in-token-out (TITO) client is enabled for training. Only use"
+            "this if your environment has a linear history and the chat"
+            "template has the extension property."
         )
 
     if client_config.is_elastic:
