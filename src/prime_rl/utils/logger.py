@@ -9,7 +9,28 @@ _LOGGER = None
 _JSON_LOGGING = False
 
 NO_BOLD = "\033[22m"
+DIM = "\033[2m"
 RESET = "\033[0m"
+
+
+class _DimStream:
+    """Wraps a stream so that writes appear dim (ANSI dim). Used to visually
+    de-emphasise raw stdout/stderr output that doesn't go through loguru."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def write(self, s: str):
+        if s and s != "\n":
+            self._wrapped.write(f"{DIM}{s}{RESET}")
+        else:
+            self._wrapped.write(s)
+
+    def flush(self):
+        self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
 
 
 def build_log_entry(record) -> dict:
@@ -55,8 +76,9 @@ def build_log_entry(record) -> dict:
 def json_sink(message) -> None:
     """Sink that outputs flat JSON to stdout for log aggregation (Loki, Grafana, etc.)."""
     log_entry = build_log_entry(message.record)
-    sys.stdout.write(json_module.dumps(log_entry) + "\n")
-    sys.stdout.flush()
+    out = sys.stdout._wrapped if isinstance(sys.stdout, _DimStream) else sys.stdout
+    out.write(json_module.dumps(log_entry) + "\n")
+    out.flush()
 
 
 class InterceptHandler(logging.Handler):
@@ -139,7 +161,9 @@ def setup_logger(
     if json_logging:
         logger.add(json_sink, level=log_level.upper(), enqueue=True)
     else:
-        logger.add(sys.stdout, format=format, level=log_level.upper(), colorize=True)
+        # Capture the real stdout before wrapping, so loguru writes without dim
+        real_stdout = sys.stdout._wrapped if isinstance(sys.stdout, _DimStream) else sys.stdout
+        logger.add(real_stdout, format=format, level=log_level.upper(), colorize=True)
 
     # Disable critical logging
     logger.critical = lambda _: None
@@ -148,6 +172,16 @@ def setup_logger(
     _LOGGER = logger
 
     return logger
+
+
+def dim_unlogged_output():
+    """Replace sys.stdout/stderr with dim wrappers so that raw output (not from loguru)
+    appears visually muted. Call this *before* setup_logger() — the logger will
+    automatically write to the unwrapped stream."""
+    if not isinstance(sys.stdout, _DimStream):
+        sys.stdout = _DimStream(sys.stdout)
+    if not isinstance(sys.stderr, _DimStream):
+        sys.stderr = _DimStream(sys.stderr)
 
 
 def get_logger():

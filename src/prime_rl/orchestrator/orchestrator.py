@@ -56,7 +56,7 @@ from prime_rl.utils.client import (
 )
 from prime_rl.utils.config import cli
 from prime_rl.utils.heartbeat import Heartbeat
-from prime_rl.utils.logger import setup_logger
+from prime_rl.utils.logger import dim_unlogged_output, setup_logger
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import (
@@ -78,6 +78,7 @@ SHUTDOWN_TIMEOUT_S = 300
 @clean_exit
 async def orchestrate(config: OrchestratorConfig):
     # Initialize the logger
+    dim_unlogged_output()
     logger = setup_logger(
         config.log.level,
         json_logging=config.log.json_logging,

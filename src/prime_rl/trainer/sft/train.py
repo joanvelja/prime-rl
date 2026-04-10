@@ -20,7 +20,7 @@ from prime_rl.configs.sft import SFTConfig
 from prime_rl.utils.cp import setup_cp_params, shard_for_cp
 from prime_rl.trainer.runs import Progress, get_multi_run_manager, setup_multi_run_manager
 from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
-from prime_rl.utils.logger import setup_logger
+from prime_rl.utils.logger import dim_unlogged_output, setup_logger
 from prime_rl.trainer.optim import setup_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler
 from prime_rl.trainer.model import (
@@ -60,6 +60,7 @@ from torchtitan.distributed.utils import clip_grad_norm_
 def train(config: SFTConfig):
     # Setup world and logger
     world = get_world()
+    dim_unlogged_output()
     logger = setup_logger(
         config.log.level,
         json_logging=config.log.json_logging,

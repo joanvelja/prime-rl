@@ -25,7 +25,7 @@ from prime_rl.utils.cp import (
     setup_cp_params,
     shard_for_cp,
 )
-from prime_rl.utils.logger import setup_logger
+from prime_rl.utils.logger import dim_unlogged_output, setup_logger
 from prime_rl.trainer.rl.loss import (
     compute_entropy,
     compute_loss,
@@ -72,6 +72,7 @@ from torchtitan.distributed.utils import clip_grad_norm_
 def train(config: TrainerConfig):
     # Setup world and logger
     world = get_world()
+    dim_unlogged_output()
     logger = setup_logger(
         config.log.level,
         json_logging=config.log.json_logging,
