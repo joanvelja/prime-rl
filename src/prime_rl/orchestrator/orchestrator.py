@@ -316,9 +316,34 @@ async def orchestrate(config: OrchestratorConfig):
     else:
         logger.info("Training from scratch")
 
+    async def _run_eval(
+        eval_sched: EvalScheduler,
+        envs: list,
+        model_name: str,
+        eval_ckpt_step: int,
+        eval_step: int,
+    ) -> None:
+        """Run evals, log metrics per-env, and save rollouts to disk."""
+        all_rollouts: list[vf.RolloutOutput] = []
+        async for result in eval_sched.evaluate_envs(envs, model_name=model_name):
+            log_eval_metrics(
+                env_name=result.env_name,
+                rollouts=result.rollouts,
+                total_rollouts=result.total_rollouts,
+                rollouts_per_example=result.rollouts_per_example,
+                eval_time=result.eval_time,
+                ckpt_step=eval_ckpt_step,
+                step=eval_step,
+            )
+            all_rollouts.extend(result.rollouts)
+        if all_rollouts:
+            step_path = get_step_path(get_rollout_dir(config.output_dir), eval_step)
+            await asyncio.to_thread(save_rollouts, all_rollouts, step_path / "eval_rollouts.jsonl")
+
     # Iterate over dataset in batches
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
+    eval_task: asyncio.Task | None = None
 
     while True:
         # Check if this run has been evicted by the trainer
@@ -352,9 +377,7 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info(f"Starting orchestrator step {progress.step}")
         step_start_time = time.perf_counter()
 
-        # Run evals BEFORE training (blocking). Scheduling is paused during eval
-        # to ensure consistent weights. Each eval env has its own interval.
-        # TODO: for overlapping eval, remove pause/resume and rely on the shared limiter.
+        # Determine which eval envs need evaluation at this checkpoint
         envs_to_eval = []
         if config.eval:
             assert eval_envs is not None
@@ -376,35 +399,27 @@ async def orchestrate(config: OrchestratorConfig):
             env_names = ", ".join(e.name for e in envs_to_eval)
             logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
-            # Pause weight updates and re-scheduling of training rollouts during eval
-            # to avoid evaluating across different checkpoints and avoid congestion
-            train_scheduler.pause()
-
-            # For heavy eval workloads, it might be necessary additionally cancel in-flight training rollouts
             if config.eval.cancel_inflight_rollouts_on_eval:
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await train_scheduler.cancel_inflight_rollouts()
 
-            eval_rollouts: list[vf.RolloutOutput] = []
-            async for result in eval_scheduler.evaluate_envs(envs_to_eval, model_name=train_scheduler.model_name):
-                log_eval_metrics(
-                    env_name=result.env_name,
-                    rollouts=result.rollouts,
-                    total_rollouts=result.total_rollouts,
-                    rollouts_per_example=result.rollouts_per_example,
-                    eval_time=result.eval_time,
-                    ckpt_step=ckpt_step,
-                    step=progress.step,
+            if config.eval.overlap_train_and_eval_rollouts:
+                # Overlapping mode: eval runs concurrently with training via the shared limiter.
+                # At most one eval task runs at a time — warn if the previous one hasn't finished.
+                if eval_task is not None and not eval_task.done():
+                    logger.warning(
+                        "New eval triggered while previous eval is still running. "
+                        "Consider increasing the eval interval or max_inflight_rollouts."
+                    )
+                    await eval_task
+                eval_task = asyncio.create_task(
+                    _run_eval(eval_scheduler, envs_to_eval, train_scheduler.model_name, ckpt_step, progress.step)
                 )
-                eval_rollouts.extend(result.rollouts)
-
-            # Save eval rollouts to disk (fire-and-forget background thread)
-            if eval_rollouts:
-                step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-                await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
-
-            # Resume weight updates
-            train_scheduler.resume()
+            else:
+                # Non-overlapping mode: pause train scheduling during eval
+                train_scheduler.pause()
+                await _run_eval(eval_scheduler, envs_to_eval, train_scheduler.model_name, ckpt_step, progress.step)
+                train_scheduler.resume()
 
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
@@ -706,25 +721,13 @@ async def orchestrate(config: OrchestratorConfig):
         if heart is not None:
             heart.beat()
 
+    # Await any pending overlapping eval before final eval
+    if eval_task is not None and not eval_task.done():
+        await eval_task
+
     if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
-        eval_rollouts = []
-        async for result in eval_scheduler.evaluate_envs(list(eval_envs), model_name=train_scheduler.model_name):
-            log_eval_metrics(
-                env_name=result.env_name,
-                rollouts=result.rollouts,
-                total_rollouts=result.total_rollouts,
-                rollouts_per_example=result.rollouts_per_example,
-                eval_time=result.eval_time,
-                ckpt_step=ckpt_step,
-                step=progress.step,
-            )
-            eval_rollouts.extend(result.rollouts)
-
-        # Save final eval rollouts to disk
-        if eval_rollouts:
-            step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-            await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
+        await _run_eval(eval_scheduler, list(eval_envs), train_scheduler.model_name, ckpt_step, progress.step)
 
     # Log final (immutable) samples and distributions to monitor(s)
     monitor.log_final_samples()
