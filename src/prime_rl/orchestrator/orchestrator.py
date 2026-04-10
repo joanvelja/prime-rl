@@ -706,7 +706,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
-        eval_rollouts: list[vf.RolloutOutput] = []
+        eval_rollouts = []
         async for result in eval_scheduler.run(list(eval_envs), model_name=train_scheduler.model_name):
             log_eval_metrics(
                 env_name=result.env_name,

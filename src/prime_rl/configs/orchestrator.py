@@ -1030,7 +1030,6 @@ class OrchestratorConfig(BaseConfig):
         return data
 
     @model_validator(mode="before")
-    @classmethod
     def _env_to_train(cls, data: Any) -> Any:
         """Allow [[env]] and [sampling] as shorthand for [train] with [[train.env]] and [train.sampling]."""
         if not isinstance(data, dict):
