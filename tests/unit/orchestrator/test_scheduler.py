@@ -3,12 +3,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
 from prime_rl.orchestrator.scheduler import InflightRequest, Scheduler
 from prime_rl.utils.async_utils import safe_cancel
 
 
 def make_scheduler() -> Scheduler:
     scheduler = Scheduler.__new__(Scheduler)
+    scheduler.limiter = ConcurrencyLimiter(128)
     scheduler.max_async_level = 1
     scheduler.strict_async_level = False
     scheduler.step = 9
@@ -35,6 +37,7 @@ def make_scheduler() -> Scheduler:
 def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
     async def run() -> None:
         scheduler = Scheduler.__new__(Scheduler)
+        scheduler.limiter = ConcurrencyLimiter(128)
         scheduler.max_off_policy_steps = 1
         scheduler.cancelled_rollouts_count = 0
         scheduler.logger = MagicMock()
@@ -157,5 +160,49 @@ def test_stop_cancels_inflight_policy_update_task():
         assert cancelled.is_set()
         assert scheduler.update_policy_task is None
         assert scheduler.inflight_policy_update_task is None
+
+    asyncio.run(run())
+
+
+def test_concurrency_limiter_basic():
+    limiter = ConcurrencyLimiter(10)
+    assert limiter.remaining == 10
+    assert limiter.used == 0
+
+    assert limiter.try_acquire(3)
+    assert limiter.remaining == 7
+    assert limiter.used == 3
+
+    assert not limiter.try_acquire(8)
+    assert limiter.remaining == 7
+
+    limiter.release(3)
+    assert limiter.remaining == 10
+    assert limiter.used == 0
+
+
+def test_concurrency_limiter_acquire_blocks():
+    async def run():
+        limiter = ConcurrencyLimiter(2)
+        limiter.try_acquire(2)
+        assert limiter.remaining == 0
+
+        acquired = False
+
+        async def waiter():
+            nonlocal acquired
+            await limiter.acquire(1)
+            acquired = True
+
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        assert not acquired
+
+        limiter.release(1)
+        await asyncio.sleep(0)
+        assert acquired
+
+        limiter.release(1)
+        task.cancel()
 
     asyncio.run(run())

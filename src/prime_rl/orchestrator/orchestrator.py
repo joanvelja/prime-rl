@@ -30,14 +30,16 @@ monkey_patch_chat_completion_logprobs()
 
 import pandas as pd
 import verifiers as vf
+from aiolimiter import AsyncLimiter
 from transformers import AutoProcessor, AutoTokenizer
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
 from prime_rl.orchestrator.envs import EvalEnv, EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
-from prime_rl.orchestrator.scheduler import Scheduler
+from prime_rl.orchestrator.scheduler import EvalScheduler, Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
@@ -195,6 +197,7 @@ async def orchestrate(config: OrchestratorConfig):
     logger.success("Train environment(s) ready")
 
     eval_envs: EvalEnvs | None = None
+    eval_scheduler: EvalScheduler | None = None
     if config.eval:
         logger.info("Loading eval environment(s)")
         eval_envs = EvalEnvs(config.eval.env)
@@ -222,20 +225,29 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             checkpoint_step = config.ckpt.resume_step
 
+    concurrency_limiter = ConcurrencyLimiter(config.max_inflight_rollouts)
+    rate_limiter = AsyncLimiter(max_rate=config.tasks_per_minute, time_period=60) if config.tasks_per_minute else None
     scheduler = Scheduler(
         train_envs=train_envs,
         buffer=buffer,
         inference_pool=inference_pool,
-        max_inflight_rollouts=config.max_inflight_rollouts,
+        concurrency_limiter=concurrency_limiter,
         max_async_level=config.max_async_level,
         max_off_policy_steps=config.max_off_policy_steps,
         strict_async_level=config.strict_async_level,
-        tasks_per_minute=config.tasks_per_minute,
+        rate_limiter=rate_limiter,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
         config=config,
     )
     scheduler.model_name = rollout_model_name
+
+    if eval_envs is not None:
+        eval_scheduler = EvalScheduler(
+            concurrency_limiter=concurrency_limiter,
+            inference_pool=inference_pool,
+            rate_limiter=rate_limiter,
+        )
 
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
@@ -371,11 +383,12 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
+            assert eval_scheduler is not None
             eval_results = await asyncio.gather(
                 *[
-                    eval_env.evaluate(
+                    eval_scheduler.evaluate(
+                        eval_env=eval_env,
                         model_name=scheduler.model_name,
-                        get_client=inference_pool.get_eval_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
@@ -692,13 +705,13 @@ async def orchestrate(config: OrchestratorConfig):
         if heart is not None:
             heart.beat()
 
-    if config.eval and eval_envs is not None:
+    if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
         eval_results = await asyncio.gather(
             *[
-                eval_env.evaluate(
+                eval_scheduler.evaluate(
+                    eval_env=eval_env,
                     model_name=scheduler.model_name,
-                    get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )

@@ -171,6 +171,7 @@ class EvalEnv(Env):
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
         ckpt_step: int,
         step: int,
+        on_rollout_done: Callable[[int], None] | None = None,
     ) -> list[vf.RolloutOutput]:
         num_examples = len(self.examples)
         rollouts_per_example = self.config.rollouts_per_example
@@ -197,6 +198,9 @@ class EvalEnv(Env):
                     get_logger().warning(f"Group failed: {e}")
                     pbar.update(rollouts_per_example)
                     return None
+                finally:
+                    if on_rollout_done is not None:
+                        on_rollout_done(rollouts_per_example)
 
             coros = [run_with_progress(example) for example in self.examples]
 
@@ -213,6 +217,9 @@ class EvalEnv(Env):
                     get_logger().warning(f"Rollout failed: {e}")
                     pbar.update(1)
                     return None
+                finally:
+                    if on_rollout_done is not None:
+                        on_rollout_done(1)
 
             coros = [run_with_progress(example) for example in self.examples for _ in range(rollouts_per_example)]
 

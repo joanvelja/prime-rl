@@ -10,7 +10,8 @@ from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
-from prime_rl.orchestrator.envs import TrainEnvs
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
+from prime_rl.orchestrator.envs import EvalEnv, TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
 from prime_rl.utils.client import InferencePool
@@ -61,26 +62,23 @@ class Scheduler:
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
-        max_inflight_rollouts: int,
+        concurrency_limiter: ConcurrencyLimiter,
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
-        tasks_per_minute: int | None,
+        rate_limiter: AsyncLimiter | None = None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
     ):
         self.logger = get_logger()
-        if tasks_per_minute is not None:
-            self.rate_limiter = AsyncLimiter(max_rate=tasks_per_minute, time_period=60)
-        else:
-            self.rate_limiter = None
+        self.rate_limiter = rate_limiter
         self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
         self.batch_size = config.batch_size
         self.token_batch_size = config.token_batch_size
         self.rollouts_per_example = config.rollouts_per_example
-        self.max_inflight_rollouts = max_inflight_rollouts
+        self.limiter = concurrency_limiter
         self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
         self.strict_async_level = strict_async_level
@@ -145,6 +143,7 @@ class Scheduler:
         self.inflight_requests.clear()
         self.groups.clear()
         self.cancelled_rollouts_count += count
+        self.limiter.release(count)
 
     @staticmethod
     def _client_identity(c: vf.ClientConfig) -> tuple[str, str | None]:
@@ -175,6 +174,8 @@ class Scheduler:
             rollout_count += info.rollout_count
         self.groups.pop(group_id, None)
         await safe_cancel_all(tasks_to_cancel)
+        if rollout_count:
+            self.limiter.release(rollout_count)
         return rollout_count
 
     async def schedule_rollout(self, group_id: int):
@@ -198,6 +199,13 @@ class Scheduler:
 
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
+        else:
+            rollout_count = 1
+
+        if not self.limiter.try_acquire(rollout_count):
+            return
+
+        if env.requires_group_scoring:
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
                 env.run_group(
@@ -208,7 +216,6 @@ class Scheduler:
                 )
             )
         else:
-            rollout_count = 1
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
                 env.run_rollout(
@@ -235,7 +242,7 @@ class Scheduler:
         return self.inflight_rollout_count + pending
 
     async def _schedule_next_request(self) -> bool:
-        remaining_capacity = self.max_inflight_rollouts - self.inflight_rollout_count
+        remaining_capacity = self.limiter.remaining
 
         if remaining_capacity <= 0:
             return False
@@ -412,6 +419,7 @@ class Scheduler:
                 if rollout_info is None:
                     continue
 
+                self.limiter.release(rollout_info.rollout_count)
                 group_id = rollout_info.group_id
                 env_name = rollout_info.env_name
 
@@ -546,3 +554,45 @@ class Scheduler:
         metrics.update(self.inference_pool.get_metrics())
 
         return metrics
+
+
+class EvalScheduler:
+    """Manages concurrency-limited eval rollout scheduling via a shared ConcurrencyLimiter."""
+
+    def __init__(
+        self,
+        concurrency_limiter: ConcurrencyLimiter,
+        inference_pool: InferencePool,
+        rate_limiter: AsyncLimiter | None = None,
+    ):
+        self.limiter = concurrency_limiter
+        self.inference_pool = inference_pool
+        self.rate_limiter = rate_limiter
+
+    async def evaluate(
+        self,
+        eval_env: EvalEnv,
+        model_name: str,
+        ckpt_step: int,
+        step: int,
+    ) -> list[vf.RolloutOutput]:
+        """Run eval with concurrency limiting via the shared limiter."""
+        rollouts_per_example = eval_env.config.rollouts_per_example
+        cost_per_coro = rollouts_per_example if eval_env.requires_group_scoring else 1
+
+        async def get_client() -> vf.ClientConfig:
+            if self.rate_limiter:
+                await self.rate_limiter.acquire()
+            await self.limiter.acquire(cost_per_coro)
+            return await self.inference_pool.get_eval_client()
+
+        def on_rollout_done(count: int) -> None:
+            self.limiter.release(count)
+
+        return await eval_env.evaluate(
+            model_name=model_name,
+            get_client=get_client,
+            ckpt_step=ckpt_step,
+            step=step,
+            on_rollout_done=on_rollout_done,
+        )
