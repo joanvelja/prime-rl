@@ -123,7 +123,7 @@ class ElasticInferencePool:
         self._lock = asyncio.Lock()
         self._desired: AdapterState = AdapterState()
 
-        self._clients: list[vf.ClientConfig] = []
+        self._train_clients: list[vf.ClientConfig] = []
         self._eval_clients: list[vf.ClientConfig] = []
         self._client_urls: list[str] = []
 
@@ -184,13 +184,13 @@ class ElasticInferencePool:
                 headers=self.client_config.headers,
                 dp_rank_count=self.client_config.dp_rank_count,
             )
-            self._clients = setup_clients(url_config, client_type=self.train_client_type) if urls else []
+            self._train_clients = setup_clients(url_config, client_type=self.train_client_type) if urls else []
             self._eval_clients = setup_clients(url_config, client_type=self.eval_client_type) if urls else []
 
     @property
     def train_clients(self) -> list[vf.ClientConfig]:
         self._rebuild_clients()
-        return self._clients
+        return self._train_clients
 
     @property
     def eval_clients(self) -> list[vf.ClientConfig]:
@@ -442,7 +442,7 @@ class ElasticInferencePool:
         for ip in list(self._servers.keys()):
             await self._remove_server(ip)
 
-        self._clients = []
+        self._train_clients = []
         self._client_urls = []
         self._started = False
 

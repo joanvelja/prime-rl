@@ -65,7 +65,7 @@ class StaticInferencePool:
         train_client_type: str = "openai_chat_completions",
         eval_client_type: str = "openai_chat_completions",
     ):
-        self._clients = setup_clients(client_config, client_type=train_client_type)
+        self._train_clients = setup_clients(client_config, client_type=train_client_type)
         self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
         self._admin_clients = setup_admin_clients(client_config)
         self._skip_model_check = client_config.skip_model_check
@@ -74,7 +74,7 @@ class StaticInferencePool:
 
     @property
     def train_clients(self) -> list[vf.ClientConfig]:
-        return self._clients
+        return self._train_clients
 
     @property
     def admin_clients(self) -> list[AsyncClient]:
