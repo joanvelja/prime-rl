@@ -107,7 +107,7 @@ class ElasticInferencePool:
         model_name: str,
         port: int = 8000,
         sync_interval: float = 5.0,
-        client_type: str = "openai_chat_completions",
+        train_client_type: str = "openai_chat_completions",
         eval_client_type: str = "openai_chat_completions",
         router_url: str | None = None,
     ):
@@ -118,7 +118,7 @@ class ElasticInferencePool:
         self.base_model_name = model_name  # Keep original for health checks
         self.port = port
         self.sync_interval = sync_interval
-        self.client_type = client_type
+        self.train_client_type = train_client_type
         self.eval_client_type = eval_client_type
         self.router_url = router_url
 
@@ -141,7 +141,7 @@ class ElasticInferencePool:
         cls,
         config: ClientConfig,
         model_name: str,
-        client_type: str = "openai_chat_completions",
+        train_client_type: str = "openai_chat_completions",
         eval_client_type: str = "openai_chat_completions",
     ) -> ElasticInferencePool:
         if config.elastic is None:
@@ -152,7 +152,7 @@ class ElasticInferencePool:
             model_name=model_name,
             port=config.elastic.port,
             sync_interval=config.elastic.sync_interval,
-            client_type=client_type,
+            train_client_type=train_client_type,
             eval_client_type=eval_client_type,
             router_url=config.router_url,
         )
@@ -195,7 +195,7 @@ class ElasticInferencePool:
                 headers=self.client_config.headers,
                 dp_rank_count=self.client_config.dp_rank_count,
             )
-            self._clients = setup_clients(url_config, client_type=self.client_type) if urls else []
+            self._clients = setup_clients(url_config, client_type=self.train_client_type) if urls else []
             self._eval_clients = setup_clients(url_config, client_type=self.eval_client_type) if urls else []
 
     @property

@@ -112,7 +112,7 @@ class StaticInferencePool:
 async def setup_inference_pool(
     client_config: ClientConfig,
     model_name: str,
-    client_type: str = "openai_chat_completions",
+    train_client_type: str = "openai_chat_completions",
     eval_client_type: str = "openai_chat_completions",
 ) -> InferencePool:
     """Create an inference pool from config (static or elastic)."""
@@ -122,7 +122,7 @@ async def setup_inference_pool(
         from prime_rl.utils.elastic import ElasticInferencePool
 
         return await ElasticInferencePool.from_config(
-            client_config, model_name=model_name, client_type=client_type, eval_client_type=eval_client_type
+            client_config, model_name=model_name, client_type=train_client_type, eval_client_type=eval_client_type
         )
 
     logger.info(
@@ -131,7 +131,7 @@ async def setup_inference_pool(
         f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
     )
     return StaticInferencePool(
-        clients=setup_clients(client_config, client_type=client_type),
+        clients=setup_clients(client_config, client_type=train_client_type),
         eval_clients=setup_clients(client_config, client_type=eval_client_type),
         admin_clients=setup_admin_clients(client_config),
         skip_model_check=client_config.skip_model_check,
@@ -149,7 +149,7 @@ def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_c
             clients.append(
                 vf.ClientConfig(
                     client_idx=client_idx,
-                    client_type=client_type,
+                    client_type=train_client_type,
                     api_base_url=base_url,
                     api_key_var=client_config.api_key_var,
                     timeout=client_config.timeout,

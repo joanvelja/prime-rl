@@ -21,6 +21,13 @@ id = "alphabet-sort"
 name = "alphabet-sort"
 args = { min_turns = 2, max_turns = 2 }
 
+[[orchestrator.eval.env]]
+id = "alphabet-sort"
+name = "alphabet-sort"
+num_examples = 50
+rollouts_per_example = 4
+args = { min_turns = 2, max_turns = 2 }
+
 [trainer]
 
 [inference]
