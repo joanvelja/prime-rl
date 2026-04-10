@@ -720,7 +720,7 @@ async def orchestrate(config: OrchestratorConfig):
         eval_rollouts = [o for outputs in eval_results for o in outputs]
         if eval_rollouts:
             step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-            asyncio.create_task(asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl"))
+            await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
     # Log final (immutable) samples and distributions to monitor(s)
     monitor.log_final_samples()
