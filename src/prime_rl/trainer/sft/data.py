@@ -247,6 +247,22 @@ class SFTDataset(StatefulIterableDataset):
             "position_ids": list(range(len(input_ids))),
         }
 
+    def count_tokens(self, max_epochs: int) -> int:
+        """Count total tokens this rank would produce over max_epochs epochs.
+
+        Tokenizes this rank's portion of the dataset once and multiplies by
+        max_epochs — the rank-to-index assignment is step-based, so it's the
+        same every epoch regardless of shuffle order.
+        """
+        tokens_per_epoch = 0
+        for idx in range(self.num_examples):
+            if idx % self.data_world_size != self.data_rank:
+                continue
+            processed = self._process(cast(dict, self.dataset[idx]))
+            if processed is not None:
+                tokens_per_epoch += len(processed["input_ids"])
+        return tokens_per_epoch * max_epochs
+
     def __iter__(self):
         """
         Apply chat template and tokenize a single example in prompt + completion format (https://github.com/huggingface/trl/blob/de27d612b026526ba39b88eee348994d7636e033/trl/trainer/sft_trainer.py#L661)
