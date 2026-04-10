@@ -416,6 +416,14 @@ class TrainScheduler:
             await self._fill_inflight_requests()
             inflight_tasks = list(self.inflight_requests.keys())
 
+            if not inflight_tasks:
+                raise RuntimeError(
+                    f"No in-flight rollouts and batch incomplete ({batch_progress}/{self.batch_target}). "
+                    f"Limiter state: used={self.limiter.concurrency.used}, "
+                    f"remaining={self.limiter.remaining}. "
+                    f"This likely indicates a concurrency slot leak."
+                )
+
             finished_tasks, _ = await asyncio.wait(
                 inflight_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
