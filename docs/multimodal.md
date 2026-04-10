@@ -11,6 +11,7 @@ The built-in registry supports these model families out of the box:
 | Model Family | model_type | Vision Encoder | Language Model |
 |-------------|------------|---------------|----------------|
 | Qwen3-VL | `qwen3_vl` | `model.visual` | `model.language_model` |
+| Qwen3-VL-MoE | `qwen3_vl_moe` | `model.visual` | `model.language_model` |
 | Qwen3.5 | `qwen3_5` | `model.visual` | `model.language_model` |
 | Qwen3.5-MoE | `qwen3_5_moe` | `model.visual` | `model.language_model` |
 
