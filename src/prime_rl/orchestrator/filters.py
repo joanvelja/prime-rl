@@ -144,8 +144,9 @@ def setup_filters(configs: list[FilterConfig], vocab_size: int) -> list[RolloutF
     if filters:
         logger.info(f"Configured {len(filters)} rollout filter(s):")
         for config, filt in zip(configs, filters):
-            mode = "enforce" if filt.enforce else "monitor"
-            logger.info(f"  {filt.name} ({mode}): {config.model_dump()}")
+            mode = "Enforcing" if filt.enforce else "Monitoring"
+            params = ", ".join(f"{k}={v}" for k, v in config.model_dump().items())
+            logger.info(f"  {mode} {filt.name} filter ({params})")
     return filters
 
 
