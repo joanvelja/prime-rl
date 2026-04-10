@@ -10,7 +10,7 @@ import verifiers as vf
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
-from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RateLimiter
+from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnv, TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -45,7 +45,7 @@ class GroupState:
     pinned_client: vf.ClientConfig | None = None
 
 
-class Scheduler:
+class TrainScheduler:
     """
     Asynchronously manages scheduling of rollout requests and policy updates.
     Keeps a constant number of rollouts in-flight (continuous batching) and
@@ -62,23 +62,21 @@ class Scheduler:
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
-        concurrency_limiter: ConcurrencyLimiter,
+        rollout_limiter: RolloutLimiter,
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
-        rate_limiter: RateLimiter | None = None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
     ):
         self.logger = get_logger()
-        self.rate_limiter = rate_limiter
+        self.limiter = rollout_limiter
         self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
         self.batch_size = config.batch_size
         self.token_batch_size = config.token_batch_size
         self.rollouts_per_example = config.rollouts_per_example
-        self.limiter = concurrency_limiter
         self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
         self.strict_async_level = strict_async_level
@@ -200,8 +198,8 @@ class Scheduler:
         else:
             rollout_count = 1
 
-        if self.rate_limiter:
-            await self.rate_limiter.acquire(rollout_count)
+        if self.limiter.rate:
+            await self.limiter.rate.acquire(rollout_count)
 
         if not self.limiter.try_acquire(rollout_count):
             return
@@ -573,14 +571,12 @@ class EvalScheduler:
 
     def __init__(
         self,
-        concurrency_limiter: ConcurrencyLimiter,
+        rollout_limiter: RolloutLimiter,
         inference_pool: InferencePool,
-        rate_limiter: RateLimiter | None = None,
     ):
         self.logger = get_logger()
-        self.limiter = concurrency_limiter
+        self.limiter = rollout_limiter
         self.inference_pool = inference_pool
-        self.rate_limiter = rate_limiter
 
     async def run(
         self,
@@ -612,8 +608,6 @@ class EvalScheduler:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
                 try:
-                    if self.rate_limiter:
-                        await self.rate_limiter.acquire(cost_per_coro)
                     await self.limiter.acquire(cost_per_coro)
                     client = await self.inference_pool.get_eval_client()
                     outputs = await eval_env.run_group(
@@ -637,8 +631,6 @@ class EvalScheduler:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
                 try:
-                    if self.rate_limiter:
-                        await self.rate_limiter.acquire()
                     await self.limiter.acquire(1)
                     client = await self.inference_pool.get_eval_client()
                     output = await eval_env.run_rollout(client=client, example=example, model_name=model_name)

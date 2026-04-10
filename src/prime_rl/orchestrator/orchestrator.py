@@ -35,10 +35,10 @@ from transformers import AutoProcessor, AutoTokenizer
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
-from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RateLimiter
+from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
-from prime_rl.orchestrator.scheduler import EvalScheduler, Scheduler
+from prime_rl.orchestrator.scheduler import EvalScheduler, TrainScheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
@@ -224,33 +224,33 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             checkpoint_step = config.ckpt.resume_step
 
-    concurrency_limiter = ConcurrencyLimiter(config.max_inflight_rollouts)
-    rate_limiter = RateLimiter(max_rate=config.tasks_per_minute, time_period=60) if config.tasks_per_minute else None
-    scheduler = Scheduler(
+    rollout_limiter = RolloutLimiter(
+        max_concurrency=config.max_inflight_rollouts,
+        max_rate=config.tasks_per_minute,
+    )
+    train_scheduler = TrainScheduler(
         train_envs=train_envs,
         buffer=buffer,
         inference_pool=inference_pool,
-        concurrency_limiter=concurrency_limiter,
+        rollout_limiter=rollout_limiter,
         max_async_level=config.max_async_level,
         max_off_policy_steps=config.max_off_policy_steps,
         strict_async_level=config.strict_async_level,
-        rate_limiter=rate_limiter,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
         config=config,
     )
-    scheduler.model_name = rollout_model_name
+    train_scheduler.model_name = rollout_model_name
 
     if eval_envs is not None:
         eval_scheduler = EvalScheduler(
-            concurrency_limiter=concurrency_limiter,
+            rollout_limiter=rollout_limiter,
             inference_pool=inference_pool,
-            rate_limiter=rate_limiter,
         )
 
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
-        scheduler.model_name = config.model.lora.name
+        train_scheduler.model_name = config.model.lora.name
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")
@@ -294,24 +294,24 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and ckpt_manager is not None:
         ckpt_manager.load(progress, buffer, step=checkpoint_step)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
-        scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
+        train_scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
         if config.eval and config.eval.skip_eval_on_resume:
-            prev_ckpt_step = scheduler.ckpt_step
-            last_eval_steps = {name: scheduler.ckpt_step for name in last_eval_steps}
-            logger.info(f"Skipping online eval on resume (ckpt_step={scheduler.ckpt_step})")
+            prev_ckpt_step = train_scheduler.ckpt_step
+            last_eval_steps = {name: train_scheduler.ckpt_step for name in last_eval_steps}
+            logger.info(f"Skipping online eval on resume (ckpt_step={train_scheduler.ckpt_step})")
         else:
             # Allow eval at resumed step by setting prev_ckpt_step one behind
-            prev_ckpt_step = scheduler.ckpt_step - 1
+            prev_ckpt_step = train_scheduler.ckpt_step - 1
 
         if enable_policy_updates:
             # In NCCL mode, skip existence check - weights are broadcasted, not stored on disk
             check_exists = config.weight_broadcast.type != "nccl"
             wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt else None
             weights_path = get_weight_dir(
-                config.output_dir, scheduler.ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
+                config.output_dir, train_scheduler.ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
             )
             lora_name = config.model.lora.name if config.model.lora else None
-            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=scheduler.ckpt_step)
+            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=train_scheduler.ckpt_step)
     else:
         logger.info("Training from scratch")
 
@@ -327,8 +327,8 @@ async def orchestrate(config: OrchestratorConfig):
             raise RuntimeError(f"Run evicted by trainer: {reason}")
 
         # Capture ckpt_step once for consistency (it's updated inside the scheduler)
-        ckpt_step = scheduler.ckpt_step if enable_policy_updates else progress.step
-        scheduler.ckpt_step = ckpt_step
+        ckpt_step = train_scheduler.ckpt_step if enable_policy_updates else progress.step
+        train_scheduler.ckpt_step = ckpt_step
 
         # Save checkpoint (if we are at an interval step and not at the first or last step)
         is_last_step = config.max_steps is not None and progress.step == config.max_steps - 1
@@ -352,7 +352,7 @@ async def orchestrate(config: OrchestratorConfig):
         step_start_time = time.perf_counter()
 
         # Run evals BEFORE training (blocking). Weight updates are paused via
-        # scheduler.checkpoint_ready during eval to ensure consistent weights.
+        # train_scheduler.checkpoint_ready during eval to ensure consistent weights.
         # Each eval env has its own interval, so we check each independently.
         envs_to_eval = []
         if config.eval:
@@ -375,16 +375,16 @@ async def orchestrate(config: OrchestratorConfig):
 
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
-            scheduler.checkpoint_ready.clear()
+            train_scheduler.checkpoint_ready.clear()
 
             # For heavy eval workloads, it might be necessary additionally cancel in-flight training rollouts
             if config.eval.cancel_inflight_rollouts_on_eval:
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
-                await scheduler.cancel_inflight_rollouts()
+                await train_scheduler.cancel_inflight_rollouts()
 
             assert eval_scheduler is not None
             eval_rollouts: list[vf.RolloutOutput] = []
-            async for result in eval_scheduler.run(envs_to_eval, model_name=scheduler.model_name):
+            async for result in eval_scheduler.run(envs_to_eval, model_name=train_scheduler.model_name):
                 log_eval_metrics(
                     env_name=result.env_name,
                     rollouts=result.rollouts,
@@ -402,17 +402,17 @@ async def orchestrate(config: OrchestratorConfig):
                 await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
             # Resume weight updates
-            scheduler.checkpoint_ready.set()
+            train_scheduler.checkpoint_ready.set()
 
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
         # Schedule generating the training batch
-        train_task = asyncio.create_task(scheduler.generate_batch(step=progress.step))
+        train_task = asyncio.create_task(train_scheduler.generate_batch(step=progress.step))
 
         # Await train rollouts
         await train_task
-        generate_completions_time = scheduler.last_batch_generation_time
+        generate_completions_time = train_scheduler.last_batch_generation_time
         train_rollouts = train_task.result()
 
         # Save train rollouts to disk (fire-and-forget background thread)
@@ -617,7 +617,7 @@ async def orchestrate(config: OrchestratorConfig):
             "time/save_ckpt": save_ckpt_time,
             "time/parallel_preprocess": parallel_preprocess_time,
             # Scheduler metrics
-            **scheduler.get_metrics(),
+            **train_scheduler.get_metrics(),
             # Buffer metrics
             **buffer.get_metrics(),
             # Event loop lag metrics
@@ -686,7 +686,7 @@ async def orchestrate(config: OrchestratorConfig):
             )
 
         reward_mean = by_example.reward.mean().mean()
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {scheduler.async_level} | Max. Off-Policy Level: {scheduler.max_off_policy_level}"
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {train_scheduler.async_level} | Max. Off-Policy Level: {train_scheduler.max_off_policy_level}"
         logger.success(step_message)
 
         # Increment step
@@ -707,7 +707,7 @@ async def orchestrate(config: OrchestratorConfig):
     if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
         eval_rollouts: list[vf.RolloutOutput] = []
-        async for result in eval_scheduler.run(list(eval_envs), model_name=scheduler.model_name):
+        async for result in eval_scheduler.run(list(eval_envs), model_name=train_scheduler.model_name):
             log_eval_metrics(
                 env_name=result.env_name,
                 rollouts=result.rollouts,
@@ -742,7 +742,7 @@ async def orchestrate(config: OrchestratorConfig):
     # failure mode we're guarding against.
     async def _graceful_shutdown() -> None:
         training_batch_sender.close()
-        await scheduler.stop()
+        await train_scheduler.stop()
         await inference_pool.stop()
         if teacher_inference_pool is not None:
             await teacher_inference_pool.stop()

@@ -64,3 +64,33 @@ class ConcurrencyLimiter:
         self._used -= count
         assert self._used >= 0, f"ConcurrencyLimiter released too many slots (used={self._used})"
         self._available.set()
+
+
+class RolloutLimiter:
+    """Combined rate + concurrency limiter for rollout scheduling.
+
+    Acquire gates on both limits (rate first, then concurrency).
+    Release only applies to concurrency (rate tokens are not returned).
+    """
+
+    def __init__(self, max_concurrency: int, max_rate: float | None = None, time_period: float = 60):
+        self.concurrency = ConcurrencyLimiter(max_concurrency)
+        self.rate = RateLimiter(max_rate, time_period) if max_rate is not None else None
+
+    @property
+    def remaining(self) -> int:
+        return self.concurrency.remaining
+
+    async def acquire(self, count: int = 1) -> None:
+        """Acquire rate tokens then concurrency slots (blocking)."""
+        if self.rate:
+            await self.rate.acquire(count)
+        await self.concurrency.acquire(count)
+
+    def try_acquire(self, count: int = 1) -> bool:
+        """Non-blocking concurrency acquire (rate limiting is skipped)."""
+        return self.concurrency.try_acquire(count)
+
+    def release(self, count: int = 1) -> None:
+        """Release concurrency slots."""
+        self.concurrency.release(count)

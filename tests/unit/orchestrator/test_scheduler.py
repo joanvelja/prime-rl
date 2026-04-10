@@ -3,14 +3,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
-from prime_rl.orchestrator.scheduler import InflightRequest, Scheduler
+from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
+from prime_rl.orchestrator.scheduler import InflightRequest, TrainScheduler
 from prime_rl.utils.async_utils import safe_cancel
 
 
-def make_scheduler() -> Scheduler:
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.limiter = ConcurrencyLimiter(128)
+def make_scheduler() -> TrainScheduler:
+    scheduler = TrainScheduler.__new__(TrainScheduler)
+    scheduler.limiter = RolloutLimiter(128)
     scheduler.max_async_level = 1
     scheduler.strict_async_level = False
     scheduler.step = 9
@@ -36,8 +36,8 @@ def make_scheduler() -> Scheduler:
 
 def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
     async def run() -> None:
-        scheduler = Scheduler.__new__(Scheduler)
-        scheduler.limiter = ConcurrencyLimiter(128)
+        scheduler = TrainScheduler.__new__(TrainScheduler)
+        scheduler.limiter = RolloutLimiter(128)
         scheduler.max_off_policy_steps = 1
         scheduler.cancelled_rollouts_count = 0
         scheduler.logger = MagicMock()
