@@ -6,7 +6,7 @@ import time
 import tomli_w
 
 from prime_rl.orchestrator.advantage import compute_advantages
-from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
+from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, log_eval_metrics
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
@@ -37,7 +37,7 @@ from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter
-from prime_rl.orchestrator.envs import EvalEnv, EvalEnvs, TrainEnvs
+from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import EvalScheduler, Scheduler
 from prime_rl.orchestrator.utils import (
@@ -355,7 +355,7 @@ async def orchestrate(config: OrchestratorConfig):
         # Run evals BEFORE training (blocking). Weight updates are paused via
         # scheduler.checkpoint_ready during eval to ensure consistent weights.
         # Each eval env has its own interval, so we check each independently.
-        envs_to_eval: list[EvalEnv] = []
+        envs_to_eval = []
         if config.eval:
             assert eval_envs is not None
             for eval_env in eval_envs:
@@ -384,20 +384,20 @@ async def orchestrate(config: OrchestratorConfig):
                 await scheduler.cancel_inflight_rollouts()
 
             assert eval_scheduler is not None
-            eval_results = await asyncio.gather(
-                *[
-                    eval_scheduler.evaluate(
-                        eval_env=eval_env,
-                        model_name=scheduler.model_name,
-                        ckpt_step=ckpt_step,
-                        step=progress.step,
-                    )
-                    for eval_env in envs_to_eval
-                ]
-            )
+            eval_rollouts: list[vf.RolloutOutput] = []
+            async for result in eval_scheduler.run(envs_to_eval, model_name=scheduler.model_name):
+                log_eval_metrics(
+                    env_name=result.env_name,
+                    rollouts=result.rollouts,
+                    total_rollouts=result.total_rollouts,
+                    rollouts_per_example=result.rollouts_per_example,
+                    eval_time=result.eval_time,
+                    ckpt_step=ckpt_step,
+                    step=progress.step,
+                )
+                eval_rollouts.extend(result.rollouts)
 
             # Save eval rollouts to disk (fire-and-forget background thread)
-            eval_rollouts = [o for outputs in eval_results for o in outputs]
             if eval_rollouts:
                 step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
                 await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
@@ -707,20 +707,20 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
-        eval_results = await asyncio.gather(
-            *[
-                eval_scheduler.evaluate(
-                    eval_env=eval_env,
-                    model_name=scheduler.model_name,
-                    ckpt_step=ckpt_step,
-                    step=progress.step,
-                )
-                for eval_env in eval_envs
-            ]
-        )
+        eval_rollouts: list[vf.RolloutOutput] = []
+        async for result in eval_scheduler.run(list(eval_envs), model_name=scheduler.model_name):
+            log_eval_metrics(
+                env_name=result.env_name,
+                rollouts=result.rollouts,
+                total_rollouts=result.total_rollouts,
+                rollouts_per_example=result.rollouts_per_example,
+                eval_time=result.eval_time,
+                ckpt_step=ckpt_step,
+                step=progress.step,
+            )
+            eval_rollouts.extend(result.rollouts)
 
         # Save final eval rollouts to disk
-        eval_rollouts = [o for outputs in eval_results for o in outputs]
         if eval_rollouts:
             step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
             await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter, defaultdict
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import verifiers as vf
@@ -556,8 +557,19 @@ class Scheduler:
         return metrics
 
 
+@dataclass
+class EvalResult:
+    """Result of evaluating a single eval environment."""
+
+    env_name: str
+    rollouts: list[vf.RolloutOutput]
+    total_rollouts: int
+    rollouts_per_example: int
+    eval_time: float
+
+
 class EvalScheduler:
-    """Manages concurrency-limited eval rollout scheduling via a shared ConcurrencyLimiter."""
+    """Schedules eval rollouts with shared concurrency and rate limiting."""
 
     def __init__(
         self,
@@ -565,34 +577,94 @@ class EvalScheduler:
         inference_pool: InferencePool,
         rate_limiter: AsyncLimiter | None = None,
     ):
+        self.logger = get_logger()
         self.limiter = concurrency_limiter
         self.inference_pool = inference_pool
         self.rate_limiter = rate_limiter
 
-    async def evaluate(
+    async def run(
         self,
-        eval_env: EvalEnv,
+        eval_envs: list[EvalEnv],
         model_name: str,
-        ckpt_step: int,
-        step: int,
-    ) -> list[vf.RolloutOutput]:
-        """Run eval with concurrency limiting via the shared limiter."""
+    ) -> AsyncIterator[EvalResult]:
+        """Run evals for multiple envs, yielding results as each env completes."""
+        tasks: dict[asyncio.Task, EvalEnv] = {
+            asyncio.create_task(self._run_env(env, model_name)): env for env in eval_envs
+        }
+        while tasks:
+            done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                tasks.pop(task)
+                yield task.result()
+
+    async def _run_env(self, eval_env: EvalEnv, model_name: str) -> EvalResult:
+        """Run all rollouts for one eval env with concurrency control."""
+        num_examples = len(eval_env.examples)
         rollouts_per_example = eval_env.config.rollouts_per_example
+        total_rollouts = num_examples * rollouts_per_example
         cost_per_coro = rollouts_per_example if eval_env.requires_group_scoring else 1
 
-        async def get_client() -> vf.ClientConfig:
-            if self.rate_limiter:
-                await self.rate_limiter.acquire()
-            await self.limiter.acquire(cost_per_coro)
-            return await self.inference_pool.get_eval_client()
+        self.logger.info(f"Evaluating {eval_env.name} ({num_examples=}, {rollouts_per_example=})")
+        pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {eval_env.name}")
+        eval_start = time.perf_counter()
 
-        def on_rollout_done(count: int) -> None:
-            self.limiter.release(count)
+        if eval_env.requires_group_scoring:
 
-        return await eval_env.evaluate(
-            model_name=model_name,
-            get_client=get_client,
-            ckpt_step=ckpt_step,
-            step=step,
-            on_rollout_done=on_rollout_done,
+            async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
+                try:
+                    if self.rate_limiter:
+                        await self.rate_limiter.acquire()
+                    await self.limiter.acquire(cost_per_coro)
+                    client = await self.inference_pool.get_eval_client()
+                    outputs = await eval_env.run_group(
+                        client=client,
+                        example=example,
+                        model_name=model_name,
+                        rollouts_per_example=rollouts_per_example,
+                    )
+                    pbar.update(rollouts_per_example)
+                    return outputs
+                except Exception as e:
+                    self.logger.warning(f"Group failed: {e}")
+                    pbar.update(rollouts_per_example)
+                    return None
+                finally:
+                    self.limiter.release(cost_per_coro)
+
+            coros = [run_one(example) for example in eval_env.examples]
+
+        else:
+
+            async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
+                try:
+                    if self.rate_limiter:
+                        await self.rate_limiter.acquire()
+                    await self.limiter.acquire(1)
+                    client = await self.inference_pool.get_eval_client()
+                    output = await eval_env.run_rollout(client=client, example=example, model_name=model_name)
+                    pbar.update(1)
+                    return [output]
+                except Exception as e:
+                    self.logger.warning(f"Rollout failed: {e}")
+                    pbar.update(1)
+                    return None
+                finally:
+                    self.limiter.release(1)
+
+            coros = [run_one(example) for example in eval_env.examples for _ in range(rollouts_per_example)]
+
+        try:
+            results = await asyncio.gather(*coros)
+        finally:
+            pbar.close()
+
+        rollouts = [o for group in results if group is not None for o in group]
+        eval_time = time.perf_counter() - eval_start
+
+        return EvalResult(
+            env_name=eval_env.name,
+            rollouts=rollouts,
+            total_rollouts=total_rollouts,
+            rollouts_per_example=rollouts_per_example,
+            eval_time=eval_time,
         )
