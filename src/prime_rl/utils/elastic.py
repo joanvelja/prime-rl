@@ -203,7 +203,7 @@ class ElasticInferencePool:
 
     async def get_eval_client(self) -> vf.ClientConfig:
         """Get next eval client in round-robin fashion."""
-        while not self.has_clients:
+        while not self.eval_clients:
             await asyncio.sleep(self.sync_interval)
         client = self._eval_clients[self._eval_index % len(self._eval_clients)]
         self._eval_index += 1
