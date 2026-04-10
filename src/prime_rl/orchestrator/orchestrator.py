@@ -370,6 +370,8 @@ async def orchestrate(config: OrchestratorConfig):
                     envs_to_eval.append(eval_env)
 
         if envs_to_eval:
+            assert config.eval is not None and eval_scheduler is not None
+
             env_names = ", ".join(e.name for e in envs_to_eval)
             logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
@@ -382,7 +384,6 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await train_scheduler.cancel_inflight_rollouts()
 
-            assert eval_scheduler is not None
             eval_rollouts: list[vf.RolloutOutput] = []
             async for result in eval_scheduler.run(envs_to_eval, model_name=train_scheduler.model_name):
                 log_eval_metrics(
