@@ -390,7 +390,7 @@ async def orchestrate(config: OrchestratorConfig):
             eval_rollouts = [o for outputs in eval_results for o in outputs]
             if eval_rollouts:
                 step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-                asyncio.create_task(asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl"))
+                await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
             # Resume weight updates
             scheduler.checkpoint_ready.set()
@@ -408,7 +408,7 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-        asyncio.create_task(asyncio.to_thread(save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl"))
+        await asyncio.to_thread(save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl")
 
         # VLM: offload base64 images to disk immediately to free memory
         if is_vlm:
