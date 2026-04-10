@@ -197,13 +197,13 @@ Key vLLM metrics to watch:
 
 ### Rollouts
 
-Plain-text rollouts (verifiers JSONL format) are saved every step alongside the binary training batch:
+Plain-text rollouts (`verifiers` format) are saved every step alongside the binary training batch inside the run directory. For single-run (local) runs this is typically `{output_dir}/run_default`.
 
 ```
-{output_dir}/rollouts/
+{output_dir}/{run_dir}/rollouts/
 └── step_{N}/
-    ├── train_rollouts.jsonl   # all training rollouts for this step
-    ├── eval_rollouts.jsonl    # all eval rollouts (only present when eval ran at this step)
+    ├── train_rollouts.jsonl   # all train rollouts
+    ├── eval_rollouts.jsonl    # all eval rollouts (only present when eval ran)
     └── train_rollouts.bin     # binary-encoded training batch (consumed by the trainer)
 ```
 
@@ -211,13 +211,13 @@ Each line in the `.jsonl` files is a JSON-serialized `vf.RolloutOutput` dict wit
 
 ```bash
 # Count rollouts at a step
-wc -l {output_dir}/rollouts/step_42/train_rollouts.jsonl
+wc -l {output_dir}/{run_dir}/rollouts/step_42/train_rollouts.jsonl
 
 # Preview first rollout (pretty-printed)
-head -1 {output_dir}/rollouts/step_42/train_rollouts.jsonl | python -m json.tool
+head -1 {output_dir}/{run_dir}/rollouts/step_42/train_rollouts.jsonl | python -m json.tool
 
 # Extract rewards
-jq '.reward' {output_dir}/rollouts/step_42/train_rollouts.jsonl
+jq '.reward' {output_dir}/{run_dir}/rollouts/step_42/train_rollouts.jsonl
 ```
 
 ### Errors and warnings
