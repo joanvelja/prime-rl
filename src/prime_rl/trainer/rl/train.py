@@ -1,3 +1,5 @@
+import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before import
+
 from contextlib import nullcontext
 import time
 from datetime import timedelta
@@ -107,7 +109,10 @@ def train(config: TrainerConfig):
     setup_torch_distributed(
         timeout=timedelta(seconds=config.dist_timeout_seconds), enable_gloo=config.model.fsdp_cpu_offload
     )
-    torch.set_float32_matmul_precision("high")
+    # Configurable to support ROCm/AMD GPUs where reduced precision
+    # matmul corrupts softmax over large vocabularies. Override via config
+    # (e.g. matmul_precision = "highest") on ROCm.
+    torch.set_float32_matmul_precision(config.matmul_precision)
 
     # Setup multi run manager and offsets (including LoRA validation/scaling hooks if applicable)
     multi_run_manager = setup_multi_run_manager(
@@ -463,12 +468,14 @@ def train(config: TrainerConfig):
             logger.debug(micro_step_message)
 
         # Optionally, clip the gradients
+        grad_norm: torch.Tensor | None = None
+        if config.optim.max_norm is not None:
+            grad_norm = clip_grad_norm_(
+                model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
+            )
+            if grad_norm.device.type == "cpu":
+                grad_norm = grad_norm.to(torch.device("cuda"))
 
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
-        if grad_norm.device.type == "cpu":
-            grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
 
         # Update the model parameters
@@ -507,7 +514,9 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {tensor_stats['loss/mean']:.4f} | Entropy: {tensor_stats['entropy/mean']:.4f}"
         if "mismatch_kl/mean" in tensor_stats:
             step_message += f" | Mismatch KL: {tensor_stats['mismatch_kl/mean']:.4f}"
-        step_message += f" | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
+        if grad_norm is not None:
+            step_message += f" | Grad. Norm: {grad_norm:.4f}"
+        step_message += f" | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
         if "max_vio/mean" in tensor_stats:
             step_message += f" | Max Vio: {tensor_stats['max_vio/mean']:.4f}"
         logger.success(step_message)
@@ -525,10 +534,11 @@ def train(config: TrainerConfig):
         # Log optimizer metrics
         optim_metrics = {
             "optim/lr": current_lr,
-            "optim/grad_norm": grad_norm.item(),
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
+        if grad_norm is not None:
+            optim_metrics["optim/grad_norm"] = grad_norm.item()
         monitor.log(optim_metrics, step=progress.step)
 
         # Compute derived metrics
@@ -563,7 +573,7 @@ def train(config: TrainerConfig):
                 step=progress.step,
                 loss=tensor_stats["loss/mean"],
                 throughput=throughput,
-                grad_norm=grad_norm.item(),
+                grad_norm=grad_norm.item() if grad_norm is not None else None,
                 peak_memory_gib=peak_memory,
                 learning_rate=current_lr,
                 mfu=mfu,
