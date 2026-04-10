@@ -2,7 +2,6 @@ import asyncio
 import gc
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
 
@@ -17,7 +16,7 @@ from prime_rl.orchestrator.trajectories import (
     pretokenize_rollout_trajectory,
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
-from prime_rl.utils.pathing import get_log_dir
+from prime_rl.utils.pathing import get_log_dir, get_rollout_dir, get_step_path
 from prime_rl.utils.usage_reporter import UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
@@ -43,12 +42,14 @@ from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
     print_benchmark,
+    set_default_executor,
     setup_external_rollout_model,
 )
 from prime_rl.orchestrator.vf_utils import (
     get_completion_len,
     get_seq_len,
     intercept_vf_logging,
+    save_rollouts,
 )
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -84,6 +85,7 @@ async def orchestrate(config: OrchestratorConfig):
     )
     intercept_vf_logging(logger="verifiers.serve", level="WARN")  # show logs from env clients
     logger.info("Starting orchestrator")
+    set_default_executor()
 
     event_loop_lag_monitor = EventLoopLagMonitor()
     event_loop_lag_monitor_task = asyncio.create_task(event_loop_lag_monitor.run())
@@ -309,9 +311,6 @@ async def orchestrate(config: OrchestratorConfig):
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
 
-    # Persistent ThreadPoolExecutor for parallel rollout processing
-    rollout_executor = ThreadPoolExecutor(max_workers=64)
-
     while True:
         # Check if this run has been evicted by the trainer
         evicted_path = config.output_dir / "control" / "evicted.txt"
@@ -375,7 +374,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
-            await asyncio.gather(
+            eval_results = await asyncio.gather(
                 *[
                     eval_env.evaluate(
                         model_name=scheduler.model_name,
@@ -386,6 +385,12 @@ async def orchestrate(config: OrchestratorConfig):
                     for eval_env in envs_to_eval
                 ]
             )
+
+            # Save eval rollouts to disk (fire-and-forget background thread)
+            eval_rollouts = [o for outputs in eval_results for o in outputs]
+            if eval_rollouts:
+                step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+                await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
             # Resume weight updates
             scheduler.checkpoint_ready.set()
@@ -400,6 +405,10 @@ async def orchestrate(config: OrchestratorConfig):
         await train_task
         generate_completions_time = scheduler.last_batch_generation_time
         train_rollouts = train_task.result()
+
+        # Save train rollouts to disk (fire-and-forget background thread)
+        step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+        await asyncio.to_thread(save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl")
 
         # VLM: offload base64 images to disk immediately to free memory
         if is_vlm:
@@ -437,9 +446,7 @@ async def orchestrate(config: OrchestratorConfig):
         # This lets the scheduler continue servicing inflight rollout requests
         # and — with max_async_level >= 2 — overlap with the next batch's inference.
         if is_vlm:
-            vlm_cache = await asyncio.get_event_loop().run_in_executor(
-                rollout_executor, build_vlm_image_cache, train_rollouts, processor
-            )
+            vlm_cache = await asyncio.to_thread(build_vlm_image_cache, train_rollouts, processor)
             logger.info(
                 f"VLM timing: extract={vlm_cache.extract_time:.2f}s, preprocess={vlm_cache.preprocess_time:.2f}s "
                 f"({vlm_cache.num_unique_images} unique images from {vlm_cache.num_unique_examples} examples)"
@@ -451,12 +458,9 @@ async def orchestrate(config: OrchestratorConfig):
         def process_rollout(rollout: vf.RolloutOutput, rollout_idx: int) -> list[TrainingSample] | None:
             return interleave_rollout(rollout, vlm_cache=vlm_cache, cache_key=rollout_idx)
 
-        loop = asyncio.get_event_loop()
-        futures = [
-            loop.run_in_executor(rollout_executor, process_rollout, r, rollout_idx)
-            for rollout_idx, r in enumerate(train_rollouts)
-        ]
-        results = await asyncio.gather(*futures)
+        results = await asyncio.gather(
+            *(asyncio.to_thread(process_rollout, r, rollout_idx) for rollout_idx, r in enumerate(train_rollouts))
+        )
 
         # Collect results and assign advantages
         train_examples: list[TrainingSample] = []
@@ -700,7 +704,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
-        await asyncio.gather(
+        eval_results = await asyncio.gather(
             *[
                 eval_env.evaluate(
                     model_name=scheduler.model_name,
@@ -711,6 +715,12 @@ async def orchestrate(config: OrchestratorConfig):
                 for eval_env in eval_envs
             ]
         )
+
+        # Save final eval rollouts to disk
+        eval_rollouts = [o for outputs in eval_results for o in outputs]
+        if eval_rollouts:
+            step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+            await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
     # Log final (immutable) samples and distributions to monitor(s)
     monitor.log_final_samples()
@@ -730,7 +740,6 @@ async def orchestrate(config: OrchestratorConfig):
     # failure mode we're guarding against.
     async def _graceful_shutdown() -> None:
         training_batch_sender.close()
-        rollout_executor.shutdown(wait=False)
         await scheduler.stop()
         await inference_pool.stop()
         if teacher_inference_pool is not None:
