@@ -12,6 +12,11 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
     """
 
     @classmethod
+    def from_config(cls, config, **kwargs):
+        """Public from_config that mirrors the Auto class API."""
+        return cls._from_config(config, **kwargs)
+
+    @classmethod
     def _can_set_experts_implementation(cls) -> bool:
         """PrimeRL models use custom MoE implementations and don't support dynamic experts implementation."""
         return False
@@ -97,6 +102,23 @@ class PreTrainedModelPrimeRL(PreTrainedModel):
             layer_idx: The index of the layer to convert.
         """
         raise NotImplementedError(f"convert_layer_to_prime is not implemented for {cls.__name__}")
+
+    @classmethod
+    def convert_layer_to_vllm_kernel(
+        cls,
+        state_dict: dict[str, Tensor],
+        layer_idx: int,
+        quantize_fp8: bool = False,
+    ) -> dict[str, Tensor]:
+        """
+        Convert a single layer's state dict from PrimeRL format to vLLM kernel format.
+
+        Args:
+            state_dict: Layer weights in PrimeRL format.
+            layer_idx: Layer index to convert.
+            quantize_fp8: Whether to emit FP8 (e4m3) kernel weights with per-block scales.
+        """
+        raise NotImplementedError(f"convert_layer_to_vllm_kernel is not implemented for {cls.__name__}")
 
     def init_buffers_post_meta(self) -> None:
         """

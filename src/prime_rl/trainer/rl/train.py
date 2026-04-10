@@ -1,3 +1,5 @@
+import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before import
+
 from contextlib import nullcontext
 import time
 from datetime import timedelta
@@ -10,15 +12,16 @@ from prime_rl.trainer.rl.broadcast import setup_weight_broadcast
 from prime_rl.utils.act_offloading import maybe_activation_offloading
 import torch
 import torch.distributed as dist
-import torch.distributed.nn as dist_nn
 from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.trainer.multi_ckpt import setup_multi_checkpoint_manager
 from prime_rl.trainer.optim import setup_optimizer, setup_multi_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
-from prime_rl.configs.trainer import DefaultLossConfig, TrainerConfig
+from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
 from prime_rl.utils.cp import (
+    gather_for_cp,
+    gather_for_cp_wo_grad,
     setup_cp_params,
     shard_for_cp,
 )
@@ -41,9 +44,11 @@ from prime_rl.trainer.model import (
 from prime_rl.trainer.parallel_dims import get_parallel_dims
 from prime_rl.trainer.perf import get_perf_counter
 from prime_rl.trainer.utils import (
+    GarbageCollection,
     MemoryProfiler,
     Tensors,
     export_benchmark_json,
+    filter_rl_trainer_tensor_stats_for_wandb,
     get_zero_gradient_ratio,
     get_ckpt_disk_metrics,
     setup_torch_distributed,
@@ -57,6 +62,7 @@ from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.metrics_server import HealthServer, MetricsServer, RunStats
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit, resolve_latest_ckpt_step, to_col_format
 from ring_flash_attn import substitute_hf_flash_attn
 from torchtitan.distributed.utils import clip_grad_norm_
@@ -68,7 +74,6 @@ def train(config: TrainerConfig):
     world = get_world()
     logger = setup_logger(
         config.log.level,
-        log_file=config.output_dir / "logs" / "trainer" / f"rank_{world.rank}.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
     logger.info(f"Starting RL trainer in {world} in {config.output_dir}")
@@ -176,12 +181,14 @@ def train(config: TrainerConfig):
         weight_broadcast = setup_weight_broadcast(config.output_dir, config.weight_broadcast, config.model.lora)
 
     if parallel_dims.cp_enabled:
-        substitute_hf_flash_attn(parallel_dims.world_mesh["cp"].get_group(), heads_k_stride=1)
-        substitute_ring_attn(
-            parallel_dims.world_mesh["cp"].get_group(),
-            heads_k_stride=1,
-            attn_impl=config.model.attn,
-        )
+        cp_group = parallel_dims.world_mesh["cp"].get_group()
+        cp_rank = parallel_dims.world_mesh["cp"].get_local_rank()
+        substitute_hf_flash_attn(cp_group, heads_k_stride=1)
+        substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
+        from prime_rl.utils.cp import setup_hybrid_cp, setup_sparse_mla_cp
+
+        setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
+        setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
     # Optionally, resume training from a checkpoint
     progress = Progress()
@@ -208,6 +215,8 @@ def train(config: TrainerConfig):
             config.rollout_transport,
         )
 
+    gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
+
     logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
     maybe_record_function = nullcontext
@@ -218,6 +227,8 @@ def train(config: TrainerConfig):
     while True:
         # Reset peak memory stats
         torch.cuda.reset_peak_memory_stats()
+        if gc_handler is not None:
+            gc_handler.run(progress.step)
         is_last_step = config.max_steps is not None and progress.step == config.max_steps
 
         # Broadcast weights at every step, (except step 0, because no need to broadcast the base model)
@@ -247,21 +258,23 @@ def train(config: TrainerConfig):
             and not (is_first_step or is_last_step)
             and progress.step % config.ckpt.interval == 0
         ):
-            # Single-run: Save full checkpoint
-            logger.info(f"Saving checkpoint at step {progress.step}")
-            save_ckpt_start_time = time.perf_counter()
-            ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress)
-            save_ckpt_time = time.perf_counter() - save_ckpt_start_time
+            save_ckpt_time = 0
 
-            # Maybe clean up old checkpoints
+            if not config.ckpt.weights_only:
+                # Single-run: Save full checkpoint
+                logger.info(f"Saving checkpoint at step {progress.step}")
+                save_ckpt_start_time = time.perf_counter()
+                ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress)
+                save_ckpt_time += time.perf_counter() - save_ckpt_start_time
+
             ckpt_manager.maybe_clean()
 
             # Save weight checkpoint
             if weight_ckpt_manager is not None:
                 logger.info(f"Saving weight checkpoint at step {progress.step}")
+                save_ckpt_start_time = time.perf_counter()
                 weight_ckpt_manager.save(progress.step, model, tokenizer)
-
-                # Maybe clean up old weight checkpoint
+                save_ckpt_time += time.perf_counter() - save_ckpt_start_time
                 weight_ckpt_manager.maybe_clean()
         elif config.max_concurrent_runs > 1:
             # Multi-run: Save per-run checkpoints (each run has its own interval from orchestrator config)
@@ -302,10 +315,7 @@ def train(config: TrainerConfig):
         seq_len = micro_batches[0]["input_ids"].shape[1]
 
         # Normalize by the local number of unmasked tokens in the batch (per-batch length normalization)
-        if isinstance(config.loss, DefaultLossConfig):
-            loss_scale = sum(micro_batch["loss_mask"].sum().item() for micro_batch in micro_batches)
-        else:
-            loss_scale = batch_size
+        loss_scale = sum(micro_batch["loss_mask"].sum().item() for micro_batch in micro_batches)
         loss_scale = max(loss_scale, 1)
 
         logger.debug(f"Starting forward and backward pass ({batch_size=})")
@@ -367,8 +377,7 @@ def train(config: TrainerConfig):
             if config.model.lora:
                 lora_num_tokens = micro_batch["lora_num_tokens"].to("cuda")
                 if cp_enabled:
-                    chunk_size = input_ids.shape[1]  # We pad to multiple of cp so this should be fine
-                    logger.debug(f"[Rank {world.rank}] {cp_rank=} {cp_size=} {cp_group=} {chunk_size=}")
+                    chunk_size = input_ids.shape[1]
                     # Convert to cumsum, adjust for CP chunk, convert back to num_tokens
                     cu_offsets = lora_num_tokens.cumsum(dim=0, dtype=torch.int32)
                     adjusted_cu = torch.clip(cu_offsets - chunk_size * cp_rank, min=0, max=chunk_size)
@@ -408,12 +417,8 @@ def train(config: TrainerConfig):
             # else: FusedOutputLinear was used - logprobs already computed with per-token temperatures
 
             if cp_enabled:
-                logprobs = dist_nn.all_gather(out["logprobs"], group=cp_group)
-                out["logprobs"] = torch.cat(logprobs, dim=1)
-
-                entropies = [torch.zeros_like(out["entropy"]) for _ in range(cp_size)]
-                dist.all_gather(entropies, out["entropy"], group=cp_group)
-                out["entropy"] = torch.cat(entropies, dim=1)
+                out["logprobs"] = gather_for_cp(out["logprobs"], cp_group)
+                out["entropy"] = gather_for_cp_wo_grad(out["entropy"], cp_size, cp_group)
 
             vocab_size = getattr(model.config, "vocab_size", None) or model.config.text_config.vocab_size
             # This is not really necessary as the first token should be masked out, but we do it anyway to be sure
@@ -443,8 +448,6 @@ def train(config: TrainerConfig):
                 loss.backward()
 
             # Add relevant tensors to tensor dict for logging purposes
-            tensors["trainer_probs"].append(torch.exp(out["logprobs"])[loss_mask].detach().to("cpu"))
-            tensors["inference_probs"].append(torch.exp(inference_logprobs)[loss_mask].detach().to("cpu"))
             tensors["entropy"].append(out["entropy"][loss_mask].detach().to("cpu"))
             tensors["loss"].append(loss.detach().to("cpu").unsqueeze(0))
 
@@ -468,12 +471,14 @@ def train(config: TrainerConfig):
             logger.debug(micro_step_message)
 
         # Optionally, clip the gradients
+        grad_norm: torch.Tensor | None = None
+        if config.optim.max_norm is not None:
+            grad_norm = clip_grad_norm_(
+                model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
+            )
+            if grad_norm.device.type == "cpu":
+                grad_norm = grad_norm.to(torch.device("cuda"))
 
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
-        if grad_norm.device.type == "cpu":
-            grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
 
         # Update the model parameters
@@ -512,7 +517,9 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {tensor_stats['loss/mean']:.4f} | Entropy: {tensor_stats['entropy/mean']:.4f}"
         if "mismatch_kl/mean" in tensor_stats:
             step_message += f" | Mismatch KL: {tensor_stats['mismatch_kl/mean']:.4f}"
-        step_message += f" | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
+        if grad_norm is not None:
+            step_message += f" | Grad. Norm: {grad_norm:.4f}"
+        step_message += f" | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
         if "max_vio/mean" in tensor_stats:
             step_message += f" | Max Vio: {tensor_stats['max_vio/mean']:.4f}"
         logger.success(step_message)
@@ -530,10 +537,11 @@ def train(config: TrainerConfig):
         # Log optimizer metrics
         optim_metrics = {
             "optim/lr": current_lr,
-            "optim/grad_norm": grad_norm.item(),
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
+        if grad_norm is not None:
+            optim_metrics["optim/grad_norm"] = grad_norm.item()
         monitor.log(optim_metrics, step=progress.step)
 
         # Compute derived metrics
@@ -542,9 +550,8 @@ def train(config: TrainerConfig):
         if mismatch_kl_mean is not None and entropy_mean > 0:
             tensor_stats["kl_ent_ratio/mean"] = mismatch_kl_mean / entropy_mean
 
-        # Log tensor stats
         tensor_stats["step"] = progress.step
-        monitor.log(tensor_stats, step=progress.step)
+        monitor.log(filter_rl_trainer_tensor_stats_for_wandb(tensor_stats), step=progress.step)
 
         # Log time metrics
         time_metrics = {
@@ -569,7 +576,7 @@ def train(config: TrainerConfig):
                 step=progress.step,
                 loss=tensor_stats["loss/mean"],
                 throughput=throughput,
-                grad_norm=grad_norm.item(),
+                grad_norm=grad_norm.item() if grad_norm is not None else None,
                 peak_memory_gib=peak_memory,
                 learning_rate=current_lr,
                 mfu=mfu,
@@ -620,8 +627,9 @@ def train(config: TrainerConfig):
 
     # Write final checkpoint (only for single-run mode; multi-run checkpoints are managed by MultiCheckpointManager)
     if config.max_concurrent_runs == 1 and ckpt_manager is not None:
-        logger.info("Writing final checkpoint")
-        ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress)
+        if not (config.ckpt and config.ckpt.weights_only):
+            logger.info("Writing final checkpoint")
+            ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress)
         ckpt_manager.maybe_clean()
 
     if config.max_concurrent_runs == 1 and weight_ckpt_manager is not None:
@@ -649,7 +657,7 @@ def train(config: TrainerConfig):
 
 def main():
     """Main entry-point for RL trainer. Run using `uv run trainer`"""
-
+    set_proc_title("Trainer")
     train(cli(TrainerConfig))
 
 

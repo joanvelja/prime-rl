@@ -1,3 +1,5 @@
+import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before import
+
 import time
 from contextlib import nullcontext
 from datetime import timedelta
@@ -16,7 +18,8 @@ from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.utils.pathing import resolve_latest_ckpt_step
 from prime_rl.configs.sft import SFTConfig
 from prime_rl.utils.cp import setup_cp_params, shard_for_cp
-from prime_rl.trainer.runs import Progress
+from prime_rl.trainer.runs import Progress, get_multi_run_manager, setup_multi_run_manager
+from prime_rl.trainer.models.layers.lora import set_lora_num_tokens
 from prime_rl.utils.logger import setup_logger
 from prime_rl.trainer.optim import setup_optimizer
 from prime_rl.trainer.scheduler import setup_scheduler
@@ -31,6 +34,7 @@ from prime_rl.trainer.parallel_dims import get_parallel_dims
 from prime_rl.trainer.perf import get_perf_counter
 from prime_rl.trainer.sft.data import load_sft_dataset, setup_dataloader, setup_dataset
 from prime_rl.trainer.utils import (
+    GarbageCollection,
     MemoryProfiler,
     export_benchmark_json,
     get_zero_gradient_ratio,
@@ -43,10 +47,11 @@ from prime_rl.trainer.world import get_world
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit, to_col_format
 import torch.distributed as dist
 from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
-from prime_rl.trainer.models.layers.lm_head import FusedCrossEntropyOutputLinear
+from prime_rl.trainer.models.layers.lm_head import FUSED_CE_IGNORE_INDEX
 
 from torchtitan.distributed.utils import clip_grad_norm_
 
@@ -57,7 +62,6 @@ def train(config: SFTConfig):
     world = get_world()
     logger = setup_logger(
         config.log.level,
-        log_file=config.output_dir / "logs" / "trainer" / f"rank_{world.rank}.log" if config.log.file else None,
         json_logging=config.log.json_logging,
     )
     logger.info(f"Starting SFT trainer in {world}")
@@ -82,25 +86,27 @@ def train(config: SFTConfig):
     )
     torch.set_float32_matmul_precision("high")
 
+    if config.model.lora is not None:
+        setup_multi_run_manager(config.output_dir, 1, torch.device("cuda", world.local_rank), config.model.lora)
+
     # Initialize parallel dimensions
     parallel_dims = get_parallel_dims(config.model, config.data.seq_len)
 
-    total_micro_batches = config.data.batch_size * config.model.cp * config.model.tp
+    total_micro_batches = config.data.batch_size * config.model.cp
     micro_batches_per_step = world.world_size * config.data.micro_batch_size
     assert total_micro_batches % micro_batches_per_step == 0, (
-        f"batch_size * cp * tp ({total_micro_batches}) must be divisible by "
+        f"batch_size * cp ({total_micro_batches}) must be divisible by "
         f"world_size * micro_batch_size ({micro_batches_per_step})"
     )
     grad_accum_steps = total_micro_batches // micro_batches_per_step
 
     if parallel_dims.cp_enabled:
         assert config.data.seq_len % parallel_dims.cp == 0, "Sequence length must be divisible by CP degree"
-        substitute_hf_flash_attn(parallel_dims.world_mesh["cp"].get_group(), heads_k_stride=1)
-        substitute_ring_attn(
-            parallel_dims.world_mesh["cp"].get_group(),
-            heads_k_stride=1,
-            attn_impl=config.model.attn,
-        )
+        cp_group = parallel_dims.world_mesh["cp"].get_group()
+        cp_rank = parallel_dims.world_mesh["cp"].get_local_rank()
+        substitute_hf_flash_attn(cp_group, heads_k_stride=1)
+        substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
+        from prime_rl.utils.cp import setup_hybrid_cp, setup_sparse_mla_cp
 
     # Set up checkpoint manager
     logger.info(f"Initializing checkpoint managers ({config.ckpt})")
@@ -116,9 +122,17 @@ def train(config: SFTConfig):
     # Initialize the model and tokenizer
     logger.info(f"Initializing model ({config.model})")
     loading_from_ckpt_later = config.ckpt and checkpoint_step is not None
-    model = setup_model(
-        config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=config.loss_impl == "liger_fused"
-    )
+    fused_cross_entropy: bool | str = {"liger_fused": "liger", "quack_fused": "quack"}.get(config.loss_impl, False)
+    model = setup_model(config.model, parallel_dims, loading_from_ckpt_later, fused_cross_entropy=fused_cross_entropy)
+
+    if parallel_dims.cp_enabled:
+        setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
+        setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
+
+    if config.model.lora is not None:
+        multi_run_manager = get_multi_run_manager()
+        multi_run_manager.reset_run_parameters(0)
+        multi_run_manager.scaling_factors[0] = config.model.lora.alpha / config.model.lora.rank
 
     logger.info(f"Initializing tokenizer ({config.tokenizer})")
     tokenizer = setup_tokenizer(config.tokenizer)
@@ -141,7 +155,7 @@ def train(config: SFTConfig):
 
     # Set up the dataset and dataloader
     logger.info(f"Initializing data ({config.data})")
-    dataset = setup_dataset(tokenizer, config.data, config.model.cp * config.model.tp)
+    dataset = setup_dataset(tokenizer, config.data, config.model.cp)
     dataloader = setup_dataloader(dataset, config.data)
     dataiter = iter(dataloader)
 
@@ -173,6 +187,7 @@ def train(config: SFTConfig):
     cp_enabled = parallel_dims.cp_enabled
     cp_rank = parallel_dims.world_mesh["cp"].get_local_rank() if cp_enabled else 0
     cp_group = parallel_dims.world_mesh["cp"].get_group() if cp_enabled else None
+    dp_cp_group = parallel_dims.get_mesh("dp_cp").get_group()
     cp_size = parallel_dims.cp
 
     ce_loss = None
@@ -181,12 +196,13 @@ def train(config: SFTConfig):
             ce_loss = LigerCrossEntropyLoss(reduction="none")
         case "torch":
             ce_loss = CrossEntropyLoss(reduction="none")
-        case "liger_fused":
+        case "liger_fused" | "quack_fused":
             pass  # loss is computed inside the fused lm_head
         case _:
             raise ValueError(f"Invalid loss implementation: {config.loss_impl}")
 
-    def compute_loss(micro_batch: dict) -> torch.Tensor:
+    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass returning (loss_sum, token_count) over unmasked tokens."""
         input_ids = micro_batch["input_ids"].to("cuda")
         position_ids = micro_batch["position_ids"].to("cuda")
         target_ids = micro_batch["target_ids"].to("cuda")
@@ -197,78 +213,60 @@ def train(config: SFTConfig):
             target_ids = shard_for_cp(target_ids, cp_rank=cp_rank, cp_world_size=cp_size)
             loss_mask = shard_for_cp(loss_mask, cp_rank=cp_rank, cp_world_size=cp_size)
 
+        if config.model.lora is not None:
+            set_lora_num_tokens(torch.full((1,), input_ids.numel(), dtype=torch.int32, device="cuda"))
+
+        token_count = loss_mask.sum(dtype=torch.int64)
+
         with maybe_activation_offloading(config.model.ac_offloading):
-            if config.loss_impl == "liger_fused":
+            if config.loss_impl in ("liger_fused", "quack_fused"):
                 masked_target_ids = target_ids.clone()
-                masked_target_ids[~loss_mask] = FusedCrossEntropyOutputLinear.IGNORE_INDEX
+                masked_target_ids[~loss_mask] = FUSED_CE_IGNORE_INDEX
                 out = forward(model, input_ids, position_ids, labels=masked_target_ids)
-                loss = out["loss"]
+                loss_sum = out["loss"] * token_count
             else:
                 out = forward(model, input_ids, position_ids)
                 logits = out["logits"]
                 B, L, V = logits.shape
-                loss = ce_loss(logits.view(-1, V), target_ids.view(-1)).view(B, L)
-                loss = loss[loss_mask].mean()
+                token_loss = ce_loss(logits.view(-1, V), target_ids.view(-1)).view(B, L)
+                loss_sum = token_loss[loss_mask].sum()
                 del logits
 
         del out
-        return loss
+        return loss_sum, token_count
 
     maybe_record_function = nullcontext
 
-    def run_forward_loop(data_iter, num_steps=None, *, backward=True):
-        total_loss = torch.tensor(0.0, device="cuda")
+    def run_eval_loop(data_iter):
+        """Validation forward loop. Returns token-weighted global mean loss."""
+        total_loss_sum = torch.tensor(0.0, device="cuda")
+        total_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
         nan_count = torch.tensor(0, device="cuda")
-        valid_steps = torch.tensor(0, device="cuda")
-        max_vio_total = torch.tensor(0.0, device="cuda")
-        divisor = num_steps or 1
 
-        ctx = nullcontext() if backward else torch.no_grad()
-        with ctx:
-            for step, micro_batch in enumerate(data_iter):
-                if backward and config.log.log_data:
-                    input_ids_log = micro_batch["input_ids"].flatten().tolist()
-                    loss_mask_log = micro_batch["loss_mask"].flatten().tolist()
-                    print_sample(input_ids_log, loss_mask_log, tokenizer)
-
-                with maybe_record_function("forward"):
-                    loss = compute_loss(micro_batch)
-
-                if not torch.isnan(loss.detach()):
-                    total_loss += loss.detach()
-                    valid_steps += 1
+        with torch.no_grad():
+            for micro_batch in data_iter:
+                loss_sum, token_count = compute_loss(micro_batch)
+                if not torch.isnan(loss_sum.detach()):
+                    total_loss_sum += loss_sum.detach()
+                    total_token_count += token_count
                 else:
                     nan_count += 1
 
-                if backward:
-                    with maybe_record_function("backward"):
-                        (loss / divisor).backward()
-
-                    if is_tt_moe_model(model):
-                        max_vio = get_load_balance_stats(model)["max_vio"]
-                        if max_vio is not None:
-                            max_vio = max_vio.mean()
-                            dist.all_reduce(max_vio, op=dist.ReduceOp.MAX)
-                            max_vio_total += max_vio / divisor
-
-                if num_steps is not None and step + 1 >= num_steps:
-                    break
-
-        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
-        dist.all_reduce(valid_steps, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_loss_sum, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        dist.all_reduce(total_token_count, op=dist.ReduceOp.SUM, group=dp_cp_group)
         dist.all_reduce(nan_count, op=dist.ReduceOp.SUM)
 
-        mean_loss = (total_loss / valid_steps).item() if valid_steps.item() > 0 else float("nan")
-        return mean_loss, nan_count.item(), max_vio_total
+        mean_loss = (total_loss_sum / total_token_count).item() if total_token_count.item() > 0 else float("nan")
+        return mean_loss, nan_count.item()
 
     def run_validation(step: int) -> None:
         val_dataset = setup_dataset(
-            tokenizer, config.val.data, config.model.cp * config.model.tp, max_epochs=1, raw_dataset=val_raw_dataset
+            tokenizer, config.val.data, config.model.cp, max_epochs=1, raw_dataset=val_raw_dataset
         )
         val_dataloader = setup_dataloader(val_dataset, config.val.data)
 
         # No train/eval switch: no dropout in these models, and toggling would trigger torch.compile recompilation
-        mean_loss, nan_count, _ = run_forward_loop(val_dataloader, backward=False)
+        mean_loss, nan_count = run_eval_loop(val_dataloader)
         if nan_count > 0:
             logger.warning(f"Validation at step {step}: {nan_count} batches had NaN loss")
         if mean_loss != mean_loss:
@@ -276,6 +274,8 @@ def train(config: SFTConfig):
         else:
             logger.success(f"Validation | Step {step} | Loss: {mean_loss:.4f}")
         monitor.log({"val/loss": mean_loss, "step": step}, step=step)
+
+    gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
 
     logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'})")
     max_memory = torch.cuda.mem_get_info()[1] / 1024**3  # GiB
@@ -287,6 +287,8 @@ def train(config: SFTConfig):
     while True:
         # Reset peak memory stats
         torch.cuda.reset_peak_memory_stats()
+        if gc_handler is not None:
+            gc_handler.run(progress.step)
         is_last_step = config.max_steps is not None and progress.step == config.max_steps
 
         if (
@@ -295,20 +297,23 @@ def train(config: SFTConfig):
             and not (is_first_step or is_last_step)
             and progress.step % config.ckpt.interval == 0
         ):
-            # Save full checkpoint
-            logger.info(f"Saving checkpoint at step {progress.step}")
-            save_ckpt_start_time = time.perf_counter()
-            ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
-            save_ckpt_time = time.perf_counter() - save_ckpt_start_time
+            save_ckpt_time = 0
 
-            # Maybe clean up old checkpoints
+            if not config.ckpt.weights_only:
+                # Save full checkpoint
+                logger.info(f"Saving checkpoint at step {progress.step}")
+                save_ckpt_start_time = time.perf_counter()
+                ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
+                save_ckpt_time += time.perf_counter() - save_ckpt_start_time
+
             ckpt_manager.maybe_clean()
 
             # Save weight checkpoint
             if weight_ckpt_manager is not None:
                 logger.info(f"Saving weight checkpoint at step {progress.step}")
+                save_ckpt_start_time = time.perf_counter()
                 weight_ckpt_manager.save(progress.step, model, tokenizer)
-                # Maybe clean up old weight checkpoint
+                save_ckpt_time += time.perf_counter() - save_ckpt_start_time
                 weight_ckpt_manager.maybe_clean()
         else:
             save_ckpt_time = 0
@@ -324,8 +329,55 @@ def train(config: SFTConfig):
         step_start_time = time.perf_counter()
         forward_backward_start_time = time.perf_counter()
 
-        batch_loss, nan_loss_count, batch_max_vio = run_forward_loop(dataiter, grad_accum_steps, backward=True)
+        step_loss_sum = torch.tensor(0.0, device="cuda")
+        step_local_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
+        nan_loss_count = torch.tensor(0, device="cuda")
+        batch_max_vio = torch.tensor(0.0, device="cuda")
+        for micro_step in range(grad_accum_steps):
+            micro_batch = next(dataiter)
+
+            if config.log.log_data:
+                print_sample(
+                    micro_batch["input_ids"].flatten().tolist(), micro_batch["loss_mask"].flatten().tolist(), tokenizer
+                )
+
+            with maybe_record_function("forward"):
+                local_loss_sum, local_token_count = compute_loss(micro_batch)
+
+            step_local_token_count += local_token_count
+
+            if torch.isnan(local_loss_sum.detach()):
+                nan_loss_count += 1
+                logger.warning("Local loss is nan, excluding this micro step from backward")
+                scaled_loss = torch.nan_to_num(local_loss_sum, nan=0.0) / grad_accum_steps
+            else:
+                step_loss_sum += local_loss_sum.detach()
+                scaled_loss = local_loss_sum / grad_accum_steps
+
+            with maybe_record_function("backward"):
+                scaled_loss.backward()
+
+            if is_tt_moe_model(model):
+                max_vio = get_load_balance_stats(model)["max_vio"]
+                if max_vio is not None:
+                    max_vio = max_vio.mean()
+                    dist.all_reduce(max_vio, op=dist.ReduceOp.MAX)
+                    batch_max_vio += max_vio / grad_accum_steps
+
         forward_backward_time = time.perf_counter() - forward_backward_start_time
+
+        # All-reduce token counts and rescale gradients to get a global token-weighted mean.
+        # FSDP already divided grads by fsdp_gradient_divide_factor, so we undo that and
+        # divide by the true global token count instead.
+        global_step_token_count = step_local_token_count.clone()
+        dist.all_reduce(global_step_token_count, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        global_token_count_val = global_step_token_count.item()
+
+        if global_token_count_val > 0:
+            grad_scale = parallel_dims.fsdp_gradient_divide_factor * grad_accum_steps / global_token_count_val
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(grad_scale)
 
         # Run validation after forward-backward (so torch.compile sees training graph first) but before
         # optimizer step (so eval_on_start evaluates untrained weights)
@@ -335,12 +387,23 @@ def train(config: SFTConfig):
         ):
             run_validation(progress.step)
 
-        logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
-        if grad_norm.device.type == "cpu":
-            grad_norm = grad_norm.to(torch.device("cuda"))
+        # Compute the global mean loss for logging.
+        dist.all_reduce(step_loss_sum, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        dist.all_reduce(nan_loss_count, op=dist.ReduceOp.SUM)
+        if global_token_count_val > 0:
+            batch_loss = (step_loss_sum / global_token_count_val).item()
+        else:
+            batch_loss = 0.0
+        nan_loss_count = nan_loss_count.item()
+
+        grad_norm: torch.Tensor | None = None
+        if config.optim.max_norm is not None:
+            logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
+            grad_norm = clip_grad_norm_(
+                model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
+            )
+            if grad_norm.device.type == "cpu":
+                grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
 
         logger.debug("Optimizer step")
@@ -356,8 +419,8 @@ def train(config: SFTConfig):
             memory_profiler.step()
 
         # Compute step metrics
-        # Divide by CP and TP since those ranks process the same data
-        num_tokens = config.data.batch_size * config.data.seq_len // (config.model.cp * config.model.tp)
+        # Divide by CP since those ranks process the same data
+        num_tokens = config.data.batch_size * config.data.seq_len // config.model.cp
         progress.total_tokens += num_tokens
         progress.total_samples = dataset.step
         perf_counter = get_perf_counter(model, config.data.seq_len)
@@ -368,7 +431,10 @@ def train(config: SFTConfig):
 
         # Log step metrics
         step_time = time.perf_counter() - step_start_time
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f} | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f}"
+        if grad_norm is not None:
+            step_message += f" | Grad. Norm: {grad_norm:.4f}"
+        step_message += f" | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
         if is_tt_moe_model(model) and batch_max_vio.item() > 0:
             step_message += f" | Max Vio: {batch_max_vio.item():.4f}"
         logger.success(step_message)
@@ -409,10 +475,11 @@ def train(config: SFTConfig):
         # Log optimizer metrics
         optim_metrics = {
             "optim/lr": current_lr,
-            "optim/grad_norm": grad_norm.item(),
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
+        if grad_norm is not None:
+            optim_metrics["optim/grad_norm"] = grad_norm.item()
         monitor.log(optim_metrics, step=progress.step)
 
         loss_log_metrics = {
@@ -457,8 +524,9 @@ def train(config: SFTConfig):
 
     # Write final checkpoint
     if ckpt_manager is not None:
-        logger.info("Writing final checkpoint")
-        ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
+        if not (config.ckpt and config.ckpt.weights_only):
+            logger.info("Writing final checkpoint")
+            ckpt_manager.save(progress.step, model, [optimizer], scheduler, progress, dataloader=dataloader)
         ckpt_manager.maybe_clean()
 
     # Write final weight checkpoint
@@ -480,6 +548,7 @@ def train(config: SFTConfig):
 
 
 def main():
+    set_proc_title("SFTTrainer")
     train(cli(SFTConfig))
 
 

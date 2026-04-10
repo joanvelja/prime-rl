@@ -3,6 +3,7 @@ import functools
 import importlib
 import os
 import subprocess
+import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -129,10 +130,13 @@ def clean_exit(func: Callable) -> Callable:
                 ret = await func(*args, **kwargs)
                 wandb.finish()
                 return ret
-            except Exception as e:
+            except Exception:
                 get_logger().opt(exception=True).error(f"Fatal error in {func.__name__}")
                 wandb.finish(exit_code=1)
-                raise e
+                # sys.exit raises SystemExit so the finally block still runs.
+                # raise alone doesn't terminate the process in an async context —
+                # the event loop swallows it and the process hangs indefinitely.
+                sys.exit(1)
             finally:
                 if dist.is_initialized():
                     dist.destroy_process_group()
@@ -146,10 +150,11 @@ def clean_exit(func: Callable) -> Callable:
                 ret = func(*args, **kwargs)
                 wandb.finish()
                 return ret
-            except Exception as e:
+            except Exception:
                 get_logger().opt(exception=True).error(f"Fatal error in {func.__name__}")
                 wandb.finish(exit_code=1)
-                raise e
+                # sys.exit raises SystemExit so the finally block still runs.
+                sys.exit(1)
             finally:
                 if dist.is_initialized():
                     dist.destroy_process_group()
@@ -290,15 +295,6 @@ def default_dtype(dtype):
         yield
     finally:
         torch.set_default_dtype(prev)
-
-
-def strip_env_version(env_id: str) -> str:
-    """Strip the @version suffix from an environment ID.
-
-    Environment IDs may include a version (e.g. 'd42me/meow@0.1.5') for installation,
-    but the version must be stripped before loading as a Python module.
-    """
-    return env_id.split("@")[0]
 
 
 def install_env(env_id: str) -> None:

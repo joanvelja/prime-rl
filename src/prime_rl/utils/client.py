@@ -10,7 +10,7 @@ import httpx
 import verifiers as vf
 from httpx import AsyncClient
 from openai import NotFoundError
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, stop_after_delay, wait_exponential
 
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
@@ -139,6 +139,7 @@ def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_c
                     max_keepalive_connections=8192,
                     max_retries=10,
                     extra_headers=headers,
+                    extra_headers_from_state=client_config.extra_headers_from_state,
                 )
             )
             client_idx += 1
@@ -146,10 +147,13 @@ def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_c
 
 
 def setup_admin_clients(client_config: ClientConfig) -> list[AsyncClient]:
-    """Create a dedicated admin client for weight update operations.
+    """Create dedicated admin clients for weight update operations.
 
     Uses a separate connection pool to avoid queueing behind streaming requests.
+    When admin_base_url is set, uses those URLs instead of base_url, allowing
+    weight updates to bypass routers in disaggregated P/D deployments.
     """
+    urls = client_config.admin_base_url if client_config.admin_base_url else client_config.base_url
 
     def _setup_admin_client(base_url: str) -> httpx.AsyncClient:
         headers = client_config.headers.copy()  # avoid mutating config
@@ -167,7 +171,7 @@ def setup_admin_clients(client_config: ClientConfig) -> list[AsyncClient]:
             timeout=httpx.Timeout(None),
         )
 
-    return [_setup_admin_client(base_url) for base_url in client_config.base_url]
+    return [_setup_admin_client(base_url) for base_url in urls]
 
 
 async def maybe_check_has_model(
@@ -218,6 +222,31 @@ async def check_health(
 NCCL_READY_MARKER = "NCCL_READY"
 
 
+async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
+    """Pause all inference engines, waiting for in-flight requests to drain."""
+    logger = get_logger()
+    logger.info("Pausing inference engines for weight update")
+
+    async def _pause(client: AsyncClient) -> None:
+        response = await client.post("/pause", params={"mode": "keep", "clear_cache": "false"})
+        response.raise_for_status()
+
+    await asyncio.gather(*[_pause(client) for client in admin_clients])
+    logger.info("All inference engines paused")
+
+
+async def _resume_engines(admin_clients: list[AsyncClient]) -> None:
+    """Resume all inference engines after weight update."""
+    logger = get_logger()
+
+    async def _resume(client: AsyncClient) -> None:
+        response = await client.post("/resume")
+        response.raise_for_status()
+
+    await asyncio.gather(*[_resume(client) for client in admin_clients])
+    logger.info("All inference engines resumed")
+
+
 async def update_weights(
     admin_clients: list[AsyncClient],
     weight_dir: Path | None,
@@ -226,9 +255,9 @@ async def update_weights(
 ) -> None:
     """Update weights on static inference servers.
 
-    Creates a NCCL_READY marker file before calling the update endpoint to signal
-    to the trainer that inference workers are about to enter the receive path.
-    This marker is only used in NCCL broadcast mode but is harmless in filesystem mode.
+    Pauses all engines first to drain in-flight requests, then performs the
+    weight update, then resumes. This ensures all DP workers are idle and can
+    participate in the collective weight transfer.
 
     Note: The server-side /update_weights endpoint automatically resets the prefix cache
     to invalidate any cached KV states computed with the old weights.
@@ -242,23 +271,23 @@ async def update_weights(
     else:
 
         async def _update_weights(admin_client: AsyncClient, weight_dir: str | None) -> None:
-            try:
-                response = await admin_client.post("/update_weights", json={"weight_dir": weight_dir})
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    logger.warning("The route /update_weights does not exist. Skipping weight update.")
-                    return
-                raise
+            response = await admin_client.post("/update_weights", json={"weight_dir": weight_dir})
+            response.raise_for_status()
 
-        # Create ready marker before servers enter receive path (used by NCCL broadcast)
-        if weight_dir is not None:
-            nccl_ready_file = weight_dir / NCCL_READY_MARKER
-            nccl_ready_file.parent.mkdir(parents=True, exist_ok=True)
-            nccl_ready_file.touch()
-            logger.debug(f"Created NCCL_READY marker at {nccl_ready_file}")
+        # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
+        await _pause_engines(admin_clients)
 
-        await asyncio.gather(*[_update_weights(admin_client, weight_dir_posix) for admin_client in admin_clients])
+        try:
+            # Create ready marker before servers enter receive path (used by NCCL broadcast)
+            if weight_dir is not None:
+                nccl_ready_file = weight_dir / NCCL_READY_MARKER
+                nccl_ready_file.parent.mkdir(parents=True, exist_ok=True)
+                nccl_ready_file.touch()
+                logger.debug(f"Created NCCL_READY marker at {nccl_ready_file}")
+
+            await asyncio.gather(*[_update_weights(admin_client, weight_dir_posix) for admin_client in admin_clients])
+        finally:
+            await _resume_engines(admin_clients)
 
 
 def _is_retryable_lora_error(exception: BaseException) -> bool:
@@ -266,7 +295,23 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 404 (adapter not found) or 500 (server error during loading)
         return exception.response.status_code in (404, 500)
+    # Retry on transport-level failures (timeouts, connection resets, etc.) so
+    # the per-call read timeout below turns a stuck server into a bounded retry
+    # loop instead of propagating as a hard failure on the first hiccup.
+    if isinstance(exception, (httpx.TimeoutException, httpx.TransportError)):
+        return True
     return False
+
+
+# Per-attempt and total bounds for `/load_lora_adapter`. A LoRA load is fast
+# (small adapter file + KV cache reset, single-digit seconds in practice) but
+# the global admin AsyncClient uses `timeout=None`, so a stuck server hangs
+# the orchestrator forever inside `ElasticInferencePool._sync_server_adapter`.
+# `_PER_ATTEMPT` converts a hang into a TimeoutException so tenacity retries;
+# `_TOTAL` is the wall-clock budget across all retries — pick whichever
+# stop condition fires first.
+LORA_LOAD_READ_TIMEOUT_S = 30.0
+LORA_LOAD_TOTAL_TIMEOUT_S = 120.0
 
 
 async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_path: Path) -> None:
@@ -283,8 +328,8 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
 
     @retry(
         retry=retry_if_exception(_is_retryable_lora_error),
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_delay(LORA_LOAD_TOTAL_TIMEOUT_S) | stop_after_attempt(10),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
     async def _load_lora_adapter(admin_client: AsyncClient) -> None:
@@ -292,6 +337,7 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
         response = await admin_client.post(
             "/load_lora_adapter",
             json={"lora_name": lora_name, "lora_path": lora_path_posix},
+            timeout=httpx.Timeout(connect=10.0, read=LORA_LOAD_READ_TIMEOUT_S, write=60.0, pool=10.0),
         )
         response.raise_for_status()
 
@@ -311,22 +357,46 @@ async def unload_lora_adapter(admin_clients: list[AsyncClient], lora_name: str) 
     await asyncio.gather(*[_unload_lora_adapter(admin_client) for admin_client in admin_clients])
 
 
-async def init_nccl_broadcast(admin_clients: list[AsyncClient], host: str, port: int, timeout: int) -> None:
-    """Make a HTTP post request to the vLLM server to initialize the NCCL broadcast."""
+async def init_nccl_broadcast(
+    admin_clients: list[AsyncClient],
+    host: str,
+    port: int,
+    timeout: int,
+    inference_world_size: int | None = None,
+    quantize_in_weight_transfer: bool = False,
+) -> None:
+    """Initialize NCCL broadcast on all inference servers.
+
+    Each admin client represents one vLLM server. The function computes
+    per-server rank_offset and gpus_per_server so that every inference GPU
+    gets a unique rank in the NCCL broadcast group.
+    """
     logger = get_logger()
 
-    async def _init_nccl_broadcast(
-        admin_client: AsyncClient, host: str, port: int, client_num: int, timeout: int
-    ) -> None:
+    if inference_world_size is None:
+        inference_world_size = len(admin_clients)
+        logger.warning(
+            f"inference_world_size not provided, defaulting to {inference_world_size} (one GPU per admin client)"
+        )
+
+    gpus_per_server = inference_world_size // len(admin_clients)
+
+    logger.info(
+        f"Initializing NCCL broadcast: {len(admin_clients)} servers, "
+        f"inference_world_size={inference_world_size}, gpus_per_server={gpus_per_server}"
+    )
+
+    async def _init_nccl_broadcast(admin_client: AsyncClient, rank_offset: int) -> None:
         try:
             response = await admin_client.post(
                 "/init_broadcaster",
                 json={
                     "host": host,
                     "port": port,
-                    "server_rank": client_num,
-                    "num_inference_server": len(admin_clients),
+                    "rank_offset": rank_offset,
+                    "inference_world_size": inference_world_size,
                     "timeout": timeout,
+                    "quantize_in_weight_transfer": quantize_in_weight_transfer,
                 },
             )
             response.raise_for_status()
@@ -337,7 +407,7 @@ async def init_nccl_broadcast(admin_clients: list[AsyncClient], host: str, port:
 
     await asyncio.gather(
         *[
-            _init_nccl_broadcast(admin_client, host, port, client_num, timeout)
+            _init_nccl_broadcast(admin_client, client_num * gpus_per_server)
             for client_num, admin_client in enumerate(admin_clients)
         ]
     )

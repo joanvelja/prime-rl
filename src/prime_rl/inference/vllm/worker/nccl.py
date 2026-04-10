@@ -1,13 +1,19 @@
 import pickle
-from typing import TYPE_CHECKING, Generator, cast
+from typing import TYPE_CHECKING, Callable, Generator, cast
 
 import torch
 from torch.nn import Module
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+from prime_rl.inference.vllm.worker.weight_transfer import (
+    load_weights_checkpoint,
+    load_weights_kernel,
+    postprocess_weights_checkpoint,
+    postprocess_weights_kernel,
+)
+from prime_rl.utils.nccl import disable_nccl_p2p_if_unavailable
 
 # This is to get type hints for the Worker class but not actually extend it at runtime as this is required by vLLM worker extension
 if TYPE_CHECKING:
@@ -67,6 +73,7 @@ class NCCLWeightBroadcastReceiver:
         timeout: int,
     ):
         logger.info(f"Initializing NCCL broadcast receiver ({host}:{port}, rank={rank}, world_size={world_size})")
+        disable_nccl_p2p_if_unavailable()
 
         pg = StatelessProcessGroup.create(host=host, port=port, rank=rank, world_size=world_size, store_timeout=timeout)
         self.communicator = PyNcclCommunicator(pg, device=device)
@@ -86,24 +93,39 @@ class NCCLWeightBroadcastReceiver:
 class NCCLWeightUpdateWorker(Worker):
     """vLLM worker extension for updating weights in-place using NCCL."""
 
-    def init_broadcaster(self, host: str, port: int, server_rank: int, num_inference_server: int, timeout: int) -> None:
-        """Initialize the NCCL broadcast receiver."""
-        tp_size = get_tp_group().world_size
-        tp_rank = get_tp_group().rank_in_group
-        dp_size = get_dp_group().world_size
-        dp_rank = get_dp_group().rank_in_group
-        global_rank_inference = (server_rank * tp_size * dp_size) + (dp_rank * tp_size) + tp_rank
-        global_inference_world_size = num_inference_server * tp_size * dp_size
+    def init_broadcaster(
+        self,
+        host: str,
+        port: int,
+        rank_offset: int,
+        inference_world_size: int,
+        timeout: int,
+        quantize_in_weight_transfer: bool = False,
+    ) -> None:
+        """Initialize the NCCL broadcast receiver.
+
+        Args:
+            rank_offset: Starting GPU offset for this server in the global inference group.
+            inference_world_size: Total number of inference GPUs across all servers.
+        """
+        self.quantize_in_weight_transfer = quantize_in_weight_transfer
+        # Use the worker's device index directly as the local rank.
+        # The previous dp_group-based computation broke in vLLM v1 multiprocess
+        # DP mode where each worker is a separate process with a singleton
+        # DP group (rank_in_group is always 0).
+        local_rank = self.device.index
+        global_rank_inference = rank_offset + local_rank
 
         logger.info(
-            f"Worker [tp={tp_rank} dp={dp_rank} server_rank={server_rank}] -> [global_rank={global_rank_inference} global_world_size={global_inference_world_size}]"
+            f"Worker [local_rank={local_rank} rank_offset={rank_offset}] "
+            f"-> [global_rank={global_rank_inference} inference_world_size={inference_world_size}]"
         )
 
         self.nccl_broadcast_receiver = NCCLWeightBroadcastReceiver(
             host=host,
             port=port,
             rank=global_rank_inference + 1,  # +1 as the trainer broadcaster is on rank 0
-            world_size=global_inference_world_size + 1,  # +1 as the trainer broadcaster is on rank 0
+            world_size=inference_world_size + 1,  # +1 as the trainer broadcaster is on rank 0
             device=self.device,
             timeout=timeout,
         )
@@ -111,12 +133,22 @@ class NCCLWeightUpdateWorker(Worker):
     def update_weights_from_path(self, weight_dir: str) -> None:
         """Update weights with the nccl communicator."""
         model_runner = self.model_runner
-        model = model_runner.model.runnable
+        if hasattr(model_runner.model, "runnable"):
+            model = model_runner.model.runnable
+        else:
+            model = model_runner.model
         assert isinstance(model, Module)
 
         state_iter = self.nccl_broadcast_receiver.receive_state_dict()
-        model.load_weights(state_iter)  # type: ignore
-
-        # # Process weights after loading (important for some models)
         device = next(model.parameters()).device
-        process_weights_after_loading(model, self.model_runner.model_config, device)
+        loader_fn: Callable[[Module, Generator[tuple[str, torch.Tensor], None, None]], None]
+        postprocess_fn: Callable[[Module, object, torch.device], None]
+        if self.quantize_in_weight_transfer:
+            loader_fn = load_weights_kernel
+            postprocess_fn = postprocess_weights_kernel
+        else:
+            loader_fn = load_weights_checkpoint
+            postprocess_fn = postprocess_weights_checkpoint
+
+        loader_fn(model, state_iter)
+        postprocess_fn(model, self.model_runner.model_config, device)

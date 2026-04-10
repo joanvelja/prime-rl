@@ -138,9 +138,96 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
     num_nodes: Annotated[int, Field(ge=1, description="Number of inference nodes.")] = 2
 
+    router_port: Annotated[int, Field(description="Port for the vllm-router.")] = 8000
+    backend_port: Annotated[int, Field(description="Port for vLLM backend instances.")] = 8100
+
+
+class KVCacheOffloadConfig(BaseModel):
+    """CPU KV cache offloading for disaggregated prefill nodes.
+
+    When configured, prefill nodes use MultiConnector (NixlConnector + OffloadingConnector).
+    Decode nodes always use NixlConnector only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_size: Annotated[int, Field(ge=1, description="Block size for the CPU offloading connector.")] = 64
+
+    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading.")] = 1_000_000_000
+
+
+class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
+    """Configures a disaggregated prefill/decode inference deployment.
+
+    Each inference replica is split into separate prefill and decode node groups.
+    Requires NIXL for KV transfer and a vllm-router for request routing.
+
+    Multi-replica support: set ``num_prefill_replicas`` / ``num_decode_replicas``
+    to run multiple independent vLLM instances within the prefill / decode node
+    groups.  For example, ``num_prefill_nodes=4, num_prefill_replicas=2`` creates
+    two prefill vLLM instances each spanning 2 nodes (EP16 with 8 GPUs/node).
+    """
+
+    type: Literal["disaggregated"] = "disaggregated"
+
+    num_prefill_nodes: Annotated[int, Field(ge=1, description="Total number of prefill nodes.")] = 1
+    num_decode_nodes: Annotated[int, Field(ge=1, description="Total number of decode nodes.")] = 1
+
+    num_prefill_replicas: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Number of independent prefill vLLM instances. Must evenly divide num_prefill_nodes.",
+        ),
+    ] = 1
+    num_decode_replicas: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Number of independent decode vLLM instances. Must evenly divide num_decode_nodes.",
+        ),
+    ] = 1
+
+    router_port: Annotated[int, Field(description="Port for the vllm-router on each replica.")] = 8000
+    prefill_port: Annotated[int, Field(description="Port for prefill vLLM instances.")] = 8100
+    decode_port: Annotated[int, Field(description="Port for decode vLLM instances.")] = 8200
+
+    prefill_env_overrides: Annotated[
+        dict[str, str],
+        Field(description="Extra environment variables exported only on prefill nodes."),
+    ] = {}
+    decode_env_overrides: Annotated[
+        dict[str, str],
+        Field(description="Extra environment variables exported only on decode nodes."),
+    ] = {}
+
+    kv_cache_offload: Annotated[
+        KVCacheOffloadConfig | None,
+        Field(description="CPU KV cache offload config for prefill nodes. None = disabled (NixlConnector only)."),
+    ] = None
+
+    @property
+    def num_nodes(self) -> int:
+        return self.num_prefill_nodes + self.num_decode_nodes
+
+    @model_validator(mode="after")
+    def validate_replicas_divide_nodes(self):
+        if self.num_prefill_nodes % self.num_prefill_replicas != 0:
+            raise ValueError(
+                f"num_prefill_replicas ({self.num_prefill_replicas}) must evenly divide "
+                f"num_prefill_nodes ({self.num_prefill_nodes})"
+            )
+        if self.num_decode_nodes % self.num_decode_replicas != 0:
+            raise ValueError(
+                f"num_decode_replicas ({self.num_decode_replicas}) must evenly divide "
+                f"num_decode_nodes ({self.num_decode_nodes})"
+            )
+        return self
+
 
 InferenceDeploymentConfig: TypeAlias = Annotated[
-    SingleNodeInferenceDeploymentConfig | MultiNodeInferenceDeploymentConfig, Field(discriminator="type")
+    SingleNodeInferenceDeploymentConfig | MultiNodeInferenceDeploymentConfig | DisaggregatedInferenceDeploymentConfig,
+    Field(discriminator="type"),
 ]
 
 
@@ -187,6 +274,13 @@ class InferenceConfig(BaseConfig):
         ),
     ] = None
 
+    lora_target_modules: Annotated[
+        list[str] | None,
+        Field(
+            description="The target modules for LoRA. Passed to vLLM as `--lora-target-modules`.",
+        ),
+    ] = None
+
     enable_prefix_caching: Annotated[
         bool | None,
         Field(
@@ -204,8 +298,8 @@ class InferenceConfig(BaseConfig):
     api_server_count: Annotated[
         int,
         Field(
-            ge=1,
-            description="The number of API servers to use. Passed to vLLM as `--api-server-count`",
+            ge=0,
+            description="The number of API servers to use. Passed to vLLM as `--api-server-count`. Set to 0 for headless mode.",
         ),
     ] = 1
 
@@ -254,6 +348,20 @@ class InferenceConfig(BaseConfig):
         ),
     ] = False
 
+    enable_dbo: Annotated[
+        bool,
+        Field(
+            description="Enable dual batch overlap (DBO). Passed to vLLM as `--enable-dbo`.",
+        ),
+    ] = False
+
+    use_deep_gemm: Annotated[
+        bool,
+        Field(
+            description="Force DeepGEMM FP8 kernels via VLLM_USE_DEEP_GEMM=1. Only works with per-tensor FP8 quantization (e.g. GLM-5-FP8).",
+        ),
+    ] = False
+
     weight_broadcast: Annotated[WeightBroadcastConfig, Field(description="The weight broadcast config.")] = (
         WeightBroadcastConfig()
     )
@@ -299,6 +407,25 @@ class InferenceConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def auto_setup_disaggregated(self):
+        """Auto-configure inference for disaggregated P/D: enable EP and compute DP."""
+        if self.deployment.type == "disaggregated":
+            if "enable_expert_parallel" not in self.model_fields_set:
+                self.enable_expert_parallel = True
+            if "enable_eplb" not in self.model_fields_set:
+                self.enable_eplb = False
+            gpus_per_node = self.deployment.gpus_per_node
+            tp = self.parallel.tp
+            dp_per_node = gpus_per_node // tp
+            if self.data_parallel_size_local is None:
+                self.data_parallel_size_local = dp_per_node
+            if self.parallel.dp == 1:
+                self.parallel.dp = dp_per_node
+            if self.api_server_count == 1:
+                self.api_server_count = dp_per_node
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_slurm_template(self):
         if self.slurm is not None and self.slurm.template_path is None:
             import prime_rl
@@ -332,6 +459,10 @@ class InferenceConfig(BaseConfig):
         size. Unless LoRA is enabled, in which case only one API server is
         supported (vLLM limitation).
         """
+        if self.vllm_extra.get("headless", False):
+            self.api_server_count = 0
+            return self
+
         if "api_server_count" not in self.model_fields_set:
             min_api_server_count = self.data_parallel_size_local or self.parallel.dp
             if self.api_server_count < min_api_server_count:
@@ -364,12 +495,14 @@ class InferenceConfig(BaseConfig):
             "max_loras": "max_loras",
             "max_cpu_loras": "max_cpu_loras",
             "max_lora_rank": "max_lora_rank",
+            "lora_target_modules": "lora_target_modules",
             "gpu_memory_utilization": "gpu_memory_utilization",
             "api_server_count": "api_server_count",
             "enable_return_routed_experts": "enable_return_routed_experts",
             "enable_expert_parallel": "enable_expert_parallel",
             "all2all_backend": "all2all_backend",
             "enable_eplb": "enable_eplb",
+            "enable_dbo": "enable_dbo",
             "seed": "seed",
         }
 
@@ -383,6 +516,10 @@ class InferenceConfig(BaseConfig):
         # Remove reasoning_parser if not set (vLLM doesn't accept None)
         if namespace.reasoning_parser is None:
             delattr(namespace, "reasoning_parser")
+
+        # Remove lora_target_modules if not set (vLLM doesn't accept None)
+        if hasattr(namespace, "lora_target_modules") and namespace.lora_target_modules is None:
+            delattr(namespace, "lora_target_modules")
 
         # Remove rope_scaling if not set (vLLM doesn't accept None)
         if hasattr(namespace, "rope_scaling"):
