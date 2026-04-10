@@ -21,7 +21,7 @@ class InferencePool(Protocol):
     """Protocol for inference pools (static or elastic)."""
 
     @property
-    def clients(self) -> list[vf.ClientConfig]:
+    def train_clients(self) -> list[vf.ClientConfig]:
         """Get inference clients."""
         ...
 
@@ -60,22 +60,21 @@ class StaticInferencePool:
 
     def __init__(
         self,
-        clients: list[vf.ClientConfig],
-        admin_clients: list[AsyncClient],
-        skip_model_check: bool = False,
-        eval_clients: list[vf.ClientConfig] | None = None,
+        client_config: ClientConfig,
+        model_name: str,
+        train_client_type: str = "openai_chat_completions",
+        eval_client_type: str = "openai_chat_completions",
     ):
-        self._clients = clients
-        self._eval_clients = eval_clients or clients
-        self._admin_clients = admin_clients
-        self._skip_model_check = skip_model_check
-        self._idx_to_client = {client.client_idx: client for client in clients}
-        self._client_cycle = cycle(clients)
+        self._clients = setup_clients(client_config, client_type=train_client_type)
+        self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
+        self._admin_clients = setup_admin_clients(client_config)
+        self._skip_model_check = client_config.skip_model_check
+        self._client_cycle = cycle(self._clients)
         self._eval_cycle = cycle(self._eval_clients)
-        self.model_name = None  # unused
+        self.model_name = model_name
 
     @property
-    def clients(self) -> list[vf.ClientConfig]:
+    def train_clients(self) -> list[vf.ClientConfig]:
         return self._clients
 
     @property
@@ -118,11 +117,17 @@ async def setup_inference_pool(
     """Create an inference pool from config (static or elastic)."""
     logger = get_logger()
 
+    if train_client_type == "openai_chat_completions_token":
+        logger.warning(
+            "Token-in-token-out (TITO) client is enabled. Only use this if your environment has a linear "
+            "history and the chat template has the extension property."
+        )
+
     if client_config.is_elastic:
         from prime_rl.utils.elastic import ElasticInferencePool
 
         return await ElasticInferencePool.from_config(
-            client_config, model_name=model_name, client_type=train_client_type, eval_client_type=eval_client_type
+            client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
         )
 
     logger.info(
@@ -131,10 +136,7 @@ async def setup_inference_pool(
         f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
     )
     return StaticInferencePool(
-        clients=setup_clients(client_config, client_type=train_client_type),
-        eval_clients=setup_clients(client_config, client_type=eval_client_type),
-        admin_clients=setup_admin_clients(client_config),
-        skip_model_check=client_config.skip_model_check,
+        client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
     )
 
 
@@ -149,7 +151,7 @@ def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_c
             clients.append(
                 vf.ClientConfig(
                     client_idx=client_idx,
-                    client_type=train_client_type,
+                    client_type=client_type,
                     api_base_url=base_url,
                     api_key_var=client_config.api_key_var,
                     timeout=client_config.timeout,

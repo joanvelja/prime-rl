@@ -102,25 +102,21 @@ class ElasticInferencePool:
 
     def __init__(
         self,
-        hostname: str,
         client_config: ClientConfig,
         model_name: str,
-        port: int = 8000,
-        sync_interval: float = 5.0,
         train_client_type: str = "openai_chat_completions",
         eval_client_type: str = "openai_chat_completions",
-        router_url: str | None = None,
     ):
         self.logger = get_logger()
-        self.hostname = hostname
         self.client_config = client_config
         self.model_name = model_name
         self.base_model_name = model_name  # Keep original for health checks
-        self.port = port
-        self.sync_interval = sync_interval
+        self.hostname = client_config.elastic.hostname
+        self.port = client_config.elastic.port
+        self.sync_interval = client_config.elastic.sync_interval
         self.train_client_type = train_client_type
         self.eval_client_type = eval_client_type
-        self.router_url = router_url
+        self.router_url = client_config.router_url
 
         self._servers: dict[str, ServerState] = {}
         self._admin_clients: dict[str, AsyncClient] = {}
@@ -139,22 +135,15 @@ class ElasticInferencePool:
     @classmethod
     async def from_config(
         cls,
-        config: ClientConfig,
+        client_config: ClientConfig,
         model_name: str,
         train_client_type: str = "openai_chat_completions",
         eval_client_type: str = "openai_chat_completions",
     ) -> ElasticInferencePool:
-        if config.elastic is None:
+        if client_config.elastic is None:
             raise ValueError("Elastic inference pool requires elastic config")
         pool = cls(
-            hostname=config.elastic.hostname,
-            client_config=config,
-            model_name=model_name,
-            port=config.elastic.port,
-            sync_interval=config.elastic.sync_interval,
-            train_client_type=train_client_type,
-            eval_client_type=eval_client_type,
-            router_url=config.router_url,
+            client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
         )
         await pool.start()
         return pool
@@ -199,7 +188,7 @@ class ElasticInferencePool:
             self._eval_clients = setup_clients(url_config, client_type=self.eval_client_type) if urls else []
 
     @property
-    def clients(self) -> list[vf.ClientConfig]:
+    def train_clients(self) -> list[vf.ClientConfig]:
         self._rebuild_clients()
         return self._clients
 
@@ -210,7 +199,7 @@ class ElasticInferencePool:
 
     @property
     def has_clients(self) -> bool:
-        return len(self.clients) > 0
+        return len(self.train_clients) > 0
 
     async def get_next_client(self) -> vf.ClientConfig:
         """Get next client in round-robin fashion."""
