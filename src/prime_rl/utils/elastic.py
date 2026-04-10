@@ -197,10 +197,6 @@ class ElasticInferencePool:
         self._rebuild_clients()
         return self._eval_clients
 
-    @property
-    def has_clients(self) -> bool:
-        return len(self.train_clients) > 0
-
     async def get_eval_client(self) -> vf.ClientConfig:
         """Get next eval client in round-robin fashion."""
         while not self.eval_clients:
