@@ -584,14 +584,17 @@ class EvalScheduler:
         model_name: str,
     ) -> AsyncIterator[EvalResult]:
         """Run evals for multiple envs, yielding results as each env completes."""
-        tasks: dict[asyncio.Task, EvalEnv] = {
-            asyncio.create_task(self.evaluate_env(env, model_name)): env for env in eval_envs
-        }
-        while tasks:
-            done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                tasks.pop(task)
-                yield task.result()
+        tasks = {asyncio.create_task(self.evaluate_env(env, model_name)) for env in eval_envs}
+        try:
+            while tasks:
+                done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    yield task.result()
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def evaluate_env(self, eval_env: EvalEnv, model_name: str) -> EvalResult:
         """Run all rollouts for one eval env with concurrency control."""

@@ -57,7 +57,7 @@ class ConcurrencyLimiter:
         return self._used
 
     @property
-    def remaining(self) -> int:
+    def remaining(self) -> float:
         if self._max is None:
             return math.inf
         return self._max - self._used
@@ -111,7 +111,7 @@ class RolloutLimiter:
             get_logger().info("RolloutLimiter initialized (unlimited)")
 
     @property
-    def remaining(self) -> int:
+    def remaining(self) -> float:
         return self.concurrency.remaining
 
     async def acquire(self, count: int = 1) -> None:
