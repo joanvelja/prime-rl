@@ -107,7 +107,7 @@ class ElasticInferencePool:
         train_client_type: str = "openai_chat_completions_token",
         eval_client_type: str = "openai_chat_completions",
     ):
-        # Avoid circular import
+        # Deferred to avoid circular import (client.py imports ElasticInferencePool)
         from prime_rl.utils.client import setup_admin_clients, setup_clients
 
         self._setup_clients = setup_clients
