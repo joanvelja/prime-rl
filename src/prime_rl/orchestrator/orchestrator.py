@@ -225,8 +225,8 @@ async def orchestrate(config: OrchestratorConfig):
             checkpoint_step = config.ckpt.resume_step
 
     rollout_limiter = RolloutLimiter(
-        max_concurrency=config.max_inflight_rollouts,
-        max_rate=config.tasks_per_minute,
+        max_concurrent_rollouts=config.max_inflight_rollouts,
+        max_rollouts_per_minute=config.max_rollouts_per_minute,
     )
     train_scheduler = TrainScheduler(
         train_envs=train_envs,

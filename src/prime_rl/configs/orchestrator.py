@@ -901,11 +901,12 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = Path("outputs/run_default")
 
-    tasks_per_minute: Annotated[
+    max_rollouts_per_minute: Annotated[
         int | None,
         Field(
             ge=1,
-            description="Rate limit for tasks per environment worker, in tasks per minute. Recommended for sandbox-backed environments to prevent sandbox-not-ready errors during autoscaling. When set to None, no rate limiting is applied. Note: with multiple workers, the effective total rate equals workers × this value.",
+            validation_alias=AliasChoices("max_rollouts_per_minute", "tasks_per_minute"),
+            description="Rate limit for rollouts per minute. Recommended for sandbox-backed environments to prevent sandbox-not-ready errors during autoscaling. When set to None, no rate limiting is applied.",
         ),
     ] = None
 
@@ -1018,6 +1019,16 @@ class OrchestratorConfig(BaseConfig):
             description="Whether to use the token-in-token-out (TITO) client for training across all environments. WARNING: Only use this if your environment has a linear history and the chat template has the extension property (i.e. no tokens are ever removed or inserted by the chat template)"
         ),
     ] = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecate_tasks_per_minute(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "tasks_per_minute" in data and "max_rollouts_per_minute" not in data:
+            get_logger().warning(
+                "'tasks_per_minute' is deprecated, use 'max_rollouts_per_minute' instead. "
+                "Auto-translating for now, but this will be removed in a future release."
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod

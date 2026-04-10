@@ -96,15 +96,15 @@ class RolloutLimiter:
     Release only applies to concurrency (rate tokens are not returned).
     """
 
-    def __init__(self, max_concurrency: int | None = None, max_rate: float | None = None, time_period: float = 60):
-        self.concurrency = ConcurrencyLimiter(max_concurrency)
-        self.rate = RateLimiter(max_rate, time_period)
+    def __init__(self, max_concurrent_rollouts: int | None = None, max_rollouts_per_minute: float | None = None):
+        self.concurrency = ConcurrencyLimiter(max_concurrent_rollouts)
+        self.rate = RateLimiter(max_rollouts_per_minute, time_period=60)
 
         parts = []
         if not self.concurrency.unlimited:
-            parts.append(f"max_concurrency={max_concurrency}")
+            parts.append(f"max_concurrent_rollouts={max_concurrent_rollouts}")
         if not self.rate.unlimited:
-            parts.append(f"max_rate={max_rate}/{time_period}s")
+            parts.append(f"max_rollouts_per_minute={max_rollouts_per_minute}")
         if parts:
             get_logger().info(f"RolloutLimiter initialized ({', '.join(parts)})")
         else:
