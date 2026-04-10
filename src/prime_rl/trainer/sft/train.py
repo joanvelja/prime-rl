@@ -343,13 +343,20 @@ def train(config: SFTConfig):
         for micro_step in range(grad_accum_steps):
             # StopIteration propagates from SFTDataset through CatDataset/StackDataset
             # when num_epochs is reached. Because packing operates on a continuous token
-            # stream, the epoch boundary falls mid-chunk — so we discard the partial step.
+            # stream, different ranks may exhaust at different micro-steps. We must
+            # synchronize before any collective ops (FSDP forward/backward) to avoid hangs.
             try:
                 micro_batch = next(dataiter)
             except StopIteration:
-                logger.info(f"Dataset exhausted after {config.num_epochs} epoch(s) at step {progress.step}")
-                dataset_exhausted = True
-                break
+                micro_batch = None
+
+            if config.num_epochs is not None:
+                exhausted = torch.tensor(float(micro_batch is None), device="cuda")
+                dist.all_reduce(exhausted, op=dist.ReduceOp.MAX)
+                if exhausted.item() > 0:
+                    logger.info(f"Dataset exhausted after {config.num_epochs} epoch(s) at step {progress.step}")
+                    dataset_exhausted = True
+                    break
 
             if config.log.log_data:
                 print_sample(
