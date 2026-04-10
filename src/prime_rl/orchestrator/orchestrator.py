@@ -2,7 +2,6 @@ import asyncio
 import gc
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import tomli_w
 
@@ -43,6 +42,7 @@ from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
     print_benchmark,
+    set_default_executor,
     setup_external_rollout_model,
 )
 from prime_rl.orchestrator.vf_utils import (
@@ -85,6 +85,7 @@ async def orchestrate(config: OrchestratorConfig):
     )
     intercept_vf_logging(logger="verifiers.serve", level="WARN")  # show logs from env clients
     logger.info("Starting orchestrator")
+    set_default_executor()
 
     event_loop_lag_monitor = EventLoopLagMonitor()
     event_loop_lag_monitor_task = asyncio.create_task(event_loop_lag_monitor.run())
@@ -309,9 +310,6 @@ async def orchestrate(config: OrchestratorConfig):
     # Iterate over dataset in batches
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
-
-    # Scale the default thread pool so asyncio.to_thread can handle parallel rollout processing
-    asyncio.get_event_loop().set_default_executor(ThreadPoolExecutor(max_workers=64))
 
     while True:
         # Check if this run has been evicted by the trainer
