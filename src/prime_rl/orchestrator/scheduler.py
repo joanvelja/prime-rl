@@ -66,6 +66,7 @@ class TrainScheduler:
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
+        model_name: str,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
     ):
@@ -82,7 +83,7 @@ class TrainScheduler:
         self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
         self.lora_name = lora_name
-        self.model_name = self.config.model.name
+        self.model_name = model_name
         self.json_logging = config.log.json_logging
 
         # Inference pool - used for admin operations (adapter sync) and metrics
@@ -577,14 +578,14 @@ class EvalScheduler:
         self.limiter = rollout_limiter
         self.inference_pool = inference_pool
 
-    async def run(
+    async def evaluate_envs(
         self,
         eval_envs: list[EvalEnv],
         model_name: str,
     ) -> AsyncIterator[EvalResult]:
         """Run evals for multiple envs, yielding results as each env completes."""
         tasks: dict[asyncio.Task, EvalEnv] = {
-            asyncio.create_task(self._run_env(env, model_name)): env for env in eval_envs
+            asyncio.create_task(self.evaluate_env(env, model_name)): env for env in eval_envs
         }
         while tasks:
             done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
@@ -592,7 +593,7 @@ class EvalScheduler:
                 tasks.pop(task)
                 yield task.result()
 
-    async def _run_env(self, eval_env: EvalEnv, model_name: str) -> EvalResult:
+    async def evaluate_env(self, eval_env: EvalEnv, model_name: str) -> EvalResult:
         """Run all rollouts for one eval env with concurrency control."""
         num_examples = len(eval_env.examples)
         rollouts_per_example = eval_env.config.rollouts_per_example

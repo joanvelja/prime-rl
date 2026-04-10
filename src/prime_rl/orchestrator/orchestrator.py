@@ -209,9 +209,33 @@ async def orchestrate(config: OrchestratorConfig):
         )
         logger.success("Eval environment(s) ready")
 
-    # Setup buffer
     logger.info(f"Setting up buffer ({config.buffer})")
     buffer = Buffer(train_envs, config.buffer)
+
+    rollout_limiter = RolloutLimiter(
+        max_concurrent_rollouts=config.max_inflight_rollouts,
+        max_rollouts_per_minute=config.max_rollouts_per_minute,
+    )
+
+    train_scheduler = TrainScheduler(
+        train_envs=train_envs,
+        buffer=buffer,
+        inference_pool=inference_pool,
+        rollout_limiter=rollout_limiter,
+        max_async_level=config.max_async_level,
+        max_off_policy_steps=config.max_off_policy_steps,
+        strict_async_level=config.strict_async_level,
+        enable_policy_updates=enable_policy_updates,
+        model_name=rollout_model_name,
+        lora_name=config.model.lora.name if config.model.lora else None,
+        config=config,
+    )
+
+    if eval_envs is not None:
+        eval_scheduler = EvalScheduler(
+            rollout_limiter=rollout_limiter,
+            inference_pool=inference_pool,
+        )
 
     # Get checkpoint manager
     logger.info(f"Initializing checkpoint manager ({config.ckpt})")
@@ -224,30 +248,7 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             checkpoint_step = config.ckpt.resume_step
 
-    rollout_limiter = RolloutLimiter(
-        max_concurrent_rollouts=config.max_inflight_rollouts,
-        max_rollouts_per_minute=config.max_rollouts_per_minute,
-    )
-    train_scheduler = TrainScheduler(
-        train_envs=train_envs,
-        buffer=buffer,
-        inference_pool=inference_pool,
-        rollout_limiter=rollout_limiter,
-        max_async_level=config.max_async_level,
-        max_off_policy_steps=config.max_off_policy_steps,
-        strict_async_level=config.strict_async_level,
-        enable_policy_updates=enable_policy_updates,
-        lora_name=config.model.lora.name if config.model.lora else None,
-        config=config,
-    )
-    train_scheduler.model_name = rollout_model_name
-
-    if eval_envs is not None:
-        eval_scheduler = EvalScheduler(
-            rollout_limiter=rollout_limiter,
-            inference_pool=inference_pool,
-        )
-
+    # When resuming with LoRA, the adapter name is the model name (first weight update already happened)
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
         train_scheduler.model_name = config.model.lora.name
