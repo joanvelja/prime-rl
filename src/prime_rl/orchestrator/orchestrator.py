@@ -385,7 +385,7 @@ async def orchestrate(config: OrchestratorConfig):
                 await train_scheduler.cancel_inflight_rollouts()
 
             eval_rollouts: list[vf.RolloutOutput] = []
-            async for result in eval_scheduler.run(envs_to_eval, model_name=train_scheduler.model_name):
+            async for result in eval_scheduler.evaluate_envs(envs_to_eval, model_name=train_scheduler.model_name):
                 log_eval_metrics(
                     env_name=result.env_name,
                     rollouts=result.rollouts,
@@ -708,7 +708,7 @@ async def orchestrate(config: OrchestratorConfig):
     if config.eval and eval_envs is not None and eval_scheduler is not None:
         logger.info("Running final evals")
         eval_rollouts = []
-        async for result in eval_scheduler.run(list(eval_envs), model_name=train_scheduler.model_name):
+        async for result in eval_scheduler.evaluate_envs(list(eval_envs), model_name=train_scheduler.model_name):
             log_eval_metrics(
                 env_name=result.env_name,
                 rollouts=result.rollouts,
