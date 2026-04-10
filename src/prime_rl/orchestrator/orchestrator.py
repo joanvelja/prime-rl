@@ -17,7 +17,7 @@ from prime_rl.orchestrator.trajectories import (
     pretokenize_rollout_trajectory,
 )
 from prime_rl.transport import TrainingBatch, TrainingSample, setup_training_batch_sender
-from prime_rl.utils.pathing import get_log_dir
+from prime_rl.utils.pathing import get_log_dir, get_rollout_dir, get_step_path
 from prime_rl.utils.usage_reporter import UsageReporter
 
 # This monkey patch is necessary to avoid Pydantic validating fields using typing.Iterable (e.g. in multimodal or tool call messages) lazily which leads to tokenization errors, for more info see https://github.com/PrimeIntellect-ai/prime-rl/pull/1249
@@ -49,6 +49,7 @@ from prime_rl.orchestrator.vf_utils import (
     get_completion_len,
     get_seq_len,
     intercept_vf_logging,
+    save_rollouts,
 )
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -375,7 +376,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
-            await asyncio.gather(
+            eval_results = await asyncio.gather(
                 *[
                     eval_env.evaluate(
                         model_name=scheduler.model_name,
@@ -386,6 +387,12 @@ async def orchestrate(config: OrchestratorConfig):
                     for eval_env in envs_to_eval
                 ]
             )
+
+            # Save eval rollouts to disk
+            eval_rollouts = [o for outputs in eval_results for o in outputs]
+            if eval_rollouts:
+                step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+                save_rollouts(eval_rollouts, step_path / "eval_rollouts.jsonl")
 
             # Resume weight updates
             scheduler.checkpoint_ready.set()
@@ -400,6 +407,10 @@ async def orchestrate(config: OrchestratorConfig):
         await train_task
         generate_completions_time = scheduler.last_batch_generation_time
         train_rollouts = train_task.result()
+
+        # Save train rollouts to disk
+        step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+        save_rollouts(train_rollouts, step_path / "train_rollouts.jsonl")
 
         # VLM: offload base64 images to disk immediately to free memory
         if is_vlm:
