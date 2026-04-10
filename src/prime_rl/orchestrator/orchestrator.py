@@ -704,7 +704,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
-        await asyncio.gather(
+        eval_results = await asyncio.gather(
             *[
                 eval_env.evaluate(
                     model_name=scheduler.model_name,
@@ -715,6 +715,12 @@ async def orchestrate(config: OrchestratorConfig):
                 for eval_env in eval_envs
             ]
         )
+
+        # Save final eval rollouts to disk
+        eval_rollouts = [o for outputs in eval_results for o in outputs]
+        if eval_rollouts:
+            step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
+            asyncio.create_task(asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl"))
 
     # Log final (immutable) samples and distributions to monitor(s)
     monitor.log_final_samples()
