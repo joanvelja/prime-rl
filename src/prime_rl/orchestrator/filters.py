@@ -139,7 +139,14 @@ def setup_filter(config: FilterConfig, vocab_size: int) -> RolloutFilter:
 
 def setup_filters(configs: list[FilterConfig], vocab_size: int) -> list[RolloutFilter]:
     """Create RolloutFilters from a list of filter configs."""
-    return [setup_filter(config, vocab_size) for config in configs]
+    logger = get_logger()
+    filters = [setup_filter(config, vocab_size) for config in configs]
+    if filters:
+        logger.info(f"Configured {len(filters)} rollout filter(s):")
+        for config, filt in zip(configs, filters):
+            mode = "enforce" if filt.enforce else "monitor"
+            logger.info(f"  {filt.name} ({mode}): {config.model_dump()}")
+    return filters
 
 
 def apply_filters(

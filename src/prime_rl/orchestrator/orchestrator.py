@@ -179,8 +179,6 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Build rollout filters
     rollout_filters = setup_filters(config.filters, vocab_size=tokenizer.vocab_size)
-    if rollout_filters:
-        logger.info(f"Initialized {len(rollout_filters)} rollout filter(s): {[f.name for f in rollout_filters]}")
 
     # Load environments
     logger.info("Loading training environments")
