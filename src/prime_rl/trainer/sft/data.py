@@ -247,21 +247,21 @@ class SFTDataset(StatefulIterableDataset):
             "position_ids": list(range(len(input_ids))),
         }
 
-    def count_tokens(self, max_epochs: int) -> int:
-        """Count total tokens this rank would produce over max_epochs epochs.
+    def count_tokens(self) -> int:
+        """Count total tokens this rank will produce in a single epoch.
 
-        Tokenizes this rank's portion of the dataset once and multiplies by
-        max_epochs — the rank-to-index assignment is step-based, so it's the
-        same every epoch regardless of shuffle order.
+        Uses the same shuffle seed as the first epoch in __iter__ so the
+        rank-to-example assignment is exact.
         """
-        tokens_per_epoch = 0
+        dataset = self.dataset.shuffle(seed=self.seed) if self.shuffle else self.dataset
+        total = 0
         for idx in range(self.num_examples):
             if idx % self.data_world_size != self.data_rank:
                 continue
-            processed = self._process(cast(dict, self.dataset[idx]))
+            processed = self._process(cast(dict, dataset[idx]))
             if processed is not None:
-                tokens_per_epoch += len(processed["input_ids"])
-        return tokens_per_epoch * max_epochs
+                total += len(processed["input_ids"])
+        return total
 
     def __iter__(self):
         """

@@ -153,28 +153,26 @@ def train(config: SFTConfig):
     logger.info(f"Setting up {config.scheduler.type} scheduler with {scheduler_steps} steps ({config.scheduler})")
     scheduler = setup_scheduler(optimizer, config.scheduler, scheduler_steps, config.optim.lr)
 
-    # Set up the dataset and dataloader (without max_epochs — we convert to max_steps below)
+    # Set up the dataset and dataloader
     logger.info(f"Initializing data ({config.data})")
     dataset = setup_dataset(tokenizer, config.data, config.model.cp)
     dataloader = setup_dataloader(dataset, config.data)
     dataiter = iter(dataloader)
 
-    # Convert max_epochs to a synchronized max_steps so all ranks stop at the same step.
-    # Each rank pre-tokenizes its portion of the dataset to count tokens, then we all_reduce
-    # MIN to find the step count every rank can safely reach. This avoids per-step collective
-    # overhead and prevents distributed hangs from asymmetric dataset exhaustion.
-    if config.max_epochs is not None:
+    # Convert single_epoch to a synchronized max_steps. Each rank pre-tokenizes its portion
+    # (with the correct shuffle seed) to get an exact token count, then all_reduce MIN gives
+    # a step budget every rank can safely reach. Zero per-step overhead.
+    if config.single_epoch:
         from prime_rl.trainer.sft.data import SFTDataset
 
-        assert isinstance(dataset, SFTDataset), "max_epochs requires an SFT dataset (not fake data)"
+        assert isinstance(dataset, SFTDataset), "single_epoch requires an SFT dataset (not fake data)"
         chunk_size = config.data.seq_len * config.data.micro_batch_size
-        local_tokens = dataset.count_tokens(config.max_epochs)
+        local_tokens = dataset.count_tokens()
         local_micro_batches = torch.tensor(local_tokens // chunk_size, device="cuda", dtype=torch.long)
         dist.all_reduce(local_micro_batches, op=dist.ReduceOp.MIN)
         epoch_max_steps = local_micro_batches.item() // grad_accum_steps
         logger.info(
-            f"max_epochs={config.max_epochs} → {epoch_max_steps} steps "
-            f"({local_tokens} tokens on this rank, {chunk_size}-token chunks)"
+            f"single_epoch → {epoch_max_steps} steps ({local_tokens} tokens on this rank, {chunk_size}-token chunks)"
         )
         if config.max_steps is None or epoch_max_steps < config.max_steps:
             config.max_steps = epoch_max_steps

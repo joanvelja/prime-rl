@@ -208,14 +208,13 @@ class SFTConfig(BaseConfig):
         Field(description="Maximum number of steps to run training for. If None, will run indefinitely."),
     ] = None
 
-    max_epochs: Annotated[
-        int | None,
+    single_epoch: Annotated[
+        bool,
         Field(
-            description="Maximum number of epochs to train for. Converted to max_steps at startup by pre-tokenizing "
-            "the dataset and synchronizing across ranks. Can be combined with max_steps — whichever limit is "
-            "reached first wins. If both are None, training runs indefinitely."
+            description="Stop after a single pass over the dataset. Converted to max_steps at startup by "
+            "pre-tokenizing each rank's portion and synchronizing across ranks."
         ),
-    ] = None
+    ] = False
 
     memory_profiler_path: Annotated[Path | None, Field(description="Path to write memory profile to.")] = None
 
