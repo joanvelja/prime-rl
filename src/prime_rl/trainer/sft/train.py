@@ -155,7 +155,7 @@ def train(config: SFTConfig):
 
     # Set up the dataset and dataloader
     logger.info(f"Initializing data ({config.data})")
-    dataset = setup_dataset(tokenizer, config.data, config.model.cp)
+    dataset = setup_dataset(tokenizer, config.data, config.model.cp, max_epochs=config.num_epochs)
     dataloader = setup_dataloader(dataset, config.data)
     dataiter = iter(dataloader)
 
@@ -277,9 +277,16 @@ def train(config: SFTConfig):
 
     gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
 
-    logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'})")
+    epochs_str = f", num_epochs={config.num_epochs}" if config.num_epochs is not None else ""
+    logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'}{epochs_str})")
+    if config.num_epochs is not None:
+        logger.warning(
+            "Token packing means epoch boundaries don't align with step boundaries. "
+            "The total step count per epoch may vary by ±1."
+        )
     max_memory = torch.cuda.mem_get_info()[1] / 1024**3  # GiB
     is_first_step = True
+    dataset_exhausted = False
     if config.trace_path:
         logger.info(f"Tracing to {config.trace_path}")
         prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True).__enter__()
@@ -334,7 +341,15 @@ def train(config: SFTConfig):
         nan_loss_count = torch.tensor(0, device="cuda")
         batch_max_vio = torch.tensor(0.0, device="cuda")
         for micro_step in range(grad_accum_steps):
-            micro_batch = next(dataiter)
+            # StopIteration propagates from SFTDataset through CatDataset/StackDataset
+            # when num_epochs is reached. Because packing operates on a continuous token
+            # stream, the epoch boundary falls mid-chunk — so we discard the partial step.
+            try:
+                micro_batch = next(dataiter)
+            except StopIteration:
+                logger.info(f"Dataset exhausted after {config.num_epochs} epoch(s) at step {progress.step}")
+                dataset_exhausted = True
+                break
 
             if config.log.log_data:
                 print_sample(
@@ -365,6 +380,9 @@ def train(config: SFTConfig):
                     batch_max_vio += max_vio / grad_accum_steps
 
         forward_backward_time = time.perf_counter() - forward_backward_start_time
+
+        if dataset_exhausted:
+            break
 
         # All-reduce token counts and rescale gradients to get a global token-weighted mean.
         # FSDP already divided grads by fsdp_gradient_divide_factor, so we undo that and
