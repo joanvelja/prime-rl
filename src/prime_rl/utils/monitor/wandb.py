@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 import time
@@ -90,6 +91,7 @@ class WandbMonitor(Monitor):
         max_retries = 1 if not shared_mode or primary else 30
         self.wandb = init_wandb(max_retries)
 
+        self._suppress_serialization_warnings()
         wandb.define_metric("*", step_metric="step")
 
         # Optionally, initialize sample logging attributes
@@ -108,6 +110,16 @@ class WandbMonitor(Monitor):
                     columns=self.eval_samples_cols,
                     log_mode="INCREMENTAL",
                 )
+
+    @staticmethod
+    def _suppress_serialization_warnings() -> None:
+        """Suppress noisy wandb warnings about serializing large strings."""
+
+        class _SerializationWarningFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                return "Serializing object of type str that is" not in record.getMessage()
+
+        logging.getLogger("wandb").addFilter(_SerializationWarningFilter())
 
     def _maybe_overwrite_wandb_command(self) -> None:
         """Overwrites sys.argv with the start command if it is set in the environment variables."""
