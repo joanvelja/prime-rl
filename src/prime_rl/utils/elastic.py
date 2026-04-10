@@ -113,7 +113,6 @@ class ElasticInferencePool:
         self._setup_clients = setup_clients
         self._setup_admin_clients = setup_admin_clients
 
-        self.logger = get_logger()
         self.client_config = client_config
         self.model_name = model_name
         self.base_model_name = model_name
@@ -136,7 +135,7 @@ class ElasticInferencePool:
         self._started = False
 
     @classmethod
-    async def create(
+    async def from_config(
         cls,
         client_config: ClientConfig,
         model_name: str,
@@ -200,7 +199,7 @@ class ElasticInferencePool:
             ready = sum(1 for s in self._servers.values() if s.status == "ready")
             if ready >= min_servers:
                 return
-            self.logger.debug(f"Waiting for servers: {ready}/{min_servers} ready")
+            get_logger().debug(f"Waiting for servers: {ready}/{min_servers} ready")
             await asyncio.sleep(self._sync_interval)
 
         ready = sum(1 for s in self._servers.values() if s.status == "ready")
@@ -319,10 +318,10 @@ class ElasticInferencePool:
                     step = 0
                 return AdapterState(name=model_id, path=path, step=step)
 
-            self.logger.debug(f"No matching adapter found on {ip} for desired={self._desired.name}")
+            get_logger().debug(f"No matching adapter found on {ip} for desired={self._desired.name}")
             return None
         except Exception as e:
-            self.logger.warning(f"Failed to query /v1/models on {ip}: {e}")
+            get_logger().warning(f"Failed to query /v1/models on {ip}: {e}")
             return None
 
     def _adapter_matches_desired(self, loaded: AdapterState | None) -> bool:
@@ -350,7 +349,7 @@ class ElasticInferencePool:
             server.status = "ready"
             return True
 
-        self.logger.debug(
+        get_logger().debug(
             f"Pre-check failed on {ip}: loaded={loaded.path if loaded else None} "
             f"(step={loaded.step if loaded else None}), desired={self._desired.path} (step={self._desired.step})"
         )
@@ -358,12 +357,12 @@ class ElasticInferencePool:
 
         if self._desired.name and self._desired.path:
             try:
-                self.logger.debug(f"Loading adapter {self._desired.name} on {ip}")
+                get_logger().debug(f"Loading adapter {self._desired.name} on {ip}")
                 await load_lora_adapter([self._admin_clients[ip]], self._desired.name, self._desired.path)
             except Exception as e:
                 server.status = "unhealthy"
                 server.sync_failures += 1
-                self.logger.error(f"Failed to sync server {ip}: {e}")
+                get_logger().error(f"Failed to sync server {ip}: {e}")
                 return False
 
         loaded = await self._get_loaded_adapter(ip)
@@ -372,10 +371,10 @@ class ElasticInferencePool:
         if self._adapter_matches_desired(loaded):
             server.status = "ready"
             server.sync_failures = 0
-            self.logger.debug(f"Successfully synced server {ip}")
+            get_logger().debug(f"Successfully synced server {ip}")
             return True
 
-        self.logger.warning(
+        get_logger().warning(
             f"Adapter mismatch on {ip} after loading: "
             f"loaded={loaded.path if loaded else None} (step={loaded.step if loaded else None}), "
             f"desired={self._desired.path} (step={self._desired.step})"
@@ -389,7 +388,7 @@ class ElasticInferencePool:
             response = await admin_client.get("/health")
             response.raise_for_status()
         except Exception as e:
-            self.logger.debug(f"Server {ip} health check failed: {e}")
+            get_logger().debug(f"Server {ip} health check failed: {e}")
             return False
 
         try:
@@ -399,10 +398,10 @@ class ElasticInferencePool:
             models = [m.get("id") for m in data.get("data", [])]
 
             if self.base_model_name not in models:
-                self.logger.debug(f"Server {ip} does not have base model {self.base_model_name}")
+                get_logger().debug(f"Server {ip} does not have base model {self.base_model_name}")
                 return False
         except Exception as e:
-            self.logger.debug(f"Server {ip} model check failed: {e}")
+            get_logger().debug(f"Server {ip} model check failed: {e}")
             return False
 
         return True
@@ -411,21 +410,21 @@ class ElasticInferencePool:
         try:
             admin_client = await self._create_admin_client(ip)
         except Exception as e:
-            self.logger.debug(f"Failed to create admin client for {ip}: {e}")
+            get_logger().debug(f"Failed to create admin client for {ip}: {e}")
             return False
 
         if not await self._check_server_health(admin_client, ip):
             await admin_client.aclose()
             return False
 
-        self.logger.debug(f"Discovered new inference server: {ip}")
+        get_logger().debug(f"Discovered new inference server: {ip}")
         self._admin_clients[ip] = admin_client
         self._servers[ip] = ServerState(ip=ip, url=self._build_url(ip), status="discovering")
         await self._sync_server_adapter(ip)
         return True
 
     async def _remove_server(self, ip: str) -> None:
-        self.logger.debug(f"Inference server removed: {ip}")
+        get_logger().debug(f"Inference server removed: {ip}")
         self._servers.pop(ip, None)
         if ip in self._admin_clients:
             await self._admin_clients.pop(ip).aclose()
@@ -452,7 +451,7 @@ class ElasticInferencePool:
                 if ip not in self._admin_clients:
                     continue
                 if not await self._check_server_health(self._admin_clients[ip], ip):
-                    self.logger.debug(f"Server {ip} failed health check, removing")
+                    get_logger().debug(f"Server {ip} failed health check, removing")
                     await self._remove_server(ip)
                     removed += 1
                 elif self._servers[ip].status != "ready":
@@ -465,20 +464,20 @@ class ElasticInferencePool:
             try:
                 added, removed = await self.sync()
                 if added > 0 or removed > 0:
-                    self.logger.debug(
+                    get_logger().debug(
                         f"Elastic pool sync: +{added} -{removed} servers "
                         f"(total: {len(self._servers)}, ready: {sum(1 for s in self._servers.values() if s.status == 'ready')})"
                     )
             except Exception as e:
-                self.logger.error(f"Error in elastic sync loop: {e}")
+                get_logger().error(f"Error in elastic sync loop: {e}")
             await asyncio.sleep(self._sync_interval)
 
     async def _start(self) -> None:
         if self._started:
             return
-        self.logger.debug(f"Starting elastic inference pool (hostname={self._hostname})")
+        get_logger().debug(f"Starting elastic inference pool (hostname={self._hostname})")
         await self.sync()
-        self.logger.debug(
+        get_logger().debug(
             f"Initial discovery: {len(self._servers)} server(s), "
             f"{sum(1 for s in self._servers.values() if s.status == 'ready')} ready"
         )

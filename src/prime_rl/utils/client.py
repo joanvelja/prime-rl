@@ -99,7 +99,7 @@ async def setup_inference_pool(
             f"Initializing elastic inference pool (hostname={client_config.elastic.hostname}, "
             f"port={client_config.elastic.port}, router_url={client_config.router_url})"
         )
-        return await ElasticInferencePool.create(
+        return await ElasticInferencePool.from_config(
             client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
         )
 
