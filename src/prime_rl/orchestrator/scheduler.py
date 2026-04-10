@@ -198,8 +198,7 @@ class TrainScheduler:
         else:
             rollout_count = 1
 
-        if self.limiter.rate:
-            await self.limiter.rate.acquire(rollout_count)
+        await self.limiter.rate.acquire(rollout_count)
 
         if not self.limiter.try_acquire(rollout_count):
             return

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 from aiolimiter import AsyncLimiter
+
+from prime_rl.utils.logger import get_logger
 
 
 class RateLimiter:
@@ -10,31 +13,43 @@ class RateLimiter:
 
     Wraps aiolimiter.AsyncLimiter, which rejects acquire(amount) when amount
     exceeds max_rate. We loop instead so group-scoring envs work correctly.
+    If max_rate is None, acquiring is a no-op (unlimited).
     """
 
-    def __init__(self, max_rate: float, time_period: float = 60):
-        self._limiter = AsyncLimiter(max_rate=max_rate, time_period=time_period)
+    def __init__(self, max_rate: float | None = None, time_period: float = 60):
+        self._limiter = AsyncLimiter(max_rate=max_rate, time_period=time_period) if max_rate is not None else None
+
+    @property
+    def unlimited(self) -> bool:
+        return self._limiter is None
 
     async def acquire(self, count: int = 1) -> None:
+        if self._limiter is None:
+            return
         for _ in range(count):
             await self._limiter.acquire()
 
 
 class ConcurrencyLimiter:
-    """Shared concurrency limiter that gates both train and eval rollouts.
+    """Slot-based concurrency limiter for rollouts.
 
     Uses a simple counter with an asyncio.Event for wakeup. All calls must
     happen on the same event loop (single-threaded asyncio), so no lock is needed.
+    If max_concurrency is None, all operations are no-ops (unlimited).
     """
 
-    def __init__(self, max_concurrency: int):
+    def __init__(self, max_concurrency: int | None = None):
         self._max = max_concurrency
         self._used = 0
         self._available = asyncio.Event()
         self._available.set()
 
     @property
-    def max_concurrency(self) -> int:
+    def unlimited(self) -> bool:
+        return self._max is None
+
+    @property
+    def max_concurrency(self) -> int | None:
         return self._max
 
     @property
@@ -43,10 +58,14 @@ class ConcurrencyLimiter:
 
     @property
     def remaining(self) -> int:
+        if self._max is None:
+            return math.inf
         return self._max - self._used
 
     async def acquire(self, count: int = 1) -> None:
         """Wait until *count* slots are available, then reserve them."""
+        if self._max is None:
+            return
         while self.remaining < count:
             self._available.clear()
             await self._available.wait()
@@ -54,6 +73,8 @@ class ConcurrencyLimiter:
 
     def try_acquire(self, count: int = 1) -> bool:
         """Non-blocking acquire. Returns True if slots were reserved."""
+        if self._max is None:
+            return True
         if self.remaining >= count:
             self._used += count
             return True
@@ -61,6 +82,8 @@ class ConcurrencyLimiter:
 
     def release(self, count: int = 1) -> None:
         """Return *count* slots to the pool and wake any blocked acquirers."""
+        if self._max is None:
+            return
         self._used -= count
         assert self._used >= 0, f"ConcurrencyLimiter released too many slots (used={self._used})"
         self._available.set()
@@ -73,9 +96,19 @@ class RolloutLimiter:
     Release only applies to concurrency (rate tokens are not returned).
     """
 
-    def __init__(self, max_concurrency: int, max_rate: float | None = None, time_period: float = 60):
+    def __init__(self, max_concurrency: int | None = None, max_rate: float | None = None, time_period: float = 60):
         self.concurrency = ConcurrencyLimiter(max_concurrency)
-        self.rate = RateLimiter(max_rate, time_period) if max_rate is not None else None
+        self.rate = RateLimiter(max_rate, time_period)
+
+        parts = []
+        if not self.concurrency.unlimited:
+            parts.append(f"max_concurrency={max_concurrency}")
+        if not self.rate.unlimited:
+            parts.append(f"max_rate={max_rate}/{time_period}s")
+        if parts:
+            get_logger().info(f"RolloutLimiter initialized ({', '.join(parts)})")
+        else:
+            get_logger().info("RolloutLimiter initialized (unlimited)")
 
     @property
     def remaining(self) -> int:
@@ -83,8 +116,7 @@ class RolloutLimiter:
 
     async def acquire(self, count: int = 1) -> None:
         """Acquire rate tokens then concurrency slots (blocking)."""
-        if self.rate:
-            await self.rate.acquire(count)
+        await self.rate.acquire(count)
         await self.concurrency.acquire(count)
 
     def try_acquire(self, count: int = 1) -> bool:
