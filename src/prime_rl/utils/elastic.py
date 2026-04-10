@@ -443,6 +443,7 @@ class ElasticInferencePool:
             await self._remove_server(ip)
 
         self._train_clients = []
+        self._eval_clients = []
         self._client_urls = []
         self._started = False
 

@@ -125,7 +125,9 @@ async def orchestrate(config: OrchestratorConfig):
             f"model={config.teacher_model.model.name})"
         )
         teacher_inference_pool = await setup_inference_pool(
-            config.teacher_model.client, model_name=config.teacher_model.model.name
+            config.teacher_model.client,
+            model_name=config.teacher_model.model.name,
+            train_client_type="openai_chat_completions",
         )
     else:
         teacher_inference_pool = None
