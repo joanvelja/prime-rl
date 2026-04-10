@@ -46,7 +46,6 @@ from prime_rl.orchestrator.utils import (
     setup_external_rollout_model,
 )
 from prime_rl.orchestrator.vf_utils import (
-    get_completion_len,
     get_seq_len,
     intercept_vf_logging,
 )
@@ -414,15 +413,7 @@ async def orchestrate(config: OrchestratorConfig):
         example_ids = [r["example_id"] for r in train_rollouts]
         num_rollouts = len(train_rollouts)
         num_unique_examples = len(set(example_ids))
-        rewards = [r["reward"] for r in train_rollouts]
-        completion_lens = [get_completion_len(r) for r in train_rollouts]
-        compute_advantages(
-            train_rollouts,
-            rewards,
-            completion_lens,
-            config.rollouts_per_example,
-            config.advantage,
-        )
+        compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
 
         # Apply rollout filters (zeros reward/mask for degenerate generations)
         filter_metrics = apply_filters(rollout_filters, train_rollouts)
@@ -667,7 +658,7 @@ async def orchestrate(config: OrchestratorConfig):
         # Log distributions (rewards, advantages) if enabled
         monitor.log_distributions(
             distributions={
-                "rewards": rewards,
+                "rewards": [r["reward"] for r in train_rollouts],
                 "advantages": [r["advantage"] for r in train_rollouts],
             },
             step=progress.step,
