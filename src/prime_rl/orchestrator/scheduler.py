@@ -181,8 +181,6 @@ class Scheduler:
 
     async def schedule_rollout(self, group_id: int):
         """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
-        if self.rate_limiter:
-            await self.rate_limiter.acquire()
         group = self.groups.get(group_id)
         if group is None or group.rollouts_to_schedule <= 0:
             return
@@ -202,6 +200,10 @@ class Scheduler:
             rollout_count = group.rollouts_to_schedule
         else:
             rollout_count = 1
+
+        if self.rate_limiter:
+            for _ in range(rollout_count):
+                await self.rate_limiter.acquire()
 
         if not self.limiter.try_acquire(rollout_count):
             return
@@ -613,7 +615,8 @@ class EvalScheduler:
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
                 try:
                     if self.rate_limiter:
-                        await self.rate_limiter.acquire()
+                        for _ in range(cost_per_coro):
+                            await self.rate_limiter.acquire()
                     await self.limiter.acquire(cost_per_coro)
                     client = await self.inference_pool.get_eval_client()
                     outputs = await eval_env.run_group(
