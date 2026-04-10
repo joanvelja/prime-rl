@@ -155,7 +155,7 @@ def train(config: SFTConfig):
 
     # Set up the dataset and dataloader
     logger.info(f"Initializing data ({config.data})")
-    dataset = setup_dataset(tokenizer, config.data, config.model.cp, max_epochs=config.num_epochs)
+    dataset = setup_dataset(tokenizer, config.data, config.model.cp, max_epochs=config.max_epochs)
     dataloader = setup_dataloader(dataset, config.data)
     dataiter = iter(dataloader)
 
@@ -277,9 +277,9 @@ def train(config: SFTConfig):
 
     gc_handler = GarbageCollection(config.gc.interval) if config.gc else None
 
-    epochs_str = f", num_epochs={config.num_epochs}" if config.num_epochs is not None else ""
+    epochs_str = f", max_epochs={config.max_epochs}" if config.max_epochs is not None else ""
     logger.info(f"Starting training loop (max_steps={config.max_steps or 'infinite'}{epochs_str})")
-    if config.num_epochs is not None:
+    if config.max_epochs is not None:
         logger.warning(
             "Token packing means epoch boundaries don't align with step boundaries. "
             "The total step count per epoch may vary by ±1."
@@ -342,7 +342,7 @@ def train(config: SFTConfig):
         batch_max_vio = torch.tensor(0.0, device="cuda")
         for micro_step in range(grad_accum_steps):
             # StopIteration propagates from SFTDataset through CatDataset/StackDataset
-            # when num_epochs is reached. Because packing operates on a continuous token
+            # when max_epochs is reached. Because packing operates on a continuous token
             # stream, different ranks may exhaust at different micro-steps. We must
             # synchronize before any collective ops (FSDP forward/backward) to avoid hangs.
             try:
@@ -350,11 +350,11 @@ def train(config: SFTConfig):
             except StopIteration:
                 micro_batch = None
 
-            if config.num_epochs is not None:
+            if config.max_epochs is not None:
                 exhausted = torch.tensor(float(micro_batch is None), device="cuda")
                 dist.all_reduce(exhausted, op=dist.ReduceOp.MAX)
                 if exhausted.item() > 0:
-                    logger.info(f"Dataset exhausted after {config.num_epochs} epoch(s) at step {progress.step}")
+                    logger.info(f"Dataset exhausted after {config.max_epochs} epoch(s) at step {progress.step}")
                     dataset_exhausted = True
                     break
 

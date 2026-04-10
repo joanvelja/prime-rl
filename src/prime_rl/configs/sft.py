@@ -208,14 +208,14 @@ class SFTConfig(BaseConfig):
         Field(description="Maximum number of steps to run training for. If None, will run indefinitely."),
     ] = None
 
-    num_epochs: Annotated[
+    max_epochs: Annotated[
         int | None,
         Field(
-            description="Number of epochs to train for. Training stops when the dataset has been exhausted this many times. "
+            description="Maximum number of epochs to train for. Training stops when the dataset has been exhausted this many times. "
             "Can be combined with max_steps — whichever limit is reached first wins. "
             "If both are None, training runs indefinitely. "
             "Note: with token packing (pack_function='cat' or 'stack'), epoch boundaries fall mid-chunk, "
-            "so the total step count may vary by ±1 compared to a naive (num_epochs * steps_per_epoch) estimate."
+            "so the total step count may vary by ±1 compared to a naive (max_epochs * steps_per_epoch) estimate."
         ),
     ] = None
 
