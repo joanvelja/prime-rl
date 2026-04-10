@@ -108,6 +108,7 @@ class ElasticInferencePool:
         port: int = 8000,
         sync_interval: float = 5.0,
         client_type: str = "openai_chat_completions",
+        eval_client_type: str = "openai_chat_completions",
         router_url: str | None = None,
     ):
         self.logger = get_logger()
@@ -118,6 +119,7 @@ class ElasticInferencePool:
         self.port = port
         self.sync_interval = sync_interval
         self.client_type = client_type
+        self.eval_client_type = eval_client_type
         self.router_url = router_url
 
         self._servers: dict[str, ServerState] = {}
@@ -126,15 +128,21 @@ class ElasticInferencePool:
         self._desired: AdapterState = AdapterState()
 
         self._clients: list[vf.ClientConfig] = []
+        self._eval_clients: list[vf.ClientConfig] = []
         self._client_urls: list[str] = []
         self._client_index = 0
+        self._eval_index = 0
 
         self._sync_task: asyncio.Task | None = None
         self._started = False
 
     @classmethod
     async def from_config(
-        cls, config: ClientConfig, model_name: str, client_type: str = "openai_chat_completions"
+        cls,
+        config: ClientConfig,
+        model_name: str,
+        client_type: str = "openai_chat_completions",
+        eval_client_type: str = "openai_chat_completions",
     ) -> ElasticInferencePool:
         if config.elastic is None:
             raise ValueError("Elastic inference pool requires elastic config")
@@ -145,6 +153,7 @@ class ElasticInferencePool:
             port=config.elastic.port,
             sync_interval=config.elastic.sync_interval,
             client_type=client_type,
+            eval_client_type=eval_client_type,
             router_url=config.router_url,
         )
         await pool.start()
@@ -163,8 +172,8 @@ class ElasticInferencePool:
     def ready_urls(self) -> list[str]:
         return [self._build_inference_url(ip) for ip, s in self._servers.items() if s.status == "ready"]
 
-    @property
-    def clients(self) -> list[vf.ClientConfig]:
+    def _rebuild_clients(self) -> None:
+        """Rebuild inference clients when the set of ready URLs changes."""
         # When a router URL is configured, route inference requests through it
         # instead of directly to discovered pods. Admin operations still use
         # individual pod IPs via admin_clients.
@@ -177,22 +186,27 @@ class ElasticInferencePool:
         if set(urls) != set(self._client_urls):
             self._client_urls = urls
             self._client_index = 0
-            self._clients = (
-                setup_clients(
-                    ClientConfig(
-                        timeout=self.client_config.timeout,
-                        connect_timeout=self.client_config.connect_timeout,
-                        base_url=urls,
-                        api_key_var=self.client_config.api_key_var,
-                        headers=self.client_config.headers,
-                        dp_rank_count=self.client_config.dp_rank_count,
-                    ),
-                    client_type=self.client_type,
-                )
-                if urls
-                else []
+            self._eval_index = 0
+            url_config = ClientConfig(
+                timeout=self.client_config.timeout,
+                connect_timeout=self.client_config.connect_timeout,
+                base_url=urls,
+                api_key_var=self.client_config.api_key_var,
+                headers=self.client_config.headers,
+                dp_rank_count=self.client_config.dp_rank_count,
             )
+            self._clients = setup_clients(url_config, client_type=self.client_type) if urls else []
+            self._eval_clients = setup_clients(url_config, client_type=self.eval_client_type) if urls else []
+
+    @property
+    def clients(self) -> list[vf.ClientConfig]:
+        self._rebuild_clients()
         return self._clients
+
+    @property
+    def eval_clients(self) -> list[vf.ClientConfig]:
+        self._rebuild_clients()
+        return self._eval_clients
 
     @property
     def has_clients(self) -> bool:
@@ -204,6 +218,14 @@ class ElasticInferencePool:
             await asyncio.sleep(self.sync_interval)
         client = self._clients[self._client_index % len(self._clients)]
         self._client_index += 1
+        return client
+
+    async def get_eval_client(self) -> vf.ClientConfig:
+        """Get next eval client in round-robin fashion."""
+        while not self.has_clients:
+            await asyncio.sleep(self.sync_interval)
+        client = self._eval_clients[self._eval_index % len(self._eval_clients)]
+        self._eval_index += 1
         return client
 
     @property

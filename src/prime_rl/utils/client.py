@@ -59,13 +59,19 @@ class StaticInferencePool:
     """Static inference pool with fixed client list."""
 
     def __init__(
-        self, clients: list[vf.ClientConfig], admin_clients: list[AsyncClient], skip_model_check: bool = False
+        self,
+        clients: list[vf.ClientConfig],
+        admin_clients: list[AsyncClient],
+        skip_model_check: bool = False,
+        eval_clients: list[vf.ClientConfig] | None = None,
     ):
         self._clients = clients
+        self._eval_clients = eval_clients or clients
         self._admin_clients = admin_clients
         self._skip_model_check = skip_model_check
         self._idx_to_client = {client.client_idx: client for client in clients}
         self._client_cycle = cycle(clients)
+        self._eval_cycle = cycle(self._eval_clients)
         self.model_name = None  # unused
 
     @property
@@ -79,8 +85,15 @@ class StaticInferencePool:
     def update_model_name(self, model_name: str) -> None:
         self.model_name = model_name
 
+    @property
+    def eval_clients(self) -> list[vf.ClientConfig]:
+        return self._eval_clients
+
     async def get_next_client(self) -> vf.ClientConfig:
         return next(self._client_cycle)
+
+    async def get_eval_client(self) -> vf.ClientConfig:
+        return next(self._eval_cycle)
 
     async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
         await check_health(self._admin_clients, timeout=timeout)
@@ -97,7 +110,10 @@ class StaticInferencePool:
 
 
 async def setup_inference_pool(
-    client_config: ClientConfig, model_name: str, client_type: str = "openai_chat_completions"
+    client_config: ClientConfig,
+    model_name: str,
+    client_type: str = "openai_chat_completions",
+    eval_client_type: str = "openai_chat_completions",
 ) -> InferencePool:
     """Create an inference pool from config (static or elastic)."""
     logger = get_logger()
@@ -105,7 +121,9 @@ async def setup_inference_pool(
     if client_config.is_elastic:
         from prime_rl.utils.elastic import ElasticInferencePool
 
-        return await ElasticInferencePool.from_config(client_config, model_name=model_name, client_type=client_type)
+        return await ElasticInferencePool.from_config(
+            client_config, model_name=model_name, client_type=client_type, eval_client_type=eval_client_type
+        )
 
     logger.info(
         f"Initializing static inference pool (base_url={', '.join(client_config.base_url)}, "
@@ -114,6 +132,7 @@ async def setup_inference_pool(
     )
     return StaticInferencePool(
         clients=setup_clients(client_config, client_type=client_type),
+        eval_clients=setup_clients(client_config, client_type=eval_client_type),
         admin_clients=setup_admin_clients(client_config),
         skip_model_check=client_config.skip_model_check,
     )

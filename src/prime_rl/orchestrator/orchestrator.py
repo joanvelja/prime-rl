@@ -117,7 +117,10 @@ async def orchestrate(config: OrchestratorConfig):
             "history and the chat template has the extension property."
         )
     inference_pool = await setup_inference_pool(
-        rollout_client_config, model_name=rollout_model_name, client_type=client_type
+        rollout_client_config,
+        model_name=rollout_model_name,
+        client_type=client_type,
+        eval_client_type="openai_chat_completions",
     )
 
     # Setup teacher inference pool if configured
@@ -379,7 +382,7 @@ async def orchestrate(config: OrchestratorConfig):
                 *[
                     eval_env.evaluate(
                         model_name=scheduler.model_name,
-                        get_client=inference_pool.get_next_client,
+                        get_client=inference_pool.get_eval_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
@@ -704,7 +707,7 @@ async def orchestrate(config: OrchestratorConfig):
             *[
                 eval_env.evaluate(
                     model_name=scheduler.model_name,
-                    get_client=inference_pool.get_next_client,
+                    get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                 )
