@@ -66,6 +66,8 @@ class ConcurrencyLimiter:
         """Wait until *count* slots are available, then reserve them."""
         if self._max is None:
             return
+        if count > self._max:
+            raise ValueError(f"Cannot acquire {count} slots (max_concurrency={self._max})")
         while self.remaining < count:
             self._available.clear()
             await self._available.wait()
