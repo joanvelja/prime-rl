@@ -17,8 +17,8 @@ def make_scheduler() -> TrainScheduler:
     scheduler.ckpt_step = 7
     scheduler.config = SimpleNamespace(output_dir=Path("/tmp/prime-rl-test"))
     scheduler.logger = MagicMock()
-    scheduler.checkpoint_ready = asyncio.Event()
-    scheduler.checkpoint_ready.set()
+    scheduler._scheduling_enabled = asyncio.Event()
+    scheduler._scheduling_enabled.set()
     scheduler.lora_name = None
     scheduler.model_name = "test-model"
     scheduler.update_weights_time = 0

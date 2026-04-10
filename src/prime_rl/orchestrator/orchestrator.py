@@ -352,9 +352,9 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info(f"Starting orchestrator step {progress.step}")
         step_start_time = time.perf_counter()
 
-        # Run evals BEFORE training (blocking). Weight updates are paused via
-        # train_scheduler.checkpoint_ready during eval to ensure consistent weights.
-        # Each eval env has its own interval, so we check each independently.
+        # Run evals BEFORE training (blocking). Scheduling is paused during eval
+        # to ensure consistent weights. Each eval env has its own interval.
+        # TODO: for overlapping eval, remove pause/resume and rely on the shared limiter.
         envs_to_eval = []
         if config.eval:
             assert eval_envs is not None
@@ -378,7 +378,7 @@ async def orchestrate(config: OrchestratorConfig):
 
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
-            train_scheduler.checkpoint_ready.clear()
+            train_scheduler.pause()
 
             # For heavy eval workloads, it might be necessary additionally cancel in-flight training rollouts
             if config.eval.cancel_inflight_rollouts_on_eval:
@@ -404,7 +404,7 @@ async def orchestrate(config: OrchestratorConfig):
                 await asyncio.to_thread(save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl")
 
             # Resume weight updates
-            train_scheduler.checkpoint_ready.set()
+            train_scheduler.resume()
 
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step

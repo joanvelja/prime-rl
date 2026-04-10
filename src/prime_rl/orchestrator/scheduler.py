@@ -101,8 +101,8 @@ class TrainScheduler:
         self.groups: dict[int, GroupState] = {}
 
         self.step, self.ckpt_step = 0, 0
-        self.checkpoint_ready = asyncio.Event()
-        self.checkpoint_ready.set()
+        self._scheduling_enabled = asyncio.Event()
+        self._scheduling_enabled.set()
         self.update_weights_time, self.wait_for_ckpt_time = 0, 0
         self.update_policy_task: asyncio.Task | None = None
         self.inflight_policy_update_task: asyncio.Task | None = None
@@ -134,6 +134,14 @@ class TrainScheduler:
         if self.batch_size is None:
             return rollouts
         return rollouts[: self.batch_size]
+
+    def pause(self) -> None:
+        """Pause scheduling of new rollouts. Existing in-flight rollouts continue."""
+        self._scheduling_enabled.clear()
+
+    def resume(self) -> None:
+        """Resume scheduling of new rollouts."""
+        self._scheduling_enabled.set()
 
     async def cancel_inflight_rollouts(self):
         """Cancel all in-flight rollout requests."""
@@ -199,10 +207,10 @@ class TrainScheduler:
         else:
             rollout_count = 1
 
-        await self.limiter.rate.acquire(rollout_count)
-
         if not self.limiter.try_acquire(rollout_count):
             return
+
+        await self.limiter.rate.acquire(rollout_count)
 
         if env.requires_group_scoring:
             group.rollouts_to_schedule = 0
@@ -289,7 +297,7 @@ class TrainScheduler:
                 f"Orchestrator paused: waiting for trainer process to complete checkpoint {next_ckpt_step} "
                 f"(>{self.max_async_level} step(s) ahead). Training is progressing normally."
             )
-            self.checkpoint_ready.clear()
+            self.pause()
             wait_for_ckpt_start_time = time.perf_counter()
             await wait_for_path(get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step) / "STABLE")
             self.wait_for_ckpt_time = time.perf_counter() - wait_for_ckpt_start_time
@@ -312,7 +320,7 @@ class TrainScheduler:
             self.model_name = self.lora_name
             self.inference_pool.update_model_name(self.model_name)
 
-        self.checkpoint_ready.set()
+        self.resume()
         await self._update_off_policy()
 
     async def _get_or_start_policy_update_task(self, next_ckpt_step: int) -> asyncio.Task:
@@ -335,7 +343,7 @@ class TrainScheduler:
         """Updates the policy to the latest available checkpoint. Aborts rollout requests that are older than the max retention steps."""
         if not self.enable_policy_updates:
             self.ckpt_step = self.step
-            self.checkpoint_ready.set()
+            self.resume()
             return
 
         while True:
@@ -388,7 +396,7 @@ class TrainScheduler:
             self.update_policy_task = asyncio.create_task(self.update_policy_loop())
         else:
             self.ckpt_step = step
-            self.checkpoint_ready.set()
+            self.resume()
 
         batch_start_time = time.perf_counter()
 
@@ -408,7 +416,7 @@ class TrainScheduler:
                 inflight_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            await self.checkpoint_ready.wait()
+            await self._scheduling_enabled.wait()
 
             for finished_task in finished_tasks:
                 if batch_progress >= self.batch_target:
@@ -610,8 +618,8 @@ class EvalScheduler:
         if eval_env.requires_group_scoring:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
+                await self.limiter.acquire(cost_per_coro)
                 try:
-                    await self.limiter.acquire(cost_per_coro)
                     client = await self.inference_pool.get_eval_client()
                     outputs = await eval_env.run_group(
                         client=client,
@@ -633,8 +641,8 @@ class EvalScheduler:
         else:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
+                await self.limiter.acquire(1)
                 try:
-                    await self.limiter.acquire(1)
                     client = await self.inference_pool.get_eval_client()
                     output = await eval_env.run_rollout(client=client, example=example, model_name=model_name)
                     pbar.update(1)
