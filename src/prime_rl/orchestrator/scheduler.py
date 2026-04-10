@@ -210,7 +210,11 @@ class TrainScheduler:
         if not self.limiter.try_acquire(rollout_count):
             return
 
-        await self.limiter.rate.acquire(rollout_count)
+        try:
+            await self.limiter.rate.acquire(rollout_count)
+        except BaseException:
+            self.limiter.release(rollout_count)
+            raise
 
         if env.requires_group_scoring:
             group.rollouts_to_schedule = 0
@@ -536,6 +540,8 @@ class TrainScheduler:
             "scheduler/async_level": self.async_level,
             "scheduler/inflight_rollouts": self.inflight_rollout_count,
             "scheduler/inflight_samples": self.inflight_sample_count,
+            "scheduler/limiter_used": self.limiter.concurrency.used,
+            "scheduler/limiter_remaining": self.limiter.remaining,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
             "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
             "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
