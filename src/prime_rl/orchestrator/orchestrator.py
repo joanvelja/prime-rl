@@ -36,7 +36,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
-from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
+from prime_rl.orchestrator.envs import EvalEnv, EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
@@ -271,8 +271,8 @@ async def orchestrate(config: OrchestratorConfig):
     logger.info(f"Initializing training batch sender ({config.rollout_transport})")
     training_batch_sender = setup_training_batch_sender(config.output_dir, config.rollout_transport)
 
-    # Track last online eval checkpoint step for this process
-    last_eval_step = -1
+    # Track last online eval checkpoint step per eval env
+    last_eval_steps: dict[str, int] = {env.name: -1 for env in eval_envs} if eval_envs else {}
     # Track previous ckpt_step to detect when ckpt_step jumps over eval interval boundaries
     prev_ckpt_step = -1
 
@@ -285,7 +285,7 @@ async def orchestrate(config: OrchestratorConfig):
         scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
         if config.eval and config.eval.skip_eval_on_resume:
             prev_ckpt_step = scheduler.ckpt_step
-            last_eval_step = scheduler.ckpt_step
+            last_eval_steps = {name: scheduler.ckpt_step for name in last_eval_steps}
             logger.info(f"Skipping online eval on resume (ckpt_step={scheduler.ckpt_step})")
         else:
             # Allow eval at resumed step by setting prev_ckpt_step one behind
@@ -344,24 +344,25 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Run evals BEFORE training (blocking). Weight updates are paused via
         # scheduler.checkpoint_ready during eval to ensure consistent weights.
-        # Use range check to handle ckpt_step jumping over interval boundaries.
-        eval_ckpt_step = None
+        # Each eval env has its own interval, so we check each independently.
+        envs_to_eval: list[EvalEnv] = []
         if config.eval:
             assert eval_envs is not None
-            eval_ckpt_step = compute_eval_ckpt_step(
-                ckpt_step=ckpt_step,
-                prev_ckpt_step=prev_ckpt_step,
-                last_eval_step=last_eval_step,
-                interval=config.eval.interval,
-                eval_base_model=config.eval.eval_base_model,
-            )
+            for eval_env in eval_envs:
+                eval_ckpt_step = compute_eval_ckpt_step(
+                    ckpt_step=ckpt_step,
+                    prev_ckpt_step=prev_ckpt_step,
+                    last_eval_step=last_eval_steps[eval_env.name],
+                    interval=eval_env.config.interval,
+                    eval_base_model=config.eval.eval_base_model,
+                )
+                if eval_ckpt_step is not None:
+                    last_eval_steps[eval_env.name] = ckpt_step
+                    envs_to_eval.append(eval_env)
 
-        if eval_ckpt_step is not None:
-            last_eval_step = ckpt_step
-            if eval_ckpt_step != ckpt_step:
-                logger.info(f"Running evals for interval step {eval_ckpt_step} (current ckpt_step={ckpt_step})")
-            else:
-                logger.info(f"Running evals for checkpoint step {ckpt_step}")
+        if envs_to_eval:
+            env_names = ", ".join(e.name for e in envs_to_eval)
+            logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
@@ -380,7 +381,7 @@ async def orchestrate(config: OrchestratorConfig):
                         ckpt_step=ckpt_step,
                         step=progress.step,
                     )
-                    for eval_env in eval_envs
+                    for eval_env in envs_to_eval
                 ]
             )
 
