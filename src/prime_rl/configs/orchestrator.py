@@ -1021,7 +1021,6 @@ class OrchestratorConfig(BaseConfig):
     ] = True
 
     @model_validator(mode="before")
-    @classmethod
     def _deprecate_tasks_per_minute(cls, data: Any) -> Any:
         if isinstance(data, dict) and "tasks_per_minute" in data and "max_rollouts_per_minute" not in data:
             get_logger().warning(
