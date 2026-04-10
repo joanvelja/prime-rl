@@ -126,7 +126,7 @@ class ElasticInferencePool:
         self._clients: list[vf.ClientConfig] = []
         self._eval_clients: list[vf.ClientConfig] = []
         self._client_urls: list[str] = []
-        self._client_index = 0
+
         self._eval_index = 0
 
         self._sync_task: asyncio.Task | None = None
@@ -174,7 +174,7 @@ class ElasticInferencePool:
             urls = self.ready_urls
         if set(urls) != set(self._client_urls):
             self._client_urls = urls
-            self._client_index = 0
+
             self._eval_index = 0
             url_config = ClientConfig(
                 timeout=self.client_config.timeout,
@@ -200,14 +200,6 @@ class ElasticInferencePool:
     @property
     def has_clients(self) -> bool:
         return len(self.train_clients) > 0
-
-    async def get_next_client(self) -> vf.ClientConfig:
-        """Get next client in round-robin fashion."""
-        while not self.has_clients:
-            await asyncio.sleep(self.sync_interval)
-        client = self._clients[self._client_index % len(self._clients)]
-        self._client_index += 1
-        return client
 
     async def get_eval_client(self) -> vf.ClientConfig:
         """Get next eval client in round-robin fashion."""

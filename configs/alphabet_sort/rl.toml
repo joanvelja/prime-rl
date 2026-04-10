@@ -21,6 +21,9 @@ id = "alphabet-sort"
 name = "alphabet-sort"
 args = { min_turns = 2, max_turns = 2 }
 
+[orchestrator.eval]
+interval = 50
+
 [[orchestrator.eval.env]]
 id = "alphabet-sort"
 name = "alphabet-sort"

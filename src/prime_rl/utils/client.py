@@ -34,8 +34,8 @@ class InferencePool(Protocol):
         """Update the model name."""
         ...
 
-    async def get_next_client(self) -> vf.ClientConfig:
-        """Get next client in round-robin fashion."""
+    async def get_eval_client(self) -> vf.ClientConfig:
+        """Get next eval client in round-robin fashion."""
         ...
 
     async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
@@ -69,7 +69,6 @@ class StaticInferencePool:
         self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
         self._admin_clients = setup_admin_clients(client_config)
         self._skip_model_check = client_config.skip_model_check
-        self._client_cycle = cycle(self._clients)
         self._eval_cycle = cycle(self._eval_clients)
         self.model_name = model_name
 
@@ -87,9 +86,6 @@ class StaticInferencePool:
     @property
     def eval_clients(self) -> list[vf.ClientConfig]:
         return self._eval_clients
-
-    async def get_next_client(self) -> vf.ClientConfig:
-        return next(self._client_cycle)
 
     async def get_eval_client(self) -> vf.ClientConfig:
         return next(self._eval_cycle)
@@ -119,8 +115,8 @@ async def setup_inference_pool(
 
     if train_client_type == "openai_chat_completions_token":
         logger.warning(
-            "Token-in-token-out (TITO) client is enabled for training. Only use"
-            "this if your environment has a linear history and the chat"
+            "Token-in-token-out (TITO) client is enabled for training. Only use "
+            "this if your environment has a linear history and the chat "
             "template has the extension property."
         )
 
