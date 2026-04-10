@@ -104,7 +104,7 @@ class ElasticInferencePool:
         self,
         client_config: ClientConfig,
         model_name: str,
-        train_client_type: str = "openai_chat_completions",
+        train_client_type: str = "openai_chat_completions_token",
         eval_client_type: str = "openai_chat_completions",
     ):
         self.logger = get_logger()
@@ -137,7 +137,7 @@ class ElasticInferencePool:
         cls,
         client_config: ClientConfig,
         model_name: str,
-        train_client_type: str = "openai_chat_completions",
+        train_client_type: str = "openai_chat_completions_token",
         eval_client_type: str = "openai_chat_completions",
     ) -> ElasticInferencePool:
         if client_config.elastic is None:
