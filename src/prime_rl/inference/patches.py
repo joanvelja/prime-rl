@@ -227,53 +227,142 @@ def _patch_qwen35_lora():
 def _patch_lora_key_prefix():
     """Patch vLLM's LoRA loading to handle keys without base_model.model. prefix.
 
-    The trainer's broadcast saves LoRA weights without the base_model.model.
-    prefix that vLLM 0.19's check_unexpected_modules() expects. This patch
-    rewrites the safetensors file in-place to add the prefix before vLLM loads it.
-    Uses a file lock to prevent race conditions between concurrent workers.
+    This is a copy of the upstream patch: https://github.com/vllm-project/vllm/pull/38522
+    We can remove this patch once that PR makes it into a release.
     """
-    import fcntl
-    from pathlib import Path
+    from vllm.lora.lora_model import (
+        LoRAModel,
+        PEFTHelper,
+        TensorizerConfig,
+        WeightsMapper,
+        get_lora_id,
+        is_base_embedding_weights,
+        os,
+        parse_fine_tuned_lora_name,
+        safetensors,
+    )
 
-    from safetensors.torch import load_file, save_file
-    from vllm.lora.lora_model import LoRAModel
+    def _patched_from_local_checkpoint(
+        cls,
+        lora_dir: str,
+        expected_lora_modules: set[str],
+        peft_helper: PEFTHelper,
+        *,
+        lora_model_id: int | None = None,
+        device: str = "cuda",
+        dtype: torch.dtype | None = None,
+        model_vocab_size: int | None = None,
+        weights_mapper: WeightsMapper | None = None,
+        tensorizer_config_dict: dict | None = None,
+        skip_prefixes: list[str] | None = None,
+    ) -> "LoRAModel":
+        """Create a LoRAModel from a local checkpoint.
 
-    _original_from_local_checkpoint = LoRAModel.from_local_checkpoint
+        Args:
+            lora_dir: The local path that has lora data.
+            expected_lora_modules: Name of modules that are expected to be
+                replaced by lora.
+            peft_helper: Loaded lora configuration information.
+            lora_model_id: LoRA model id. If not given, automatically set by
+                a global counter.
+            device: Device where the lora model is loaded.
+            dtype: dtype of the lora model weights.
+            skip_prefixes: List of module name prefixes to skip during loading.
+                Models can define this to skip modules not used in inference
+                (e.g., MTP layers). Format: ["mtp."]
 
-    @classmethod
-    def _patched_from_local_checkpoint(cls, lora_dir, *args, **kwargs):
-        st_path = Path(lora_dir) / "adapter_model.safetensors"
-        if st_path.exists():
-            # Read-only check first — no lock or write needed if keys are fine
-            tensors = load_file(str(st_path))
-            needs_fix = any(("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors)
-            if needs_fix:
-                # Only acquire lock and write when rewrite is actually needed
-                lock_path = Path(lora_dir) / ".lora_key_fix.lock"
-                with open(lock_path, "w") as lock_fd:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                    try:
-                        # Re-read under lock in case another worker already fixed it
-                        tensors = load_file(str(st_path))
-                        needs_fix = any(
-                            ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.") for k in tensors
-                        )
-                        if needs_fix:
-                            fixed = {
-                                (
-                                    f"base_model.model.{k}"
-                                    if ("lora_A" in k or "lora_B" in k) and not k.startswith("base_model.model.")
-                                    else k
-                                ): v
-                                for k, v in tensors.items()
-                            }
-                            save_file(fixed, str(st_path))
-                    finally:
-                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        Returns:
+            Loaded LoRA Model.
+        """
+        lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
+        lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
+        lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
 
-        return _original_from_local_checkpoint.__func__(cls, lora_dir, *args, **kwargs)
+        tensors: dict[str, torch.Tensor] = {}
+        unexpected_modules: list[list[str] | str] = []
 
-    LoRAModel.from_local_checkpoint = _patched_from_local_checkpoint
+        def check_unexpected_modules(modules: dict):
+            for lora_module in modules.keys():  # noqa
+                if is_base_embedding_weights(lora_module):
+                    continue
+                # Handle PEFT file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                if "base_layer" in lora_module:
+                    continue
+                # Skip modules based on model-defined prefixes
+                if skip_prefixes and cls._should_skip_module(lora_module, skip_prefixes):
+                    continue
+                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                # Case for expert lora weights.
+                # For standard MoE models the name ends in "...experts",
+                # so expert_idx+1 yields "experts" which is in
+                # expected_lora_modules.
+                # For Qwen 3.5 MoE (and similar models) the expert index
+                # is embedded: "...experts.N.down_proj".  Taking everything
+                # after ".experts" gives "experts.N.down_proj" which is
+                # never in the expected set even though "down_proj" is.
+                # Fix: always compare just the last component of the path.
+                if ".experts" in module_name:
+                    expert_suffix = module_name.split(".")[-1]
+                    if expert_suffix not in expected_lora_modules:
+                        unexpected_modules.append(module_name)
+
+                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
+                    unexpected_modules.append(module_name)
+
+            if unexpected_modules:
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct"
+                )
+
+        if tensorizer_config_dict:
+            from tensorizer import TensorDeserializer
+
+            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            lora_tensor_path = os.path.join(tensorizer_config.tensorizer_dir, "adapter_model.tensors")
+            tensorizer_args = tensorizer_config._construct_tensorizer_args()
+            tensors = TensorDeserializer(
+                lora_tensor_path,
+                dtype=tensorizer_config.dtype,
+                **tensorizer_args.deserialization_kwargs,
+            )
+            check_unexpected_modules(tensors)
+
+        elif os.path.isfile(lora_tensor_path):
+            # Find unexpected modules.
+            # Use safetensor key as a source of truth to find expected modules.
+            # in peft if you have target_modules A, B, C and C does not exist
+            # in the model it won’t error and model will be trained with A, B
+            # loraified. C won’t exist in the safetensor but it will exist in
+            # the target_modules of the adapter_config.json.
+            unexpected_modules = []
+            with safetensors.safe_open(lora_tensor_path, framework="pt") as f:  # type: ignore
+                # Load tensors if there are only expected modules.
+                check_unexpected_modules(f)
+                for module in f.keys():  # noqa
+                    tensors[module] = f.get_tensor(module)
+        elif os.path.isfile(lora_bin_file_path) or os.path.isfile(lora_pt_file_path):
+            lora_file_path = lora_bin_file_path if os.path.isfile(lora_bin_file_path) else lora_pt_file_path
+            tensors = torch.load(lora_file_path, map_location=device, weights_only=True)
+            check_unexpected_modules(tensors)
+        else:
+            raise ValueError(f"{lora_dir} doesn't contain tensors")
+
+        return cls.from_lora_tensors(
+            lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
+            tensors=tensors,
+            peft_helper=peft_helper,
+            device=device,
+            dtype=dtype,
+            model_vocab_size=model_vocab_size,
+            weights_mapper=weights_mapper,
+            skip_prefixes=skip_prefixes,
+        )
+
+    LoRAModel.from_local_checkpoint = classmethod(_patched_from_local_checkpoint)
 
 
 # Monkeypatch LoadLoRAAdapter to allow loading the same adapter multiple times
