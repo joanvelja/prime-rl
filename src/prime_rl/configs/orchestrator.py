@@ -876,7 +876,7 @@ class OrchestratorConfig(BaseConfig):
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
 
     # Rollout filters (monitor by default, enforce optionally)
-    filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]
+    filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig(), ZeroAdvantageFilterConfig()]
 
     # The logging configuration
     log: LogConfig = LogConfig()
