@@ -185,8 +185,8 @@ class TrainScheduler:
             self.limiter.release(rollout_count)
         return rollout_count
 
-    async def schedule_rollout(self, group_id: int):
-        """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
+    async def _schedule_rollout(self, group_id: int):
+        """Acquire a concurrency slot and launch a rollout task. Blocks until a slot is available."""
         group = self.groups.get(group_id)
         if group is None or group.rollouts_to_schedule <= 0:
             return
@@ -245,33 +245,28 @@ class TrainScheduler:
         pending = sum(g.rollouts_to_schedule for g in self.groups.values())
         return self.inflight_rollout_count + pending
 
-    async def _schedule_next_request(self) -> None:
-        """Schedule one rollout request. Blocks until a concurrency slot is available."""
-        for group_id, group in self.groups.items():
-            if group.rollouts_to_schedule <= 0:
-                continue
-            await self.schedule_rollout(group_id=group_id)
-            return
+    async def _scheduling_loop(self) -> None:
+        """Continuously schedule rollouts. Blocks on acquire when capacity is full.
 
-        example = self.buffer.sample_examples(n=1)[0]
-        group_id = self.next_group_id
-        self.next_group_id += 1
-        self.groups[group_id] = GroupState(example=example, rollouts_to_schedule=self.rollouts_per_example)
-        await self.schedule_rollout(group_id=group_id)
-        return True
-
-    async def _fill_inflight_requests(self) -> None:
-        """Schedule requests up to available concurrency.
-
-        If no requests are in flight, blocks until capacity is available
-        (e.g. waiting for eval to release slots). Otherwise returns
-        immediately so generate_batch can process completed tasks.
+        Runs as a background task alongside generate_batch — when slots are freed
+        by completion processing, this loop wakes up and fills them.
         """
-        if not self.inflight_requests:
-            # Nothing in flight — must block until we can schedule at least one
-            await self._schedule_next_request()
-        while self.limiter.remaining > 0:
-            await self._schedule_next_request()
+        while True:
+            # Check existing groups first
+            scheduled = False
+            for group_id, group in list(self.groups.items()):
+                if group.rollouts_to_schedule <= 0:
+                    continue
+                await self._schedule_rollout(group_id=group_id)
+                scheduled = True
+                break
+
+            if not scheduled:
+                example = self.buffer.sample_examples(n=1)[0]
+                group_id = self.next_group_id
+                self.next_group_id += 1
+                self.groups[group_id] = GroupState(example=example, rollouts_to_schedule=self.rollouts_per_example)
+                await self._schedule_rollout(group_id=group_id)
 
     async def update_policy_loop(self):
         """Continuously checks for new policy checkpoints."""
@@ -378,16 +373,18 @@ class TrainScheduler:
             )
 
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
-        """Continuously generates a batch of rollouts."""
+        """Continuously generates a batch of rollouts.
+
+        Runs a background scheduling loop that acquires concurrency slots and
+        launches rollouts. The main loop processes completions as they arrive.
+        This avoids deadlocks: scheduling blocks on acquire (waiting for eval or
+        completions to free slots), while completion processing runs concurrently.
+        """
         self.step = step
 
         if self.enable_policy_updates:
-            # Cancel the previous update policy task to avoid concurrent updates
             if self.update_policy_task is not None:
                 await safe_cancel(self.update_policy_task)
-
-            # Manually check the async barrier before starting the step, then re-create the update policy loop
-            # This ensures that we respect max_async_level, while still listening for policy updates mid-step
             await self.maybe_update_policy()
             self.update_policy_task = asyncio.create_task(self.update_policy_loop())
         else:
@@ -395,7 +392,6 @@ class TrainScheduler:
             self.resume()
 
         batch_start_time = time.perf_counter()
-
         self.logger.debug("Starting to generate batch rollouts")
 
         batch_rollouts: list[vf.RolloutOutput] = []
@@ -404,93 +400,100 @@ class TrainScheduler:
             total=self.batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
         )
 
-        while batch_progress < self.batch_target:
-            await self._fill_inflight_requests()
-            inflight_tasks = list(self.inflight_requests.keys())
+        # Background task continuously fills concurrency slots
+        scheduling_task = asyncio.create_task(self._scheduling_loop())
 
-            finished_tasks, _ = await asyncio.wait(
-                inflight_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            await self._scheduling_enabled.wait()
+        try:
+            while batch_progress < self.batch_target:
+                # Wait until at least one inflight task exists
+                while not self.inflight_requests:
+                    await asyncio.sleep(0)
 
-            for finished_task in finished_tasks:
-                if batch_progress >= self.batch_target:
-                    break
+                inflight_tasks = list(self.inflight_requests.keys())
 
-                rollout_info = self.inflight_requests.pop(finished_task, None)
-                if rollout_info is None:
-                    continue
+                finished_tasks, _ = await asyncio.wait(
+                    inflight_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                await self._scheduling_enabled.wait()
 
-                self.limiter.release(rollout_info.rollout_count)
-                group_id = rollout_info.group_id
-                env_name = rollout_info.env_name
+                for finished_task in finished_tasks:
+                    if batch_progress >= self.batch_target:
+                        break
 
-                try:
-                    group = self.groups.get(group_id)
-                    if group is None:
+                    rollout_info = self.inflight_requests.pop(finished_task, None)
+                    if rollout_info is None:
                         continue
 
-                    env = self.train_envs.get(env_name)
-                    result = finished_task.result()
-                    rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
-                    self.total_rollouts_by_env[env_name] += len(rollouts)
+                    self.limiter.release(rollout_info.rollout_count)
+                    group_id = rollout_info.group_id
+                    env_name = rollout_info.env_name
 
-                    # Check for empty/errored rollouts and reschedule
-                    valid_rollouts = []
-                    has_failures = False
-                    for rollout in rollouts:
-                        if len(rollout["trajectory"]) == 0:
-                            self.empty_rollouts_by_env[env_name] += 1
-                            has_failures = True
-                            self.logger.warning(
-                                f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
-                                f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
-                            )
-                        elif rollout["error"] is not None:
-                            self.errored_rollouts_by_env[env_name] += 1
-                            has_failures = True
-                            self.logger.warning(
-                                f"Rollout error in group {group_id} ({env_name}), re-scheduling "
-                                f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
-                                f"{rollout['error']['error_chain_repr']}"
-                            )
-                        else:
-                            rollout["env_name"] = env_name
-                            valid_rollouts.append(rollout)
+                    try:
+                        group = self.groups.get(group_id)
+                        if group is None:
+                            continue
 
-                    if has_failures and env.requires_group_scoring:
-                        # Group scoring requires all rollouts — discard partial results, reschedule full group
-                        group.completed_rollouts.clear()
-                        group.rollouts_to_schedule = self.rollouts_per_example
+                        env = self.train_envs.get(env_name)
+                        result = finished_task.result()
+                        rollouts: list[vf.RolloutOutput] = result if isinstance(result, list) else [result]
+                        self.total_rollouts_by_env[env_name] += len(rollouts)
+
+                        # Check for empty/errored rollouts and reschedule
+                        valid_rollouts = []
+                        has_failures = False
+                        for rollout in rollouts:
+                            if len(rollout["trajectory"]) == 0:
+                                self.empty_rollouts_by_env[env_name] += 1
+                                has_failures = True
+                                self.logger.warning(
+                                    f"Empty trajectory in group {group_id} ({env_name}), re-scheduling "
+                                    f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
+                                )
+                            elif rollout["error"] is not None:
+                                self.errored_rollouts_by_env[env_name] += 1
+                                has_failures = True
+                                self.logger.warning(
+                                    f"Rollout error in group {group_id} ({env_name}), re-scheduling "
+                                    f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
+                                    f"{rollout['error']['error_chain_repr']}"
+                                )
+                            else:
+                                rollout["env_name"] = env_name
+                                valid_rollouts.append(rollout)
+
+                        if has_failures and env.requires_group_scoring:
+                            # Group scoring requires all rollouts — discard partial results, reschedule full group
+                            group.completed_rollouts.clear()
+                            group.rollouts_to_schedule = self.rollouts_per_example
+                            continue
+
+                        # For individual scoring, reschedule only the failed ones
+                        group.rollouts_to_schedule += len(rollouts) - len(valid_rollouts)
+                        group.completed_rollouts.extend(valid_rollouts)
+                        if len(group.completed_rollouts) < self.rollouts_per_example:
+                            continue
+                        completed_rollouts = self.groups.pop(group_id).completed_rollouts
+
+                    except asyncio.CancelledError:
+                        if group_id is not None:
+                            await self.drop_group(group_id)
+                        continue
+                    except Exception as e:
+                        self.logger.warning(f"Rollout failed: {e}")
+                        if group_id is not None:
+                            await self.drop_group(group_id)
                         continue
 
-                    # For individual scoring, reschedule only the failed ones
-                    group.rollouts_to_schedule += len(rollouts) - len(valid_rollouts)
-                    group.completed_rollouts.extend(valid_rollouts)
-                    if len(group.completed_rollouts) < self.rollouts_per_example:
-                        continue
-                    completed_rollouts = self.groups.pop(group_id).completed_rollouts
+                    self.buffer.update(completed_rollouts)
+                    accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
 
-                except asyncio.CancelledError:
-                    if group_id is not None:
-                        await self.drop_group(group_id)
-                    continue
-                except Exception as e:
-                    self.logger.warning(f"Rollout failed: {e}")
-                    if group_id is not None:
-                        await self.drop_group(group_id)
-                    continue
-
-                self.buffer.update(completed_rollouts)
-                accepted_rollouts = self.buffer.sample_rollouts(n=self.rollouts_per_example)
-
-                batch_rollouts.extend(accepted_rollouts)
-                progress_increment = self.get_batch_progress_increment(accepted_rollouts)
-                batch_progress += progress_increment
-                pbar.update(progress_increment)
-
-        await self._fill_inflight_requests()
+                    batch_rollouts.extend(accepted_rollouts)
+                    progress_increment = self.get_batch_progress_increment(accepted_rollouts)
+                    batch_progress += progress_increment
+                    pbar.update(progress_increment)
+        finally:
+            await safe_cancel(scheduling_task)
 
         batch_rollouts = self.finalize_batch_rollouts(batch_rollouts)
         pbar.close()
