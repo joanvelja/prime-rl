@@ -71,13 +71,13 @@ class InflightGroup:
     # Reuse the same client for all rollouts in a group to maximize prefix cache hits
     client: vf.ClientConfig | None = None
 
-    requests: dict[asyncio.Task, InflightRequest] = field(default_factory=dict)
+    inflight_requests: dict[asyncio.Task, InflightRequest] = field(default_factory=dict)
     completed_rollouts: list[vf.RolloutOutput] = field(default_factory=list)
     rollouts_to_schedule: int = 0
 
     @property
     def total_inflight_rollouts(self) -> int:
-        return sum(r.rollout_count for r in self.requests.values())
+        return sum(r.rollout_count for r in self.inflight_requests.values())
 
 
 # ---------------------------------------------------------------------------
@@ -187,12 +187,12 @@ class TrainScheduler:
 
     @property
     def max_off_policy_level(self) -> int:
-        steps = [r.off_policy_steps for g in self._groups.values() for r in g.requests.values()]
+        steps = [r.off_policy_steps for g in self._groups.values() for r in g.inflight_requests.values()]
         return max(steps) if steps else 0
 
     @property
     def mean_off_policy_level(self) -> float:
-        steps = [r.off_policy_steps for g in self._groups.values() for r in g.requests.values()]
+        steps = [r.off_policy_steps for g in self._groups.values() for r in g.inflight_requests.values()]
         return sum(steps) / len(steps) if steps else 0
 
     # ------------------------------------------------------------------
@@ -232,7 +232,7 @@ class TrainScheduler:
         count = sum(g.total_inflight_rollouts for g in self._groups.values())
         await safe_cancel_all(all_tasks)
         for group in self._groups.values():
-            group.requests.clear()
+            group.inflight_requests.clear()
         self._task_to_group.clear()
         self._groups.clear()
         self.cancelled_rollouts_count += count
@@ -353,7 +353,7 @@ class TrainScheduler:
             )
             request = InflightRolloutRequest(task=task, client=client)
 
-        group.requests[task] = request
+        group.inflight_requests[task] = request
         group_id = self._group_id_for(group)
         self._task_to_group[task] = group_id
 
@@ -381,7 +381,7 @@ class TrainScheduler:
                 if group is None:
                     continue
 
-                request = group.requests.pop(task, None)
+                request = group.inflight_requests.pop(task, None)
                 if request is None:
                     continue
 
@@ -472,12 +472,12 @@ class TrainScheduler:
         if group is None:
             return 0
 
-        tasks_to_cancel = list(group.requests.keys())
-        rollout_count = sum(r.rollout_count for r in group.requests.values())
+        tasks_to_cancel = list(group.inflight_requests.keys())
+        rollout_count = sum(r.rollout_count for r in group.inflight_requests.values())
 
         for task in tasks_to_cancel:
             self._task_to_group.pop(task, None)
-        group.requests.clear()
+        group.inflight_requests.clear()
 
         await safe_cancel_all(tasks_to_cancel)
         if rollout_count:
@@ -495,7 +495,9 @@ class TrainScheduler:
         while not clients:
             await asyncio.sleep(1)
             clients = self.inference_pool.train_clients
-        inflight = Counter(self._client_identity(r.client) for g in self._groups.values() for r in g.requests.values())
+        inflight = Counter(
+            self._client_identity(r.client) for g in self._groups.values() for r in g.inflight_requests.values()
+        )
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
     # ------------------------------------------------------------------
@@ -581,7 +583,7 @@ class TrainScheduler:
         """Increment off-policy counters and drop stale groups."""
         stale_group_ids = set()
         for gid, group in self._groups.items():
-            for request in group.requests.values():
+            for request in group.inflight_requests.values():
                 if request.off_policy_steps >= self.max_off_policy_steps:
                     stale_group_ids.add(gid)
                     break
@@ -592,7 +594,7 @@ class TrainScheduler:
         removed = sum(counts)
 
         for _, group in groups_to_increment:
-            for request in group.requests.values():
+            for request in group.inflight_requests.values():
                 request.off_policy_steps += 1
 
         if removed:
@@ -637,7 +639,7 @@ class TrainScheduler:
             metrics[f"errored_rollouts/{env_name}"] = self.errored_rollouts_by_env.get(env_name, 0) / env_total
         by_env: dict[str, list[int]] = {}
         for group in self._groups.values():
-            for request in group.requests.values():
+            for request in group.inflight_requests.values():
                 by_env.setdefault(group.env_name, []).append(request.off_policy_steps)
         for env_name, steps in by_env.items():
             metrics[f"off_policy_level/{env_name}/max"] = max(steps)

@@ -51,12 +51,12 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
             1: InflightGroup(
                 example={},
                 env_name="test",
-                requests={stale_task: stale_request},
+                inflight_requests={stale_task: stale_request},
             ),
             2: InflightGroup(
                 example={},
                 env_name="test",
-                requests={survivor_task: survivor_request},
+                inflight_requests={survivor_task: survivor_request},
             ),
         }
         scheduler._task_to_group = {stale_task: 1, survivor_task: 2}
