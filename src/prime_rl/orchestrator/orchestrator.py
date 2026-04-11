@@ -8,6 +8,7 @@ import tomli_w
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
+from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
     build_vlm_image_cache,
@@ -246,6 +247,12 @@ async def orchestrate(config: OrchestratorConfig):
     await inference_pool.wait_for_ready(rollout_model_name)
 
     logger.success("Inference pool ready")
+
+    # Start inference metrics collector (only when W&B monitoring is enabled)
+    inference_metrics_collector: InferenceMetricsCollector | None = None
+    if config.wandb is not None:
+        inference_metrics_collector = InferenceMetricsCollector(inference_pool.admin_clients)
+        await inference_metrics_collector.start()
 
     # Check health of teacher inference server if configured
     if config.teacher_model and teacher_inference_pool:
@@ -740,6 +747,8 @@ async def orchestrate(config: OrchestratorConfig):
     async def _graceful_shutdown() -> None:
         training_batch_sender.close()
         await scheduler.stop()
+        if inference_metrics_collector is not None:
+            await inference_metrics_collector.stop()
         await inference_pool.stop()
         if teacher_inference_pool is not None:
             await teacher_inference_pool.stop()
