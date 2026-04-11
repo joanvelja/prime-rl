@@ -261,10 +261,15 @@ class TrainScheduler:
         return True
 
     async def _fill_inflight_requests(self) -> None:
-        """Schedule requests up to available concurrency. Blocks on the first request if needed."""
-        # Always schedule at least one (blocks until capacity is available)
-        await self._schedule_next_request()
-        # Fill remaining capacity without blocking
+        """Schedule requests up to available concurrency.
+
+        If no requests are in flight, blocks until capacity is available
+        (e.g. waiting for eval to release slots). Otherwise returns
+        immediately so generate_batch can process completed tasks.
+        """
+        if not self.inflight_requests:
+            # Nothing in flight — must block until we can schedule at least one
+            await self._schedule_next_request()
         while self.limiter.remaining > 0:
             await self._schedule_next_request()
 
