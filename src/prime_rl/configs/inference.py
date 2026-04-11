@@ -143,10 +143,10 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
 
 class KVCacheOffloadConfig(BaseModel):
-    """CPU KV cache offloading for disaggregated prefill nodes.
+    """CPU KV cache offloading for disaggregated serving.
 
-    When configured, prefill nodes use MultiConnector (NixlConnector + OffloadingConnector).
-    Decode nodes always use NixlConnector only.
+    When configured, both prefill and decode nodes use
+    MultiConnector (NixlConnector + OffloadingConnector).
     """
 
     model_config = ConfigDict(extra="forbid")
