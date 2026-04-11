@@ -90,6 +90,14 @@ class ConcurrencyLimiter:
         assert self._used >= 0, f"ConcurrencyLimiter released too many slots (used={self._used})"
         self._available.set()
 
+    async def wait_for_capacity(self, count: int = 1) -> None:
+        """Block until *count* slots are available, without acquiring them."""
+        if self._max is None:
+            return
+        while self.remaining < count:
+            self._available.clear()
+            await self._available.wait()
+
 
 class RolloutLimiter:
     """Combined rate + concurrency limiter for rollout scheduling.

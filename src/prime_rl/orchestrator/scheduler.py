@@ -423,8 +423,7 @@ class TrainScheduler:
                         f"Train scheduler waiting for concurrency slots "
                         f"(used={self.limiter.concurrency.used}, remaining={self.limiter.remaining})"
                     )
-                    await self.limiter.concurrency.acquire(1)
-                    self.limiter.concurrency.release(1)
+                    await self.limiter.concurrency.wait_for_capacity(self.rollouts_per_example)
                     continue
                 raise RuntimeError(
                     f"No in-flight rollouts and batch incomplete ({batch_progress}/{self.batch_target}). "
