@@ -356,7 +356,7 @@ async def orchestrate(config: OrchestratorConfig):
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     policy_loop_task: asyncio.Task | None = None
     if policy_scheduler:
-        policy_loop_task = asyncio.create_task(policy_scheduler.run())
+        policy_loop_task = asyncio.create_task(policy_scheduler.start())
     await train_scheduler.start()
     is_first_step = True
     eval_task: asyncio.Task | None = None

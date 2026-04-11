@@ -124,7 +124,7 @@ class PolicyScheduler:
 
     @property
     def at_async_barrier(self) -> bool:
-        return self.async_level >= self.max_async_level
+        return self.async_level > self.max_async_level
 
     async def wait_until_ready(self) -> None:
         """Block until the async barrier is clear (ckpt_step is fresh enough).
@@ -145,7 +145,7 @@ class PolicyScheduler:
             await self.train_scheduler.drop_stale_groups(next_ckpt_step)
             self.train_scheduler.resume()
 
-    async def run(self) -> None:
+    async def start(self) -> None:
         """Background loop: poll for new checkpoints and apply weight updates.
 
         1. If at latest checkpoint — sleep and retry
@@ -157,7 +157,7 @@ class PolicyScheduler:
         while True:
             next_ckpt_step = self._get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
                 continue
 
             if self.at_async_barrier:

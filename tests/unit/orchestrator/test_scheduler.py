@@ -107,7 +107,7 @@ def test_policy_scheduler_applies_latest_checkpoint():
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
             # Run the loop briefly — it should apply the update then sleep
-            task = asyncio.create_task(ps.run())
+            task = asyncio.create_task(ps.start())
             await asyncio.sleep(0.1)
             task.cancel()
             try:
@@ -145,7 +145,7 @@ def test_stop_cancels_inflight_policy_update_task():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            policy_task = asyncio.create_task(ps.run())
+            policy_task = asyncio.create_task(ps.start())
             await started.wait()
             policy_task.cancel()
             try:
