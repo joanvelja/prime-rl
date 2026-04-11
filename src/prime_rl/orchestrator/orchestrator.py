@@ -240,7 +240,6 @@ async def orchestrate(config: OrchestratorConfig):
             output_dir=config.output_dir,
             max_async_level=config.max_async_level,
             strict_async_level=config.strict_async_level,
-            model_name=rollout_model_name,
             lora_name=config.model.lora.name if config.model.lora else None,
         )
 
@@ -265,8 +264,6 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
         train_scheduler.model_name = config.model.lora.name
-        if policy_scheduler:
-            policy_scheduler.model_name = config.model.lora.name
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")

@@ -67,6 +67,7 @@ class InflightGroupRequest(InflightRequest):
 class InflightGroup:
     """Tracks one example being evaluated with N rollouts."""
 
+    group_id: int
     example: dict
     env_name: str
     # Reuse the same client for all rollouts in a group to maximize prefix cache hits
@@ -102,7 +103,6 @@ class PolicyScheduler:
         output_dir: Path,
         max_async_level: int,
         strict_async_level: bool,
-        model_name: str,
         lora_name: str | None = None,
     ):
         self.train_scheduler = train_scheduler
@@ -111,7 +111,6 @@ class PolicyScheduler:
         self.output_dir = output_dir
         self.max_async_level = max_async_level
         self.strict_async_level = strict_async_level
-        self.model_name = model_name
         self.lora_name = lora_name
 
         self.ckpt_step = 0
@@ -120,7 +119,11 @@ class PolicyScheduler:
 
     @property
     def async_level(self) -> int:
-        return self.progress.step - self.ckpt_step, 0
+        return self.progress.step - self.ckpt_step
+
+    @property
+    def at_async_barrier(self) -> bool:
+        return self.async_level >= self.max_async_level
 
     async def run(self) -> None:
         """Background loop: poll for new checkpoints and apply weight updates.
@@ -129,24 +132,32 @@ class PolicyScheduler:
         2. If at async barrier — pause train scheduler, wait for checkpoint
         3. Update weights, drop stale groups, resume train scheduler
         """
+
+        def get_next_ckpt_step() -> int:
+            orch_step = self.progress.step
+            latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+            async_away_ckpt_step = max(orch_step - self.max_async_level, 0)
+            if self.strict_async_level:
+                return async_away_ckpt_step
+            return max(async_away_ckpt_step, latest_ckpt_step)
+
         while True:
-            next_ckpt_step = self._get_next_ckpt_step()
+            next_ckpt_step = get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
                 await asyncio.sleep(1)
                 continue
 
-            at_barrier = next_ckpt_step == self.async_level
-            if at_barrier:
+            if self.at_async_barrier:
                 self.train_scheduler.pause()
                 t0 = time.perf_counter()
                 await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
                 self.wait_for_ckpt_time = time.perf_counter() - t0
 
-            await self._update_weights(next_ckpt_step)
+            await self.update_weights(next_ckpt_step)
             await self.train_scheduler.drop_stale_groups(next_ckpt_step)
             self.train_scheduler.resume()
 
-    async def _update_weights(self, next_ckpt_step: int) -> None:
+    async def update_weights(self, next_ckpt_step: int) -> None:
         t0 = time.perf_counter()
         weights_path = get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step)
         await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
@@ -154,17 +165,8 @@ class PolicyScheduler:
 
         self.ckpt_step = next_ckpt_step
         if self.lora_name is not None:
-            self.model_name = self.lora_name
             self.train_scheduler.model_name = self.lora_name
-            self.inference_pool.update_model_name(self.model_name)
-
-    def _get_next_ckpt_step(self) -> int:
-        step = self.progress.step
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-        async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
+            self.inference_pool.update_model_name(self.lora_name)
 
     def get_metrics(self) -> dict[str, float]:
         return {
@@ -342,6 +344,7 @@ class TrainScheduler:
         group_id = self._next_group_id
         self._next_group_id += 1
         group = InflightGroup(
+            group_id=group_id,
             example=example,
             env_name=example["env_name"],
             rollouts_to_schedule=self.rollouts_per_example,
@@ -387,8 +390,7 @@ class TrainScheduler:
             request = InflightRolloutRequest(task=task, client=client, ckpt_step=self.ckpt_step)
 
         group.inflight_requests[task] = request
-        group_id = self._group_id_for(group)
-        self._task_to_group[task] = group_id
+        self._task_to_group[task] = group.group_id
 
     # ------------------------------------------------------------------
     # Completion loop
@@ -399,11 +401,10 @@ class TrainScheduler:
         while True:
             tasks = list(self._task_to_group.keys())
             if not tasks:
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.1)
                 continue
 
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            await self._scheduling_enabled.wait()
 
             for task in done:
                 group_id = self._task_to_group.pop(task, None)
@@ -491,13 +492,6 @@ class TrainScheduler:
     # ------------------------------------------------------------------
     # Group management
     # ------------------------------------------------------------------
-
-    def _group_id_for(self, group: InflightGroup) -> int:
-        """Find group_id for a group object."""
-        for gid, g in self._groups.items():
-            if g is group:
-                return gid
-        raise ValueError("Group not found")
 
     async def _drop_group(self, group_id: int) -> int:
         """Drop a group: cancel pending requests, release slots."""

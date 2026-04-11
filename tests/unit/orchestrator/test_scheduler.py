@@ -37,7 +37,6 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.output_dir = Path("/tmp/prime-rl-test")
     ps.max_async_level = 1
     ps.strict_async_level = False
-    ps.model_name = "test-model"
     ps.lora_name = None
     ps.ckpt_step = 7
     ps.update_weights_time = 0
@@ -59,11 +58,13 @@ def test_drop_stale_groups_drops_old_requests():
 
         scheduler._groups = {
             1: InflightGroup(
+                group_id=1,
                 example={},
                 env_name="test",
                 inflight_requests={stale_task: stale_request},
             ),
             2: InflightGroup(
+                group_id=2,
                 example={},
                 env_name="test",
                 inflight_requests={survivor_task: survivor_request},
