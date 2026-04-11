@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from abc import abstractmethod
+import uuid
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -23,6 +23,7 @@ from prime_rl.utils.utils import (
     get_broadcast_dir,
     get_latest_ckpt_step,
     get_step_path,
+    wait_for_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -32,53 +33,31 @@ from prime_rl.utils.utils import (
 
 @dataclass
 class InflightRequest:
-    """Base class for an in-flight rollout API call."""
+    """An in-flight rollout/ group rollout request."""
 
     task: asyncio.Task
     client: vf.ClientConfig
-    ckpt_step: int = 0
-
-    @property
-    @abstractmethod
-    def rollout_count(self) -> int: ...
-
-
-@dataclass
-class InflightRolloutRequest(InflightRequest):
-    """A single run_rollout call producing 1 rollout."""
-
-    @property
-    def rollout_count(self) -> int:
-        return 1
-
-
-@dataclass
-class InflightGroupRequest(InflightRequest):
-    """A single run_group call producing N rollouts."""
-
-    rollouts_per_example: int = 1
-
-    @property
-    def rollout_count(self) -> int:
-        return self.rollouts_per_example
+    rollout_count: int = 1
+    off_policy_steps: int = 0
 
 
 @dataclass
 class InflightGroup:
-    """Tracks one example being evaluated with N rollouts."""
+    """An inflight group"""
 
-    group_id: int
-    example: dict
     env_name: str
+    example: dict
+    rollouts_to_schedule: int
+
     # Reuse the same client for all rollouts in a group to maximize prefix cache hits
     client: vf.ClientConfig | None = None
+    group_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     inflight_requests: dict[asyncio.Task, InflightRequest] = field(default_factory=dict)
     completed_rollouts: list[vf.RolloutOutput] = field(default_factory=list)
-    rollouts_to_schedule: int = 0
 
     @property
-    def total_inflight_rollouts(self) -> int:
+    def num_inflight_rollouts(self) -> int:
         return sum(r.rollout_count for r in self.inflight_requests.values())
 
 
@@ -98,19 +77,43 @@ class PolicyScheduler:
         self,
         train_scheduler: TrainScheduler,
         inference_pool: InferencePool,
+        progress: Progress,
         output_dir: Path,
+        max_async_level: int,
         lora_name: str | None = None,
     ):
         self.train_scheduler = train_scheduler
         self.inference_pool = inference_pool
+        self.progress = progress
         self.output_dir = output_dir
+        self.max_async_level = max_async_level
         self.lora_name = lora_name
 
         self.ckpt_step = 0
         self.update_weights_time = 0.0
+        self.wait_for_ckpt_time = 0.0
+        self.async_barrier_clear = asyncio.Event()
+        self.async_barrier_clear.set()  # initially clear (no barrier)
+
+    @property
+    def async_level(self) -> int:
+        return self.progress.step - self.ckpt_step
+
+    @property
+    def at_async_barrier(self) -> bool:
+        return self.async_level > self.max_async_level
+
+    async def wait_for_async_barrier(self) -> None:
+        """Block until the async barrier is cleared."""
+        await self.async_barrier_clear.wait()
 
     async def start(self) -> None:
-        """Background loop: poll for new checkpoints and apply weight updates."""
+        """Background loop: poll for new checkpoints and apply weight updates.
+
+        1. If at latest checkpoint — sleep and retry
+        2. If at async barrier — pause train scheduler, wait for checkpoint
+        3. Update weights, drop stale groups, signal barrier cleared
+        """
         logger = get_logger()
         while True:
             latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
@@ -118,12 +121,22 @@ class PolicyScheduler:
                 await asyncio.sleep(0.1)
                 continue
 
+            if self.at_async_barrier:
+                self.async_barrier_clear.clear()
+                logger.info(f"At async barrier: pausing train scheduling, waiting for checkpoint {latest_ckpt_step}")
+                self.train_scheduler.pause()
+                t0 = time.perf_counter()
+                await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), latest_ckpt_step) / "STABLE")
+                self.wait_for_ckpt_time = time.perf_counter() - t0
+                logger.debug(f"Waited for checkpoint {latest_ckpt_step} in {print_time(self.wait_for_ckpt_time)}")
+
             logger.info(f"Updating weights to training checkpoint {latest_ckpt_step}")
             await self._update_weights(latest_ckpt_step)
             logger.debug(f"Weights updated in {print_time(self.update_weights_time)}")
 
-            await self.train_scheduler.drop_stale_groups(latest_ckpt_step)
-            logger.debug(f"Dropped stale rollouts for checkpoint {latest_ckpt_step}")
+            self.train_scheduler.off_policy_steps += 1
+            await self.train_scheduler.drop_stale_groups()
+            self.async_barrier_clear.set()
 
     async def _update_weights(self, ckpt_step: int) -> None:
         """Update the weights to the next training checkpoint."""
@@ -140,6 +153,8 @@ class PolicyScheduler:
     def get_metrics(self) -> dict[str, float]:
         return {
             "time/update_weights": self.update_weights_time,
+            "time/wait_for_ckpt": self.wait_for_ckpt_time,
+            "scheduler/async_level": self.async_level,
         }
 
 
@@ -167,7 +182,6 @@ class TrainScheduler:
         token_batch_size: int | None,
         rollouts_per_example: int,
         max_off_policy_steps: int,
-        max_async_level: int,
         model_name: str,
         json_logging: bool = False,
     ):
@@ -176,8 +190,6 @@ class TrainScheduler:
         self.buffer = buffer
         self.progress = progress
         self.limiter = rollout_limiter
-        self.max_async_level = max_async_level
-        self.policy_scheduler: PolicyScheduler | None = None
         self._uses_token_batching = token_batch_size is not None
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
@@ -186,9 +198,9 @@ class TrainScheduler:
         self.json_logging = json_logging
 
         # Group tracking
-        self._next_group_id = 0
-        self._groups: dict[int, InflightGroup] = {}
-        self._task_to_group: dict[asyncio.Task, int] = {}
+        self._groups: dict[str, InflightGroup] = {}
+        self._task_to_group: dict[asyncio.Task, str] = {}
+        self.off_policy_steps = 0
 
         # Batch accumulation
         self._batch_rollouts: list[vf.RolloutOutput] = []
@@ -215,15 +227,15 @@ class TrainScheduler:
     # ------------------------------------------------------------------
 
     @property
-    def ckpt_step(self) -> int:
-        return self.policy_scheduler.ckpt_step if self.policy_scheduler else self.progress.step
-
-    @property
     def num_inflight_rollouts(self) -> int:
-        return sum(g.total_inflight_rollouts for g in self._groups.values())
+        return sum(g.num_inflight_rollouts for g in self._groups.values())
 
     def _off_policy_levels(self) -> list[int]:
-        return [self.ckpt_step - r.ckpt_step for g in self._groups.values() for r in g.inflight_requests.values()]
+        return [
+            self.off_policy_steps - r.off_policy_steps
+            for g in self._groups.values()
+            for r in g.inflight_requests.values()
+        ]
 
     # ------------------------------------------------------------------
     # Public API
@@ -246,7 +258,7 @@ class TrainScheduler:
     async def cancel_inflight_rollouts(self) -> None:
         """Cancel all in-flight rollout requests and release their slots."""
         all_tasks = list(self._task_to_group.keys())
-        count = sum(g.total_inflight_rollouts for g in self._groups.values())
+        count = sum(g.num_inflight_rollouts for g in self._groups.values())
         await safe_cancel_all(all_tasks)
         for group in self._groups.values():
             group.inflight_requests.clear()
@@ -256,12 +268,8 @@ class TrainScheduler:
         self.limiter.release(count)
 
     async def wait_for_batch(self) -> list[vf.RolloutOutput]:
-        """Block until the current batch is complete and async level allows it."""
+        """Block until the current batch is complete, then return it."""
         await self._batch_ready.wait()
-
-        # Enforce async level: don't return batch if orchestrator is too far ahead
-        while self.progress.step - self.ckpt_step > self.max_async_level:
-            await asyncio.sleep(0.1)
 
         batch = list(self._batch_rollouts)
         self.last_batch_generation_time = time.perf_counter() - self._batch_start_time
@@ -282,7 +290,6 @@ class TrainScheduler:
             json_logging=self.json_logging,
             step=self.progress.step,
         )
-        self.resume()  # start filling the next batch
 
     async def stop(self) -> None:
         """Stop all background tasks and cancel in-flight rollouts."""
@@ -317,15 +324,12 @@ class TrainScheduler:
     def _create_group(self) -> InflightGroup:
         """Sample an example from the buffer and create a new group."""
         example = self.buffer.sample_examples(n=1)[0]
-        group_id = self._next_group_id
-        self._next_group_id += 1
         group = InflightGroup(
-            group_id=group_id,
             example=example,
             env_name=example["env_name"],
             rollouts_to_schedule=self.rollouts_per_example,
         )
-        self._groups[group_id] = group
+        self._groups[group.group_id] = group
         return group
 
     async def _schedule_from_group(self, group: InflightGroup) -> None:
@@ -350,8 +354,8 @@ class TrainScheduler:
                     rollouts_per_example=rollout_count,
                 )
             )
-            request = InflightGroupRequest(
-                task=task, client=client, ckpt_step=self.ckpt_step, rollouts_per_example=rollout_count
+            request = InflightRequest(
+                task=task, client=client, rollout_count=rollout_count, off_policy_steps=self.off_policy_steps
             )
         else:
             await self.limiter.acquire(1)
@@ -363,7 +367,7 @@ class TrainScheduler:
                     model_name=self.model_name,
                 )
             )
-            request = InflightRolloutRequest(task=task, client=client, ckpt_step=self.ckpt_step)
+            request = InflightRequest(task=task, client=client, off_policy_steps=self.off_policy_steps)
 
         group.inflight_requests[task] = request
         self._task_to_group[task] = group.group_id
@@ -398,7 +402,7 @@ class TrainScheduler:
                 self.limiter.release(request.rollout_count)
                 await self._process_completion(group_id, group, request)
 
-    async def _process_completion(self, group_id: int, group: InflightGroup, request: InflightRequest) -> None:
+    async def _process_completion(self, group_id: str, group: InflightGroup, request: InflightRequest) -> None:
         """Process a completed request: validate, reschedule failures, accumulate batch."""
         env = self.train_envs.get(group.env_name)
 
@@ -470,7 +474,7 @@ class TrainScheduler:
     # Group management
     # ------------------------------------------------------------------
 
-    async def _drop_group(self, group_id: int) -> int:
+    async def _drop_group(self, group_id: str) -> int:
         """Drop a group: cancel pending requests, release slots."""
         group = self._groups.pop(group_id, None)
         if group is None:
@@ -504,13 +508,14 @@ class TrainScheduler:
         )
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
-    async def drop_stale_groups(self, current_ckpt_step: int) -> None:
+    async def drop_stale_groups(self) -> None:
         """Drop groups with requests older than max_off_policy_steps."""
         stale_group_ids = {
             gid
             for gid, group in self._groups.items()
             if any(
-                current_ckpt_step - r.ckpt_step >= self.max_off_policy_steps for r in group.inflight_requests.values()
+                self.off_policy_steps - r.off_policy_steps >= self.max_off_policy_steps
+                for r in group.inflight_requests.values()
             )
         }
         if not stale_group_ids:
@@ -520,8 +525,7 @@ class TrainScheduler:
         removed = sum(counts)
         if removed:
             get_logger().warning(
-                f"Cancelled {removed} stale rollout requests (ckpt_step={current_ckpt_step}). "
-                f"Consider increasing max_off_policy_steps to avoid this."
+                f"Cancelled {removed} stale rollout requests. Consider increasing max_off_policy_steps to avoid this."
             )
 
     # ------------------------------------------------------------------
@@ -547,7 +551,7 @@ class TrainScheduler:
         by_env: dict[str, list[int]] = {}
         for group in self._groups.values():
             for request in group.inflight_requests.values():
-                by_env.setdefault(group.env_name, []).append(self.ckpt_step - request.ckpt_step)
+                by_env.setdefault(group.env_name, []).append(self.off_policy_steps - request.off_policy_steps)
         for env_name, steps in by_env.items():
             metrics[f"off_policy_level/{env_name}/max"] = max(steps)
             metrics[f"off_policy_level/{env_name}/mean"] = sum(steps) / len(steps)

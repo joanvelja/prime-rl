@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from prime_rl.orchestrator.ckpt import Progress
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
-from prime_rl.orchestrator.scheduler import InflightGroup, InflightRolloutRequest, PolicyScheduler, TrainScheduler
+from prime_rl.orchestrator.scheduler import InflightGroup, InflightRequest, PolicyScheduler, TrainScheduler
 
 
 def _make_train_scheduler() -> TrainScheduler:
@@ -22,8 +22,7 @@ def _make_train_scheduler() -> TrainScheduler:
     scheduler._scheduling_task = None
     scheduler._completion_task = None
     scheduler.progress = Progress(step=0)
-    scheduler.policy_scheduler = None
-    scheduler.max_async_level = 1
+    scheduler.off_policy_steps = 0
     scheduler.model_name = "test-model"
     return scheduler
 
@@ -37,7 +36,9 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.lora_name = None
     ps.ckpt_step = 7
     ps.update_weights_time = 0
-    train_scheduler.policy_scheduler = ps
+    ps._barrier_cleared = asyncio.Event()
+    ps.max_async_level = 1
+    ps.progress = Progress(step=9)
     train_scheduler.progress = Progress(step=9)
     return ps
 
@@ -50,30 +51,28 @@ def test_drop_stale_groups_drops_old_requests():
         stale_task = asyncio.create_task(asyncio.sleep(60))
         survivor_task = asyncio.create_task(asyncio.sleep(60))
 
-        stale_request = InflightRolloutRequest(task=stale_task, client=client, ckpt_step=0)
-        survivor_request = InflightRolloutRequest(task=survivor_task, client=client, ckpt_step=1)
+        stale_request = InflightRequest(task=stale_task, client=client, off_policy_steps=0)
+        survivor_request = InflightRequest(task=survivor_task, client=client, off_policy_steps=1)
 
-        scheduler._groups = {
-            1: InflightGroup(
-                group_id=1,
-                example={},
-                env_name="test",
-                inflight_requests={stale_task: stale_request},
-            ),
-            2: InflightGroup(
-                group_id=2,
-                example={},
-                env_name="test",
-                inflight_requests={survivor_task: survivor_request},
-            ),
-        }
-        scheduler._task_to_group = {stale_task: 1, survivor_task: 2}
+        stale_group = InflightGroup(
+            example={},
+            env_name="test",
+            inflight_requests={stale_task: stale_request},
+        )
+        survivor_group = InflightGroup(
+            example={},
+            env_name="test",
+            inflight_requests={survivor_task: survivor_request},
+        )
+        scheduler._groups = {stale_group.group_id: stale_group, survivor_group.group_id: survivor_group}
+        scheduler._task_to_group = {stale_task: stale_group.group_id, survivor_task: survivor_group.group_id}
         scheduler.limiter.concurrency.try_acquire(2)
 
-        await scheduler.drop_stale_groups(current_ckpt_step=1)
+        scheduler.off_policy_steps = 1
+        await scheduler.drop_stale_groups()
 
-        assert 1 not in scheduler._groups
-        assert 2 in scheduler._groups
+        assert stale_group.group_id not in scheduler._groups
+        assert survivor_group.group_id in scheduler._groups
         assert scheduler.cancelled_rollouts_count == 1
 
         for task in (stale_task, survivor_task):
