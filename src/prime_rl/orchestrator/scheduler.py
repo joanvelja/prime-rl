@@ -68,7 +68,8 @@ class InflightGroup:
 
     example: dict
     env_name: str
-    pinned_client: vf.ClientConfig | None = None
+    # Reuse the same client for all rollouts in a group to maximize prefix cache hits
+    client: vf.ClientConfig | None = None
 
     requests: dict[asyncio.Task, InflightRequest] = field(default_factory=dict)
     completed_rollouts: list[vf.RolloutOutput] = field(default_factory=list)
@@ -321,11 +322,11 @@ class TrainScheduler:
         """Schedule one request from a group. Blocks until a concurrency slot is available."""
         env = self.train_envs.get(group.env_name)
 
-        if group.pinned_client is not None:
-            client = group.pinned_client
+        if group.client is not None:
+            client = group.client
         else:
             client = await self._select_least_loaded_client()
-            group.pinned_client = client
+            group.client = client
 
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
