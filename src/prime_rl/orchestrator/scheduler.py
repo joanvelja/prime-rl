@@ -112,8 +112,8 @@ class TrainScheduler:
         self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
+        self._uses_token_batching = config.token_batch_size is not None
         self._batch_target = config.token_batch_size or config.batch_size
-        self._batch_size = config.batch_size
         self.rollouts_per_example = config.rollouts_per_example
         self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
@@ -230,7 +230,7 @@ class TrainScheduler:
         """Block until the current batch is complete, then return it."""
         await self._batch_ready.wait()
 
-        batch = self._finalize_batch()
+        batch = list(self._batch_rollouts)
         self.last_batch_generation_time = time.perf_counter() - self._batch_start_time
         if self._pbar:
             self._pbar.close()
@@ -432,7 +432,7 @@ class TrainScheduler:
         accepted = self.buffer.sample_rollouts(n=self.rollouts_per_example)
 
         self._batch_rollouts.extend(accepted)
-        if self._batch_size is None:
+        if self._uses_token_batching:
             increment = sum(get_seq_len(r) for r in accepted)
         else:
             increment = len(accepted)
@@ -590,16 +590,6 @@ class TrainScheduler:
                 f"Cancelled {removed} old rollout requests (will refill naturally). "
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
-
-    # ------------------------------------------------------------------
-    # Batch helpers
-    # ------------------------------------------------------------------
-
-    def _finalize_batch(self) -> list[vf.RolloutOutput]:
-        batch = list(self._batch_rollouts)
-        if self._batch_size is not None:
-            batch = batch[: self._batch_size]
-        return batch
 
     # ------------------------------------------------------------------
     # Metrics
