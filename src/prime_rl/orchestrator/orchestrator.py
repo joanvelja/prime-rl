@@ -340,8 +340,9 @@ async def orchestrate(config: OrchestratorConfig):
             step_path = get_step_path(get_rollout_dir(config.output_dir), eval_step)
             await asyncio.to_thread(save_rollouts, all_rollouts, step_path / "eval_rollouts.jsonl")
 
-    # Iterate over dataset in batches
+    # Start the train scheduler (background loops)
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
+    await train_scheduler.start(step=progress.step)
     is_first_step = True
     eval_task: asyncio.Task | None = None
 
@@ -424,13 +425,9 @@ async def orchestrate(config: OrchestratorConfig):
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
-        # Schedule generating the training batch
-        train_task = asyncio.create_task(train_scheduler.generate_batch(step=progress.step))
-
-        # Await train rollouts
-        await train_task
+        # Wait for the train batch to complete (background loops are always running)
+        train_rollouts = await train_scheduler.wait_for_batch()
         generate_completions_time = train_scheduler.last_batch_generation_time
-        train_rollouts = train_task.result()
 
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
@@ -706,9 +703,10 @@ async def orchestrate(config: OrchestratorConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {train_scheduler.async_level} | Max. Off-Policy Level: {train_scheduler.max_off_policy_level}"
         logger.success(step_message)
 
-        # Increment step
+        # Increment step and advance train scheduler to next batch
         progress.step += 1
         is_first_step = False
+        train_scheduler.advance_step(progress.step)
 
         # Free large per-step objects to prevent memory accumulation
         del train_rollouts, train_examples, training_batch, vlm_cache

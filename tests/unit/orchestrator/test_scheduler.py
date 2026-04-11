@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
-from prime_rl.orchestrator.scheduler import InflightRequest, TrainScheduler
+from prime_rl.orchestrator.scheduler import InflightGroup, InflightRolloutRequest, TrainScheduler
 from prime_rl.utils.async_utils import safe_cancel
 
 
@@ -23,68 +23,55 @@ def make_scheduler() -> TrainScheduler:
     scheduler.model_name = "test-model"
     scheduler.update_weights_time = 0
     scheduler.wait_for_ckpt_time = 0
-    scheduler.inflight_requests = {}
-    scheduler.groups = {}
+    scheduler._groups = {}
+    scheduler._task_to_group = {}
     scheduler.max_off_policy_steps = 1
     scheduler.cancelled_rollouts_count = 0
-    scheduler.policy_update_lock = asyncio.Lock()
-    scheduler.inflight_policy_update_task = None
-    scheduler.update_policy_task = None
+    scheduler._policy_update_lock = asyncio.Lock()
+    scheduler._inflight_policy_update_task = None
+    scheduler._policy_loop_task = None
+    scheduler._scheduling_task = None
+    scheduler._completion_task = None
     scheduler.enable_policy_updates = True
     return scheduler
 
 
 def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
     async def run() -> None:
-        scheduler = TrainScheduler.__new__(TrainScheduler)
-        scheduler.limiter = RolloutLimiter(128)
-        scheduler.max_off_policy_steps = 1
-        scheduler.cancelled_rollouts_count = 0
-        scheduler.logger = MagicMock()
+        scheduler = make_scheduler()
 
         client = SimpleNamespace(api_base_url="http://test")
         stale_task = asyncio.create_task(asyncio.sleep(60))
         survivor_task = asyncio.create_task(asyncio.sleep(60))
-        interleaved_task = None
 
-        scheduler.inflight_requests = {
-            stale_task: InflightRequest(off_policy_steps=1, client_config=client, env_name="test", group_id=1),
-            survivor_task: InflightRequest(off_policy_steps=0, client_config=client, env_name="test", group_id=2),
+        stale_request = InflightRolloutRequest(task=stale_task, client=client, off_policy_steps=1)
+        survivor_request = InflightRolloutRequest(task=survivor_task, client=client, off_policy_steps=0)
+
+        scheduler._groups = {
+            1: InflightGroup(
+                example={},
+                env_name="test",
+                requests={stale_task: stale_request},
+            ),
+            2: InflightGroup(
+                example={},
+                env_name="test",
+                requests={survivor_task: survivor_request},
+            ),
         }
-
-        async def drop_group(group_id: int) -> int:
-            tasks_to_remove = [
-                task for task, info in list(scheduler.inflight_requests.items()) if info.group_id == group_id
-            ]
-            for task in tasks_to_remove:
-                scheduler.inflight_requests.pop(task, None)
-                task.cancel()
-
-            await asyncio.sleep(0)
-
-            nonlocal interleaved_task
-            if interleaved_task is None:
-                interleaved_task = asyncio.create_task(asyncio.sleep(60))
-                scheduler.inflight_requests[interleaved_task] = InflightRequest(
-                    off_policy_steps=0,
-                    client_config=client,
-                    env_name="test",
-                    group_id=3,
-                )
-            return len(tasks_to_remove)
-
-        scheduler.drop_group = drop_group
+        scheduler._task_to_group = {stale_task: 1, survivor_task: 2}
+        # Simulate slots acquired for each request
+        scheduler.limiter.concurrency.try_acquire(2)
 
         await scheduler._update_off_policy()
 
-        assert stale_task not in scheduler.inflight_requests
-        assert scheduler.inflight_requests[survivor_task].off_policy_steps == 1
-        assert interleaved_task is not None
-        assert scheduler.inflight_requests[interleaved_task].off_policy_steps == 0
+        assert 1 not in scheduler._groups
+        assert 2 in scheduler._groups
+        assert survivor_request.off_policy_steps == 1
         assert scheduler.cancelled_rollouts_count == 1
 
-        for task in (stale_task, survivor_task, interleaved_task):
-            if task is not None and not task.done():
+        for task in (stale_task, survivor_task):
+            if not task.done():
                 task.cancel()
         await asyncio.sleep(0)
 
@@ -113,11 +100,11 @@ def test_maybe_update_policy_reuses_inflight_update_after_cancellation():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            first = asyncio.create_task(scheduler.maybe_update_policy())
+            first = asyncio.create_task(scheduler._maybe_update_policy())
             await started.wait()
             await safe_cancel(first)
 
-            second = asyncio.create_task(scheduler.maybe_update_policy())
+            second = asyncio.create_task(scheduler._maybe_update_policy())
             await asyncio.sleep(0)
             assert applied_steps == [8]
 
@@ -153,13 +140,13 @@ def test_stop_cancels_inflight_policy_update_task():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            scheduler.update_policy_task = asyncio.create_task(scheduler.maybe_update_policy())
+            scheduler._policy_loop_task = asyncio.create_task(scheduler._maybe_update_policy())
             await started.wait()
             await asyncio.wait_for(scheduler.stop(), timeout=0.2)
 
         assert cancelled.is_set()
-        assert scheduler.update_policy_task is None
-        assert scheduler.inflight_policy_update_task is None
+        assert scheduler._policy_loop_task is None
+        assert scheduler._inflight_policy_update_task is None
 
     asyncio.run(run())
 
