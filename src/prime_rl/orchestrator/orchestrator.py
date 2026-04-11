@@ -212,6 +212,8 @@ async def orchestrate(config: OrchestratorConfig):
     logger.info(f"Setting up buffer ({config.buffer})")
     buffer = Buffer(train_envs, config.buffer)
 
+    progress = Progress()
+
     rollout_limiter = RolloutLimiter(
         max_concurrent_rollouts=config.max_inflight_rollouts,
         max_rollouts_per_minute=config.max_rollouts_per_minute,
@@ -300,9 +302,6 @@ async def orchestrate(config: OrchestratorConfig):
     last_eval_steps: dict[str, int] = {env.name: -1 for env in eval_envs} if eval_envs else {}
     # Track previous ckpt_step to detect when ckpt_step jumps over eval interval boundaries
     prev_ckpt_step = -1
-
-    # Reset weights to base model if starting from scratch
-    progress = Progress()
 
     if checkpoint_step is not None and ckpt_manager is not None:
         ckpt_manager.load(progress, buffer, step=checkpoint_step)

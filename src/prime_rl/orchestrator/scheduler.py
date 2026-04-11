@@ -150,20 +150,23 @@ class PolicyScheduler:
 
             if self.at_async_barrier:
                 logger.info(
-                    f"Waiting for checkpoint {next_ckpt_step} "
-                    f"(orchestrator is >{self.max_async_level} step(s) ahead of trainer)"
+                    f"[policy] Pausing training rollout scheduling — waiting for trainer to produce "
+                    f"checkpoint {next_ckpt_step} (>{self.max_async_level} step(s) ahead)"
                 )
                 self.train_scheduler.pause()
                 t0 = time.perf_counter()
                 await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
                 self.wait_for_ckpt_time = time.perf_counter() - t0
-                logger.debug(f"Checkpoint {next_ckpt_step} ready (waited {self.wait_for_ckpt_time:.2f}s)")
+                logger.info(f"[policy] Checkpoint {next_ckpt_step} ready after {self.wait_for_ckpt_time:.2f}s")
 
-            logger.info(f"Updating inference weights to checkpoint {next_ckpt_step}")
+            logger.info(f"[policy] Loading weights for checkpoint {next_ckpt_step} onto inference servers")
             await self.update_weights(next_ckpt_step)
+            logger.debug(f"[policy] Weights loaded in {self.update_weights_time:.2f}s")
+
+            logger.info("[policy] Dropping stale rollouts and resuming training rollout scheduling")
             await self.train_scheduler.drop_stale_groups(next_ckpt_step)
             self.train_scheduler.resume()
-            logger.debug(f"Policy update to step {next_ckpt_step} complete ({self.update_weights_time:.2f}s)")
+            logger.debug(f"[policy] Policy update to checkpoint {next_ckpt_step} complete")
 
     async def update_weights(self, next_ckpt_step: int) -> None:
         t0 = time.perf_counter()
