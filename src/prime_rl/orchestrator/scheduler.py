@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import verifiers as vf
-from verifiers.utils.logging_utils import print_time
 
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress
@@ -119,29 +118,9 @@ class PolicyScheduler:
         self.update_weights_time = 0.0
         self.wait_for_ckpt_time = 0.0
 
-    async def maybe_update(self, step: int) -> None:
-        """Check for and apply any pending policy updates."""
-
-        def get_next_ckpt_step() -> int:
-            latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-            async_away_ckpt_step = max(step - self.max_async_level, 0)
-            if self.strict_async_level:
-                return async_away_ckpt_step
-            return max(async_away_ckpt_step, latest_ckpt_step)
-
-        while True:
-            next_ckpt_step = get_next_ckpt_step()
-            if next_ckpt_step <= self.ckpt_step:
-                return
-            await self._apply_update(next_ckpt_step, step)
-
     @property
     def async_level(self) -> int:
         return self.progress.step - self.ckpt_step
-
-    @property
-    def at_async_barrier(self) -> bool:
-        return self.progress.step - self.ckpt_step == self.max_async_level
 
     def get_metrics(self) -> dict[str, float]:
         return {
@@ -150,35 +129,41 @@ class PolicyScheduler:
             "scheduler/async_level": self.async_level,
         }
 
-    async def run(self) -> None:
-        """Background loop. Reads current step from progress.step."""
-        while True:
-            await self.maybe_update(self.progress.step)
-            await asyncio.sleep(1)
-
-    async def _apply_update(self, next_ckpt_step: int, step: int) -> None:
-        # Wait for checkpoint if we're at the async barrier
+    def _get_next_ckpt_step(self) -> int:
+        step = self.progress.step
+        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
         async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if next_ckpt_step == async_away_ckpt_step:
-            get_logger().info(
-                f"At async barrier: Pausing new rollout scheduling while waiting for checkpoint {next_ckpt_step}"
-            )
-            self.train_scheduler.pause()
-            t0 = time.perf_counter()
-            await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
-            self.wait_for_ckpt_time = time.perf_counter() - t0
-            get_logger().info(
-                f"Cleared async barrier: Checkpoint {next_ckpt_step} ready after {print_time(self.wait_for_ckpt_time)}"
-            )
+        if self.strict_async_level:
+            return async_away_ckpt_step
+        return max(async_away_ckpt_step, latest_ckpt_step)
 
-        # Update weights on inference servers
-        get_logger().info(f"Updating weights to step {next_ckpt_step}")
+    async def maybe_update(self) -> None:
+        """Check for and apply pending policy updates.
+
+        1. If at latest checkpoint — return
+        2. If at async barrier — pause train scheduler, wait for checkpoint
+        3. Update weights, drop stale groups, resume train scheduler
+        """
+        while True:
+            next_ckpt_step = self._get_next_ckpt_step()
+            if next_ckpt_step <= self.ckpt_step:
+                return
+
+            at_barrier = next_ckpt_step == max(self.progress.step - self.max_async_level, 0)
+            if at_barrier:
+                self.train_scheduler.pause()
+                t0 = time.perf_counter()
+                await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
+                self.wait_for_ckpt_time = time.perf_counter() - t0
+
+            await self._update_weights(next_ckpt_step)
+            await self.train_scheduler.drop_stale_groups(next_ckpt_step)
+            self.train_scheduler.resume()
+
+    async def _update_weights(self, next_ckpt_step: int) -> None:
         t0 = time.perf_counter()
-        await self.inference_pool.update_weights(
-            weight_dir=get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step),
-            lora_name=self.lora_name,
-            step=next_ckpt_step,
-        )
+        weights_path = get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step)
+        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
         self.update_weights_time = time.perf_counter() - t0
 
         self.ckpt_step = next_ckpt_step
@@ -187,12 +172,11 @@ class PolicyScheduler:
             self.train_scheduler.model_name = self.lora_name
             self.inference_pool.update_model_name(self.model_name)
 
-        # Resume scheduling and drop stale rollouts
-        self.train_scheduler.resume()
-        await self.train_scheduler.drop_stale_groups(next_ckpt_step)
-        get_logger().debug(
-            f"Updated weights to step {next_ckpt_step} in {print_time(self.update_weights_time)}. Resuming scheduling of training rollouts"
-        )
+    async def run(self) -> None:
+        """Background loop."""
+        while True:
+            await self.maybe_update()
+            await asyncio.sleep(1)
 
 
 # ---------------------------------------------------------------------------
