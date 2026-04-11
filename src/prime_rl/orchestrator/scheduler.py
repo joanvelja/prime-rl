@@ -273,6 +273,7 @@ class TrainScheduler:
             json_logging=self.json_logging,
             step=self.progress.step,
         )
+        self.resume()  # start filling the next batch
 
     async def stop(self) -> None:
         """Stop all background tasks and cancel in-flight rollouts."""
@@ -454,6 +455,7 @@ class TrainScheduler:
 
         if self._batch_progress >= self._batch_target:
             self._batch_ready.set()
+            self.pause()  # stop scheduling until the batch is consumed
 
     # ------------------------------------------------------------------
     # Group management
