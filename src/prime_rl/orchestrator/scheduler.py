@@ -167,6 +167,7 @@ class TrainScheduler:
         token_batch_size: int | None,
         rollouts_per_example: int,
         max_off_policy_steps: int,
+        max_async_level: int,
         model_name: str,
         json_logging: bool = False,
     ):
@@ -175,6 +176,8 @@ class TrainScheduler:
         self.buffer = buffer
         self.progress = progress
         self.limiter = rollout_limiter
+        self.max_async_level = max_async_level
+        self.policy_scheduler: PolicyScheduler | None = None
         self._uses_token_batching = token_batch_size is not None
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
@@ -199,8 +202,6 @@ class TrainScheduler:
         self._scheduling_task: asyncio.Task | None = None
         self._completion_task: asyncio.Task | None = None
 
-        self.ckpt_step = 0
-
         # Metrics (reset per step)
         self.cancelled_rollouts_count = 0
         self.empty_rollouts_by_env: dict[str, int] = defaultdict(int)
@@ -212,6 +213,10 @@ class TrainScheduler:
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
+
+    @property
+    def ckpt_step(self) -> int:
+        return self.policy_scheduler.ckpt_step if self.policy_scheduler else self.progress.step
 
     @property
     def num_inflight_rollouts(self) -> int:
@@ -251,8 +256,12 @@ class TrainScheduler:
         self.limiter.release(count)
 
     async def wait_for_batch(self) -> list[vf.RolloutOutput]:
-        """Block until the current batch is complete, then return it."""
+        """Block until the current batch is complete and async level allows it."""
         await self._batch_ready.wait()
+
+        # Enforce async level: don't return batch if orchestrator is too far ahead
+        while self.progress.step - self.ckpt_step > self.max_async_level:
+            await asyncio.sleep(0.1)
 
         batch = list(self._batch_rollouts)
         self.last_batch_generation_time = time.perf_counter() - self._batch_start_time

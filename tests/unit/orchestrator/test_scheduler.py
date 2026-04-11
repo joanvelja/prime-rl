@@ -22,7 +22,8 @@ def _make_train_scheduler() -> TrainScheduler:
     scheduler._scheduling_task = None
     scheduler._completion_task = None
     scheduler.progress = Progress(step=0)
-    scheduler.ckpt_step = 0
+    scheduler.policy_scheduler = None
+    scheduler.max_async_level = 1
     scheduler.model_name = "test-model"
     return scheduler
 
@@ -36,6 +37,8 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.lora_name = None
     ps.ckpt_step = 7
     ps.update_weights_time = 0
+    train_scheduler.policy_scheduler = ps
+    train_scheduler.progress = Progress(step=9)
     return ps
 
 
