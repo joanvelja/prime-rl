@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import verifiers as vf
+from verifiers.utils.logging_utils import print_time
 
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress
@@ -133,48 +134,52 @@ class PolicyScheduler:
         3. Update weights, drop stale groups, resume train scheduler
         """
 
-        def get_next_ckpt_step() -> int:
-            orch_step = self.progress.step
-            latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-            async_away_ckpt_step = max(orch_step - self.max_async_level, 0)
-            if self.strict_async_level:
-                return async_away_ckpt_step
-            return max(async_away_ckpt_step, latest_ckpt_step)
-
         logger = get_logger()
         while True:
-            next_ckpt_step = get_next_ckpt_step()
+            next_ckpt_step = self._get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
                 await asyncio.sleep(1)
                 continue
 
             if self.at_async_barrier:
                 logger.info(
-                    f"[policy] Pausing training rollout scheduling — waiting for trainer to produce "
-                    f"checkpoint {next_ckpt_step} (>{self.max_async_level} step(s) ahead)"
+                    f"At async barrier: Pausing training rollout scheduling and waiting for training checkpoint {next_ckpt_step}"
                 )
                 self.train_scheduler.pause()
                 t0 = time.perf_counter()
                 await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
                 self.wait_for_ckpt_time = time.perf_counter() - t0
-                logger.info(f"[policy] Checkpoint {next_ckpt_step} ready after {self.wait_for_ckpt_time:.2f}s")
+                logger.debug(
+                    f"Cleared async barrier: Training checkpoint {next_ckpt_step} ready after {print_time(self.wait_for_ckpt_time)}"
+                )
 
-            logger.info(f"[policy] Loading weights for checkpoint {next_ckpt_step} onto inference servers")
-            await self.update_weights(next_ckpt_step)
-            logger.debug(f"[policy] Weights loaded in {self.update_weights_time:.2f}s")
+            logger.info(f"Updating weights to training checkpoint {next_ckpt_step}")
+            await self._update_weights(next_ckpt_step)
+            logger.debug(
+                f"Weights updated to training checkpoint {next_ckpt_step} in {print_time(self.update_weights_time)}"
+            )
 
-            logger.info("[policy] Dropping stale rollouts and resuming training rollout scheduling")
+            logger.info("Resuming training rollout scheduling")
             await self.train_scheduler.drop_stale_groups(next_ckpt_step)
             self.train_scheduler.resume()
-            logger.debug(f"[policy] Policy update to checkpoint {next_ckpt_step} complete")
 
-    async def update_weights(self, next_ckpt_step: int) -> None:
+    def _get_next_ckpt_step(self) -> int:
+        """Compute the next training checkpoint to update to."""
+        orch_step = self.progress.step
+        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+        async_away_ckpt_step = max(orch_step - self.max_async_level, 0)
+        if self.strict_async_level:
+            return async_away_ckpt_step
+        return max(async_away_ckpt_step, latest_ckpt_step)
+
+    async def _update_weights(self, ckpt_step: int) -> None:
+        """Update the weights to the next training checkpoint."""
         t0 = time.perf_counter()
-        weights_path = get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step)
-        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+        weights_path = get_step_path(get_broadcast_dir(self.output_dir), ckpt_step)
+        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=ckpt_step)
         self.update_weights_time = time.perf_counter() - t0
 
-        self.ckpt_step = next_ckpt_step
+        self.ckpt_step = ckpt_step
         if self.lora_name is not None:
             self.train_scheduler.model_name = self.lora_name
             self.inference_pool.update_model_name(self.lora_name)
@@ -214,12 +219,11 @@ class TrainScheduler:
         model_name: str,
         json_logging: bool = False,
     ):
-        self.logger = get_logger()
-        self.limiter = rollout_limiter
         self.train_envs = train_envs
         self.inference_pool = inference_pool
         self.buffer = buffer
         self.progress = progress
+        self.limiter = rollout_limiter
         self._uses_token_batching = token_batch_size is not None
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
@@ -296,8 +300,14 @@ class TrainScheduler:
         self.limiter.release(count)
 
     async def wait_for_batch(self) -> list[vf.RolloutOutput]:
-        """Block until the current batch is complete, then return it."""
+        """Block until the current batch is complete and scheduling is active.
+
+        If the policy scheduler has paused us at the async barrier, we hold
+        the batch until the weight update completes and resume() is called.
+        This ensures the orchestrator doesn't advance faster than max_async_level.
+        """
         await self._batch_ready.wait()
+        await self._scheduling_enabled.wait()
 
         batch = list(self._batch_rollouts)
         self.last_batch_generation_time = time.perf_counter() - self._batch_start_time
@@ -444,7 +454,7 @@ class TrainScheduler:
             await self._drop_group(group_id)
             return
         except Exception as e:
-            self.logger.warning(f"Rollout failed: {e}")
+            get_logger().warning(f"Rollout failed: {e}")
             await self._drop_group(group_id)
             return
 
@@ -456,14 +466,14 @@ class TrainScheduler:
             if len(rollout["trajectory"]) == 0:
                 self.empty_rollouts_by_env[group.env_name] += 1
                 has_failures = True
-                self.logger.warning(
+                get_logger().warning(
                     f"Empty trajectory in group {group_id} ({group.env_name}), re-scheduling "
                     f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete)"
                 )
             elif rollout["error"] is not None:
                 self.errored_rollouts_by_env[group.env_name] += 1
                 has_failures = True
-                self.logger.warning(
+                get_logger().warning(
                     f"Rollout error in group {group_id} ({group.env_name}), re-scheduling "
                     f"({len(group.completed_rollouts)}/{self.rollouts_per_example} complete): "
                     f"{rollout['error']['error_chain_repr']}"
@@ -553,7 +563,7 @@ class TrainScheduler:
         counts = await asyncio.gather(*(self._drop_group(gid) for gid in stale_group_ids))
         removed = sum(counts)
         if removed:
-            self.logger.warning(
+            get_logger().warning(
                 f"Cancelled {removed} stale rollout requests (ckpt_step={current_ckpt_step}). "
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
