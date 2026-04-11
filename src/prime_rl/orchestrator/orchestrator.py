@@ -702,7 +702,9 @@ async def orchestrate(config: OrchestratorConfig):
             )
 
         reward_mean = by_example.reward.mean().mean()
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {train_scheduler.async_level} | Max. Off-Policy Level: {train_scheduler.max_off_policy_level}"
+        off_policy_levels = train_scheduler._off_policy_levels()
+        max_off_policy = max(off_policy_levels) if off_policy_levels else 0
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {train_scheduler.async_level} | Max. Off-Policy Level: {max_off_policy}"
         logger.success(step_message)
 
         # Increment step and advance train scheduler to next batch

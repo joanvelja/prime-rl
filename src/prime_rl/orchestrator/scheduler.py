@@ -35,7 +35,7 @@ class InflightRequest:
 
     task: asyncio.Task
     client: vf.ClientConfig
-    off_policy_steps: int = 0
+    ckpt_step: int = 0
 
     @property
     @abstractmethod
@@ -155,7 +155,7 @@ class PolicyScheduler:
             self.inference_pool.update_model_name(self.model_name)
 
         self._train.resume()
-        await self._train._update_off_policy()
+        await self._train.drop_stale_groups(next_ckpt_step)
 
     async def _get_or_start_update_task(self, next_ckpt_step: int, step: int) -> asyncio.Task:
         async with self._lock:
@@ -286,15 +286,8 @@ class TrainScheduler:
     def async_level(self) -> int:
         return self.step - self.ckpt_step
 
-    @property
-    def max_off_policy_level(self) -> int:
-        steps = [r.off_policy_steps for g in self._groups.values() for r in g.inflight_requests.values()]
-        return max(steps) if steps else 0
-
-    @property
-    def mean_off_policy_level(self) -> float:
-        steps = [r.off_policy_steps for g in self._groups.values() for r in g.inflight_requests.values()]
-        return sum(steps) / len(steps) if steps else 0
+    def _off_policy_levels(self) -> list[int]:
+        return [self.ckpt_step - r.ckpt_step for g in self._groups.values() for r in g.inflight_requests.values()]
 
     # ------------------------------------------------------------------
     # Public API
@@ -448,7 +441,9 @@ class TrainScheduler:
                     rollouts_per_example=rollout_count,
                 )
             )
-            request = InflightGroupRequest(task=task, client=client, rollouts_per_example=rollout_count)
+            request = InflightGroupRequest(
+                task=task, client=client, ckpt_step=self.ckpt_step, rollouts_per_example=rollout_count
+            )
         else:
             await self.limiter.acquire(1)
             group.rollouts_to_schedule -= 1
@@ -459,7 +454,7 @@ class TrainScheduler:
                     model_name=self.model_name,
                 )
             )
-            request = InflightRolloutRequest(task=task, client=client)
+            request = InflightRolloutRequest(task=task, client=client, ckpt_step=self.ckpt_step)
 
         group.inflight_requests[task] = request
         group_id = self._group_id_for(group)
@@ -608,27 +603,23 @@ class TrainScheduler:
         )
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
-    async def _update_off_policy(self) -> None:
-        """Increment off-policy counters and drop stale groups."""
-        stale_group_ids = set()
-        for gid, group in self._groups.items():
-            for request in group.inflight_requests.values():
-                if request.off_policy_steps >= self.max_off_policy_steps:
-                    stale_group_ids.add(gid)
-                    break
-
-        groups_to_increment = [(gid, group) for gid, group in self._groups.items() if gid not in stale_group_ids]
+    async def drop_stale_groups(self, current_ckpt_step: int) -> None:
+        """Drop groups with requests older than max_off_policy_steps."""
+        stale_group_ids = {
+            gid
+            for gid, group in self._groups.items()
+            if any(
+                current_ckpt_step - r.ckpt_step >= self.max_off_policy_steps for r in group.inflight_requests.values()
+            )
+        }
+        if not stale_group_ids:
+            return
 
         counts = await asyncio.gather(*(self._drop_group(gid) for gid in stale_group_ids))
         removed = sum(counts)
-
-        for _, group in groups_to_increment:
-            for request in group.inflight_requests.values():
-                request.off_policy_steps += 1
-
         if removed:
             self.logger.warning(
-                f"Cancelled {removed} old rollout requests (will refill naturally). "
+                f"Cancelled {removed} stale rollout requests (ckpt_step={current_ckpt_step}). "
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
 
@@ -648,8 +639,8 @@ class TrainScheduler:
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
             "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
             "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
-            "off_policy_level/all/max": self.max_off_policy_level,
-            "off_policy_level/all/mean": self.mean_off_policy_level,
+            "off_policy_level/all/max": max(levels) if (levels := self._off_policy_levels()) else 0,
+            "off_policy_level/all/mean": sum(levels) / len(levels) if levels else 0,
         }
         for env_name in self.total_rollouts_by_env:
             env_total = max(self.total_rollouts_by_env[env_name], 1)
@@ -658,7 +649,7 @@ class TrainScheduler:
         by_env: dict[str, list[int]] = {}
         for group in self._groups.values():
             for request in group.inflight_requests.values():
-                by_env.setdefault(group.env_name, []).append(request.off_policy_steps)
+                by_env.setdefault(group.env_name, []).append(self.ckpt_step - request.ckpt_step)
         for env_name, steps in by_env.items():
             metrics[f"off_policy_level/{env_name}/max"] = max(steps)
             metrics[f"off_policy_level/{env_name}/mean"] = sum(steps) / len(steps)

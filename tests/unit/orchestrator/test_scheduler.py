@@ -50,7 +50,7 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     return ps
 
 
-def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
+def test_drop_stale_groups_drops_old_requests():
     async def run() -> None:
         scheduler = _make_train_scheduler()
 
@@ -58,8 +58,8 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
         stale_task = asyncio.create_task(asyncio.sleep(60))
         survivor_task = asyncio.create_task(asyncio.sleep(60))
 
-        stale_request = InflightRolloutRequest(task=stale_task, client=client, off_policy_steps=1)
-        survivor_request = InflightRolloutRequest(task=survivor_task, client=client, off_policy_steps=0)
+        stale_request = InflightRolloutRequest(task=stale_task, client=client, ckpt_step=0)
+        survivor_request = InflightRolloutRequest(task=survivor_task, client=client, ckpt_step=1)
 
         scheduler._groups = {
             1: InflightGroup(
@@ -76,11 +76,10 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
         scheduler._task_to_group = {stale_task: 1, survivor_task: 2}
         scheduler.limiter.concurrency.try_acquire(2)
 
-        await scheduler._update_off_policy()
+        await scheduler.drop_stale_groups(current_ckpt_step=1)
 
         assert 1 not in scheduler._groups
         assert 2 in scheduler._groups
-        assert survivor_request.off_policy_steps == 1
         assert scheduler.cancelled_rollouts_count == 1
 
         for task in (stale_task, survivor_task):
@@ -108,7 +107,7 @@ def test_maybe_update_reuses_inflight_update_after_cancellation():
             update_weights=update_weights,
             update_model_name=MagicMock(),
         )
-        scheduler._update_off_policy = AsyncMock()
+        scheduler.drop_stale_groups = AsyncMock()
 
         with (
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
@@ -149,7 +148,7 @@ def test_stop_cancels_inflight_policy_update_task():
             update_weights=update_weights,
             update_model_name=MagicMock(),
         )
-        scheduler._update_off_policy = AsyncMock()
+        scheduler.drop_stale_groups = AsyncMock()
 
         with (
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
