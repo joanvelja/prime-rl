@@ -112,8 +112,8 @@ class TrainScheduler:
         self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
-        self.batch_size = config.batch_size
-        self.token_batch_size = config.token_batch_size
+        self._batch_target = config.token_batch_size or config.batch_size
+        self._max_batch_rollouts = config.batch_size
         self.rollouts_per_example = config.rollouts_per_example
         self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
@@ -159,18 +159,6 @@ class TrainScheduler:
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
-
-    @property
-    def _uses_token_batching(self) -> bool:
-        return self.token_batch_size is not None
-
-    @property
-    def _batch_target(self) -> int:
-        if self._uses_token_batching:
-            assert self.token_batch_size is not None
-            return self.token_batch_size
-        assert self.batch_size is not None
-        return self.batch_size
 
     @property
     def inflight_rollout_count(self) -> int:
@@ -444,7 +432,7 @@ class TrainScheduler:
         accepted = self.buffer.sample_rollouts(n=self.rollouts_per_example)
 
         self._batch_rollouts.extend(accepted)
-        if self._uses_token_batching:
+        if self._max_batch_rollouts is None:
             increment = sum(get_seq_len(r) for r in accepted)
         else:
             increment = len(accepted)
@@ -609,8 +597,8 @@ class TrainScheduler:
 
     def _finalize_batch(self) -> list[vf.RolloutOutput]:
         batch = list(self._batch_rollouts)
-        if self.batch_size is not None:
-            batch = batch[: self.batch_size]
+        if self._max_batch_rollouts is not None:
+            batch = batch[: self._max_batch_rollouts]
         return batch
 
     # ------------------------------------------------------------------
