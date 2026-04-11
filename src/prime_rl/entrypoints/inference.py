@@ -48,6 +48,7 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
     is_multi_node = config.deployment.type == "multi_node"
 
     if is_disaggregated:
+        dp_per_node = config.deployment.gpus_per_node // config.parallel.tp
         template_vars.update(
             num_prefill_nodes=config.deployment.num_prefill_nodes,
             num_decode_nodes=config.deployment.num_decode_nodes,
@@ -57,13 +58,11 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
             decode_port=config.deployment.decode_port,
             router_port=config.deployment.router_port,
             data_parallel_rpc_port=config.data_parallel_rpc_port,
+            dp_per_node=dp_per_node,
             use_deep_gemm=config.use_deep_gemm,
             prefill_env_overrides=config.deployment.prefill_env_overrides,
             decode_env_overrides=config.deployment.decode_env_overrides,
             kv_offload=config.deployment.kv_cache_offload is not None,
-            kv_offload_block_size=config.deployment.kv_cache_offload.block_size
-            if config.deployment.kv_cache_offload
-            else 64,
             kv_offload_cpu_bytes=int(config.deployment.kv_cache_offload.cpu_bytes)
             if config.deployment.kv_cache_offload
             else 0,

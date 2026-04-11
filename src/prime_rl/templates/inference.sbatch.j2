@@ -21,9 +21,6 @@
 #SBATCH --output={{ output_dir }}/job_%j.log
 #SBATCH --error={{ output_dir }}/job_%j.log
 
-# Raise locked memory limit for CPU KV cache offloading pinned allocations
-ulimit -l 1572864000
-
 # Configs
 export NUM_NODES={{ num_nodes }}
 export GPUS_PER_NODE={{ gpus_per_node }}
@@ -148,6 +145,7 @@ srun bash -c '
     export VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 
 {%- if kv_offload %}
+    ulimit -l unlimited
     PREFILL_KV_CFG='"'"'{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"num_threads":1}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":{{ kv_offload_cpu_bytes }}}}]}}'"'"'
 {%- else %}
     PREFILL_KV_CFG='"'"'{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"num_threads":1}}'"'"'
@@ -226,7 +224,7 @@ srun bash -c '
             $REPLICA_ROUTER_ARGS \
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
-            --intra-node-data-parallel-size {{ gpus_per_node }} \
+            --intra-node-data-parallel-size {{ dp_per_node }} \
             --worker-startup-timeout-secs 1200 \
             --log-level debug \
             >> $ROUTER_LOG 2>&1 &
@@ -256,7 +254,7 @@ srun bash -c '
             --worker-urls $ROUTER_ARGS \
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
-            --intra-node-data-parallel-size {{ gpus_per_node }} \
+            --intra-node-data-parallel-size {{ dp_per_node }} \
             --worker-startup-timeout-secs 1200 \
             --log-level debug \
             >> $ROUTER_LOG 2>&1 &
