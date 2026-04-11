@@ -138,12 +138,15 @@ def test_stop_cancels_inflight_policy_update_task():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            scheduler._policy_loop_task = asyncio.create_task(ps.maybe_update(step=9))
+            policy_task = asyncio.create_task(ps.maybe_update(step=9))
             await started.wait()
-            await asyncio.wait_for(scheduler.stop(), timeout=0.2)
+            policy_task.cancel()
+            try:
+                await asyncio.wait_for(policy_task, timeout=0.2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
 
         assert cancelled.is_set()
-        assert scheduler._policy_loop_task is None
 
     asyncio.run(run())
 

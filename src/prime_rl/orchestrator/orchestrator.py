@@ -38,7 +38,7 @@ from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
-from prime_rl.orchestrator.scheduler import EvalScheduler, TrainScheduler
+from prime_rl.orchestrator.scheduler import EvalScheduler, PolicyScheduler, TrainScheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
@@ -222,18 +222,25 @@ async def orchestrate(config: OrchestratorConfig):
         inference_pool=inference_pool,
         buffer=buffer,
         rollout_limiter=rollout_limiter,
-        output_dir=config.output_dir,
         batch_size=config.batch_size,
         token_batch_size=config.token_batch_size,
         rollouts_per_example=config.rollouts_per_example,
-        max_async_level=config.max_async_level,
         max_off_policy_steps=config.max_off_policy_steps,
-        strict_async_level=config.strict_async_level,
-        enable_policy_updates=enable_policy_updates,
         model_name=rollout_model_name,
         json_logging=config.log.json_logging,
-        lora_name=config.model.lora.name if config.model.lora else None,
     )
+
+    policy_scheduler: PolicyScheduler | None = None
+    if enable_policy_updates:
+        policy_scheduler = PolicyScheduler(
+            train_scheduler=train_scheduler,
+            inference_pool=inference_pool,
+            output_dir=config.output_dir,
+            max_async_level=config.max_async_level,
+            strict_async_level=config.strict_async_level,
+            model_name=rollout_model_name,
+            lora_name=config.model.lora.name if config.model.lora else None,
+        )
 
     if eval_envs is not None:
         eval_scheduler = EvalScheduler(
@@ -256,8 +263,8 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
         train_scheduler.model_name = config.model.lora.name
-        if train_scheduler.policy:
-            train_scheduler.policy.model_name = config.model.lora.name
+        if policy_scheduler:
+            policy_scheduler.model_name = config.model.lora.name
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")
@@ -301,24 +308,25 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and ckpt_manager is not None:
         ckpt_manager.load(progress, buffer, step=checkpoint_step)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
-        train_scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
+        resume_ckpt_step = progress.step
+        train_scheduler.ckpt_step = resume_ckpt_step
+        if policy_scheduler:
+            policy_scheduler.ckpt_step = resume_ckpt_step
         if config.eval and config.eval.skip_eval_on_resume:
-            prev_ckpt_step = train_scheduler.ckpt_step
-            last_eval_steps = {name: train_scheduler.ckpt_step for name in last_eval_steps}
-            logger.info(f"Skipping online eval on resume (ckpt_step={train_scheduler.ckpt_step})")
+            prev_ckpt_step = resume_ckpt_step
+            last_eval_steps = {name: resume_ckpt_step for name in last_eval_steps}
+            logger.info(f"Skipping online eval on resume (ckpt_step={resume_ckpt_step})")
         else:
-            # Allow eval at resumed step by setting prev_ckpt_step one behind
-            prev_ckpt_step = train_scheduler.ckpt_step - 1
+            prev_ckpt_step = resume_ckpt_step - 1
 
         if enable_policy_updates:
-            # In NCCL mode, skip existence check - weights are broadcasted, not stored on disk
             check_exists = config.weight_broadcast.type != "nccl"
             wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt else None
             weights_path = get_weight_dir(
-                config.output_dir, train_scheduler.ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
+                config.output_dir, resume_ckpt_step, check_exists=check_exists, wait_timeout=wait_timeout
             )
             lora_name = config.model.lora.name if config.model.lora else None
-            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=train_scheduler.ckpt_step)
+            await inference_pool.update_weights(weights_path, lora_name=lora_name, step=resume_ckpt_step)
     else:
         logger.info("Training from scratch")
 
@@ -346,8 +354,12 @@ async def orchestrate(config: OrchestratorConfig):
             step_path = get_step_path(get_rollout_dir(config.output_dir), eval_step)
             await asyncio.to_thread(save_rollouts, all_rollouts, step_path / "eval_rollouts.jsonl")
 
-    # Start the train scheduler (background loops)
+    # Start background loops
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
+    policy_loop_task: asyncio.Task | None = None
+    if policy_scheduler:
+        await policy_scheduler.maybe_update(progress.step)
+        policy_loop_task = asyncio.create_task(policy_scheduler.run())
     await train_scheduler.start(step=progress.step)
     is_first_step = True
     eval_task: asyncio.Task | None = None
@@ -359,8 +371,8 @@ async def orchestrate(config: OrchestratorConfig):
             reason = evicted_path.read_text().strip()
             raise RuntimeError(f"Run evicted by trainer: {reason}")
 
-        # Capture ckpt_step once for consistency (it's updated inside the scheduler)
-        ckpt_step = train_scheduler.ckpt_step if enable_policy_updates else progress.step
+        # Capture ckpt_step once for consistency
+        ckpt_step = policy_scheduler.ckpt_step if policy_scheduler else progress.step
         train_scheduler.ckpt_step = ckpt_step
 
         # Save checkpoint (if we are at an interval step and not at the first or last step)
@@ -638,6 +650,7 @@ async def orchestrate(config: OrchestratorConfig):
             "time/parallel_preprocess": parallel_preprocess_time,
             # Scheduler metrics
             **train_scheduler.get_metrics(),
+            **(policy_scheduler.get_metrics() if policy_scheduler else {}),
             # Buffer metrics
             **buffer.get_metrics(),
             # Event loop lag metrics
@@ -708,7 +721,7 @@ async def orchestrate(config: OrchestratorConfig):
         reward_mean = by_example.reward.mean().mean()
         off_policy_levels = train_scheduler._off_policy_levels()
         max_off_policy = max(off_policy_levels) if off_policy_levels else 0
-        async_level = train_scheduler.policy.async_level if train_scheduler.policy else 0
+        async_level = policy_scheduler.async_level if policy_scheduler else 0
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {async_level} | Max. Off-Policy Level: {max_off_policy}"
         logger.success(step_message)
 
@@ -754,6 +767,8 @@ async def orchestrate(config: OrchestratorConfig):
     # failure mode we're guarding against.
     async def _graceful_shutdown() -> None:
         training_batch_sender.close()
+        if policy_loop_task is not None:
+            policy_loop_task.cancel()
         await train_scheduler.stop()
         await inference_pool.stop()
         if teacher_inference_pool is not None:

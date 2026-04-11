@@ -206,17 +206,12 @@ class TrainScheduler:
         inference_pool: InferencePool,
         buffer: Buffer,
         rollout_limiter: RolloutLimiter,
-        output_dir: Path,
-        batch_size: int,
-        token_batch_size: int,
+        batch_size: int | None,
+        token_batch_size: int | None,
         rollouts_per_example: int,
-        max_async_level: int,
         max_off_policy_steps: int,
-        strict_async_level: bool,
-        enable_policy_updates: bool,
         model_name: str,
-        json_logging: bool,
-        lora_name: str | None = None,
+        json_logging: bool = False,
     ):
         self.logger = get_logger()
         self.limiter = rollout_limiter
@@ -227,21 +222,8 @@ class TrainScheduler:
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
         self.max_off_policy_steps = max_off_policy_steps
-        self.enable_policy_updates = enable_policy_updates
         self.model_name = model_name
         self.json_logging = json_logging
-
-        self.policy: PolicyScheduler | None = None
-        if enable_policy_updates:
-            self.policy = PolicyScheduler(
-                train_scheduler=self,
-                inference_pool=inference_pool,
-                output_dir=output_dir,
-                max_async_level=max_async_level,
-                strict_async_level=strict_async_level,
-                model_name=model_name,
-                lora_name=lora_name,
-            )
 
         # Group tracking
         self._next_group_id = 0
@@ -261,7 +243,7 @@ class TrainScheduler:
         self._completion_task: asyncio.Task | None = None
 
         self.step = 0
-        self._policy_loop_task: asyncio.Task | None = None
+        self.ckpt_step = 0
 
         # Metrics (reset per step)
         self.cancelled_rollouts_count = 0
@@ -286,30 +268,13 @@ class TrainScheduler:
     # Public API
     # ------------------------------------------------------------------
 
-    @property
-    def ckpt_step(self) -> int:
-        return self.policy.ckpt_step if self.policy else self.step
-
-    @ckpt_step.setter
-    def ckpt_step(self, value: int) -> None:
-        if self.policy:
-            self.policy.ckpt_step = value
-
     async def start(self, step: int) -> None:
         """Start background loops. Call once at the beginning of training."""
         self.step = step
-
-        if self.policy:
-            await self.policy.maybe_update(step)
-            self._policy_loop_task = asyncio.create_task(self.policy.run())
-        else:
-            self.resume()
-
         self._batch_start_time = time.perf_counter()
         self._pbar = ProgressTracker(
             total=self._batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
         )
-
         self._scheduling_task = asyncio.create_task(self._scheduling_loop())
         self._completion_task = asyncio.create_task(self._completion_loop())
 
@@ -347,8 +312,6 @@ class TrainScheduler:
     def advance_step(self, step: int) -> None:
         """Advance to the next training step and reset batch accumulation."""
         self.step = step
-
-        # Reset batch state
         self._batch_rollouts.clear()
         self._batch_progress = 0
         self._batch_ready.clear()
@@ -357,21 +320,13 @@ class TrainScheduler:
             total=self._batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
         )
 
-        # Trigger policy update check
-        if self.enable_policy_updates and self._policy_loop_task is not None:
-            # The policy loop runs continuously; it will pick up the new step
-            pass
-        elif not self.enable_policy_updates:
-            self.ckpt_step = step
-
     async def stop(self) -> None:
         """Stop all background tasks and cancel in-flight rollouts."""
-        for task in [self._scheduling_task, self._completion_task, self._policy_loop_task]:
+        for task in [self._scheduling_task, self._completion_task]:
             if task is not None:
                 await safe_cancel(task)
         self._scheduling_task = None
         self._completion_task = None
-        self._policy_loop_task = None
         await self.cancel_inflight_rollouts()
 
     # ------------------------------------------------------------------
@@ -645,8 +600,6 @@ class TrainScheduler:
         self.total_rollouts_by_env.clear()
 
         metrics.update(self.inference_pool.get_metrics())
-        if self.policy:
-            metrics.update(self.policy.get_metrics())
         return metrics
 
 
