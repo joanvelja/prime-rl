@@ -12,6 +12,7 @@ import verifiers as vf
 from verifiers.utils.logging_utils import print_time
 
 from prime_rl.orchestrator.buffer import Buffer
+from prime_rl.orchestrator.ckpt import Progress
 from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnv, TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
@@ -98,6 +99,7 @@ class PolicyScheduler:
         self,
         train_scheduler: TrainScheduler,
         inference_pool: InferencePool,
+        progress: Progress,
         output_dir: Path,
         max_async_level: int,
         strict_async_level: bool,
@@ -106,6 +108,7 @@ class PolicyScheduler:
     ):
         self.train_scheduler = train_scheduler
         self.inference_pool = inference_pool
+        self.progress = progress
         self.output_dir = output_dir
         self.max_async_level = max_async_level
         self.strict_async_level = strict_async_level
@@ -118,15 +121,27 @@ class PolicyScheduler:
 
     async def maybe_update(self, step: int) -> None:
         """Check for and apply any pending policy updates."""
+
+        def get_next_ckpt_step() -> int:
+            latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+            async_away_ckpt_step = max(step - self.max_async_level, 0)
+            if self.strict_async_level:
+                return async_away_ckpt_step
+            return max(async_away_ckpt_step, latest_ckpt_step)
+
         while True:
-            next_ckpt_step = self._compute_next_ckpt_step(step)
+            next_ckpt_step = get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
                 return
             await self._apply_update(next_ckpt_step, step)
 
     @property
     def async_level(self) -> int:
-        return self.train_scheduler.step - self.ckpt_step
+        return self.progress.step - self.ckpt_step
+
+    @property
+    def at_async_barrier(self) -> bool:
+        return self.progress.step - self.ckpt_step == self.max_async_level
 
     def get_metrics(self) -> dict[str, float]:
         return {
@@ -136,17 +151,10 @@ class PolicyScheduler:
         }
 
     async def run(self) -> None:
-        """Background loop. Reads current step from train_scheduler.step."""
+        """Background loop. Reads current step from progress.step."""
         while True:
-            await self.maybe_update(self.train_scheduler.step)
+            await self.maybe_update(self.progress.step)
             await asyncio.sleep(1)
-
-    def _compute_next_ckpt_step(self, step: int) -> int:
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-        async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
 
     async def _apply_update(self, next_ckpt_step: int, step: int) -> None:
         # Wait for checkpoint if we're at the async barrier
@@ -205,6 +213,7 @@ class TrainScheduler:
         train_envs: TrainEnvs,
         inference_pool: InferencePool,
         buffer: Buffer,
+        progress: Progress,
         rollout_limiter: RolloutLimiter,
         batch_size: int | None,
         token_batch_size: int | None,
@@ -218,6 +227,7 @@ class TrainScheduler:
         self.train_envs = train_envs
         self.inference_pool = inference_pool
         self.buffer = buffer
+        self.progress = progress
         self._uses_token_batching = token_batch_size is not None
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
@@ -242,7 +252,6 @@ class TrainScheduler:
         self._scheduling_task: asyncio.Task | None = None
         self._completion_task: asyncio.Task | None = None
 
-        self.step = 0
         self.ckpt_step = 0
 
         # Metrics (reset per step)
@@ -268,13 +277,9 @@ class TrainScheduler:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self, step: int) -> None:
+    async def start(self) -> None:
         """Start background loops. Call once at the beginning of training."""
-        self.step = step
-        self._batch_start_time = time.perf_counter()
-        self._pbar = ProgressTracker(
-            total=self._batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
-        )
+        self._reset_batch()
         self._scheduling_task = asyncio.create_task(self._scheduling_loop())
         self._completion_task = asyncio.create_task(self._completion_loop())
 
@@ -307,17 +312,19 @@ class TrainScheduler:
         if self._pbar:
             self._pbar.close()
             self._pbar = None
+        self._reset_batch()
         return batch
 
-    def advance_step(self, step: int) -> None:
-        """Advance to the next training step and reset batch accumulation."""
-        self.step = step
+    def _reset_batch(self) -> None:
         self._batch_rollouts.clear()
         self._batch_progress = 0
         self._batch_ready.clear()
         self._batch_start_time = time.perf_counter()
         self._pbar = ProgressTracker(
-            total=self._batch_target, desc="Generating rollouts (train)", json_logging=self.json_logging, step=step
+            total=self._batch_target,
+            desc="Generating rollouts (train)",
+            json_logging=self.json_logging,
+            step=self.progress.step,
         )
 
     async def stop(self) -> None:

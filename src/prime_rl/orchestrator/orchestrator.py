@@ -221,6 +221,7 @@ async def orchestrate(config: OrchestratorConfig):
         train_envs=train_envs,
         inference_pool=inference_pool,
         buffer=buffer,
+        progress=progress,
         rollout_limiter=rollout_limiter,
         batch_size=config.batch_size,
         token_batch_size=config.token_batch_size,
@@ -235,6 +236,7 @@ async def orchestrate(config: OrchestratorConfig):
         policy_scheduler = PolicyScheduler(
             train_scheduler=train_scheduler,
             inference_pool=inference_pool,
+            progress=progress,
             output_dir=config.output_dir,
             max_async_level=config.max_async_level,
             strict_async_level=config.strict_async_level,
@@ -360,7 +362,7 @@ async def orchestrate(config: OrchestratorConfig):
     if policy_scheduler:
         await policy_scheduler.maybe_update(progress.step)
         policy_loop_task = asyncio.create_task(policy_scheduler.run())
-    await train_scheduler.start(step=progress.step)
+    await train_scheduler.start()
     is_first_step = True
     eval_task: asyncio.Task | None = None
 
@@ -728,7 +730,6 @@ async def orchestrate(config: OrchestratorConfig):
         # Increment step and advance train scheduler to next batch
         progress.step += 1
         is_first_step = False
-        train_scheduler.advance_step(progress.step)
 
         # Free large per-step objects to prevent memory accumulation
         del train_rollouts, train_examples, training_batch, vlm_cache

@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from prime_rl.orchestrator.ckpt import Progress
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
 from prime_rl.orchestrator.scheduler import InflightGroup, InflightRolloutRequest, PolicyScheduler, TrainScheduler
 
@@ -20,11 +21,9 @@ def _make_train_scheduler() -> TrainScheduler:
     scheduler.cancelled_rollouts_count = 0
     scheduler._scheduling_task = None
     scheduler._completion_task = None
-    scheduler._policy_loop_task = None
-    scheduler.policy = None
-    scheduler.step = 0
+    scheduler.progress = Progress(step=0)
+    scheduler.ckpt_step = 0
     scheduler.model_name = "test-model"
-    scheduler.enable_policy_updates = False
     return scheduler
 
 
@@ -34,6 +33,7 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.logger = MagicMock()
     ps.train_scheduler = train_scheduler
     ps.inference_pool = MagicMock()
+    ps.progress = Progress(step=9)
     ps.output_dir = Path("/tmp/prime-rl-test")
     ps.max_async_level = 1
     ps.strict_async_level = False
@@ -42,8 +42,7 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.ckpt_step = 7
     ps.update_weights_time = 0
     ps.wait_for_ckpt_time = 0
-    train_scheduler.policy = ps
-    train_scheduler.step = 9
+    train_scheduler.progress = ps.progress
     return ps
 
 
