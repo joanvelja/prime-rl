@@ -34,12 +34,14 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
     template = env.get_template(config.slurm.template_path.name)
 
     is_disaggregated = config.deployment.type == "disaggregated"
+    dp_per_node = config.deployment.gpus_per_node // config.parallel.tp
 
     template_vars = dict(
         **config.slurm.template_vars,
         config_path=config_path,
         output_dir=config.output_dir,
         gpus_per_node=config.deployment.gpus_per_node,
+        dp_per_node=dp_per_node,
         num_nodes=getattr(config.deployment, "num_nodes", 1),
         port=config.server.port,
         disaggregated=is_disaggregated,
@@ -48,7 +50,6 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
     is_multi_node = config.deployment.type == "multi_node"
 
     if is_disaggregated:
-        dp_per_node = config.deployment.gpus_per_node // config.parallel.tp
         template_vars.update(
             num_prefill_nodes=config.deployment.num_prefill_nodes,
             num_decode_nodes=config.deployment.num_decode_nodes,
@@ -59,7 +60,6 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
             router_port=config.deployment.router_port,
             router_policy=config.deployment.router_policy,
             data_parallel_rpc_port=config.data_parallel_rpc_port,
-            dp_per_node=dp_per_node,
             use_deep_gemm=config.use_deep_gemm,
             prefill_env_overrides=config.deployment.prefill_env_overrides,
             decode_env_overrides=config.deployment.decode_env_overrides,
