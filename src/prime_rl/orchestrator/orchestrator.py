@@ -440,10 +440,6 @@ async def orchestrate(config: OrchestratorConfig):
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
-        # Enforce async barrier before accepting the next batch
-        if policy_scheduler:
-            await policy_scheduler.wait_until_ready()
-
         # Wait for the train batch to complete (background loops are always running)
         train_rollouts = await train_scheduler.wait_for_batch()
         generate_completions_time = train_scheduler.last_batch_generation_time

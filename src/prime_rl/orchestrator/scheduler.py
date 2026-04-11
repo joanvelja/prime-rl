@@ -126,25 +126,6 @@ class PolicyScheduler:
     def at_async_barrier(self) -> bool:
         return self.async_level > self.max_async_level
 
-    async def wait_until_ready(self) -> None:
-        """Block until the async barrier is clear (ckpt_step is fresh enough).
-
-        Called by the orchestrator before each step to enforce max_async_level,
-        exactly like the old synchronous maybe_update_policy() at the top of
-        generate_batch(). The background run() loop handles opportunistic
-        updates mid-batch.
-        """
-        while True:
-            next_ckpt_step = self._get_next_ckpt_step()
-            if next_ckpt_step <= self.ckpt_step:
-                return
-            # At barrier — wait for checkpoint and update weights
-            self.train_scheduler.pause()
-            await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
-            await self._update_weights(next_ckpt_step)
-            await self.train_scheduler.drop_stale_groups(next_ckpt_step)
-            self.train_scheduler.resume()
-
     async def start(self) -> None:
         """Background loop: poll for new checkpoints and apply weight updates.
 
