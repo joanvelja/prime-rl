@@ -126,6 +126,25 @@ class PolicyScheduler:
     def at_async_barrier(self) -> bool:
         return self.async_level >= self.max_async_level
 
+    async def wait_until_ready(self) -> None:
+        """Block until the async barrier is clear (ckpt_step is fresh enough).
+
+        Called by the orchestrator before each step to enforce max_async_level,
+        exactly like the old synchronous maybe_update_policy() at the top of
+        generate_batch(). The background run() loop handles opportunistic
+        updates mid-batch.
+        """
+        while True:
+            next_ckpt_step = self._get_next_ckpt_step()
+            if next_ckpt_step <= self.ckpt_step:
+                return
+            # At barrier — wait for checkpoint and update weights
+            self.train_scheduler.pause()
+            await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
+            await self._update_weights(next_ckpt_step)
+            await self.train_scheduler.drop_stale_groups(next_ckpt_step)
+            self.train_scheduler.resume()
+
     async def run(self) -> None:
         """Background loop: poll for new checkpoints and apply weight updates.
 
@@ -300,14 +319,8 @@ class TrainScheduler:
         self.limiter.release(count)
 
     async def wait_for_batch(self) -> list[vf.RolloutOutput]:
-        """Block until the current batch is complete and scheduling is active.
-
-        If the policy scheduler has paused us at the async barrier, we hold
-        the batch until the weight update completes and resume() is called.
-        This ensures the orchestrator doesn't advance faster than max_async_level.
-        """
+        """Block until the current batch is complete, then return it."""
         await self._batch_ready.wait()
-        await self._scheduling_enabled.wait()
 
         batch = list(self._batch_rollouts)
         self.last_batch_generation_time = time.perf_counter() - self._batch_start_time
