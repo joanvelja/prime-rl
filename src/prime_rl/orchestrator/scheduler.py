@@ -207,14 +207,7 @@ class TrainScheduler:
         else:
             rollout_count = 1
 
-        if not self.limiter.try_acquire(rollout_count):
-            return
-
-        try:
-            await self.limiter.rate.acquire(rollout_count)
-        except BaseException:
-            self.limiter.release(rollout_count)
-            raise
+        await self.limiter.acquire(rollout_count)
 
         if env.requires_group_scoring:
             group.rollouts_to_schedule = 0
@@ -252,23 +245,13 @@ class TrainScheduler:
         pending = sum(g.rollouts_to_schedule for g in self.groups.values())
         return self.inflight_rollout_count + pending
 
-    async def _schedule_next_request(self) -> bool:
-        remaining_capacity = self.limiter.remaining
-
-        if remaining_capacity <= 0:
-            return False
-
+    async def _schedule_next_request(self) -> None:
+        """Schedule one rollout request. Blocks until a concurrency slot is available."""
         for group_id, group in self.groups.items():
             if group.rollouts_to_schedule <= 0:
                 continue
-            env = self.train_envs.get(group.example["env_name"])
-            cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
-            if cost <= remaining_capacity:
-                await self.schedule_rollout(group_id=group_id)
-                return True
-
-        if remaining_capacity < self.rollouts_per_example:
-            return False
+            await self.schedule_rollout(group_id=group_id)
+            return
 
         example = self.buffer.sample_examples(n=1)[0]
         group_id = self.next_group_id
@@ -278,8 +261,12 @@ class TrainScheduler:
         return True
 
     async def _fill_inflight_requests(self) -> None:
-        while await self._schedule_next_request():
-            pass
+        """Schedule requests up to available concurrency. Blocks on the first request if needed."""
+        # Always schedule at least one (blocks until capacity is available)
+        await self._schedule_next_request()
+        # Fill remaining capacity without blocking
+        while self.limiter.remaining > 0:
+            await self._schedule_next_request()
 
     async def update_policy_loop(self):
         """Continuously checks for new policy checkpoints."""
@@ -415,22 +402,6 @@ class TrainScheduler:
         while batch_progress < self.batch_target:
             await self._fill_inflight_requests()
             inflight_tasks = list(self.inflight_requests.keys())
-
-            if not inflight_tasks:
-                if self.limiter.concurrency.used > 0:
-                    # Slots are held by eval (or other consumers) — wait for capacity to free up
-                    self.logger.debug(
-                        f"Train scheduler waiting for concurrency slots "
-                        f"(used={self.limiter.concurrency.used}, remaining={self.limiter.remaining})"
-                    )
-                    await self.limiter.concurrency.wait_for_capacity(self.rollouts_per_example)
-                    continue
-                raise RuntimeError(
-                    f"No in-flight rollouts and batch incomplete ({batch_progress}/{self.batch_target}). "
-                    f"Limiter state: used={self.limiter.concurrency.used}, "
-                    f"remaining={self.limiter.remaining}. "
-                    f"This likely indicates a concurrency slot leak."
-                )
 
             finished_tasks, _ = await asyncio.wait(
                 inflight_tasks,
