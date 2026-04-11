@@ -23,7 +23,6 @@ from prime_rl.utils.utils import (
     get_broadcast_dir,
     get_latest_ckpt_step,
     get_step_path,
-    wait_for_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,86 +90,40 @@ class InflightGroup:
 class PolicyScheduler:
     """Watches for new policy checkpoints and applies weight updates.
 
-    Runs as a background loop owned by TrainScheduler. On policy update:
-    pauses scheduling, waits for checkpoint, updates weights, drops stale
-    rollouts, then resumes scheduling.
+    Polls the broadcast directory for new checkpoints. When found, updates
+    inference server weights and drops stale rollouts via the train scheduler.
     """
 
     def __init__(
         self,
         train_scheduler: TrainScheduler,
         inference_pool: InferencePool,
-        progress: Progress,
         output_dir: Path,
-        max_async_level: int,
-        strict_async_level: bool,
         lora_name: str | None = None,
     ):
         self.train_scheduler = train_scheduler
         self.inference_pool = inference_pool
-        self.progress = progress
         self.output_dir = output_dir
-        self.max_async_level = max_async_level
-        self.strict_async_level = strict_async_level
         self.lora_name = lora_name
 
         self.ckpt_step = 0
         self.update_weights_time = 0.0
-        self.wait_for_ckpt_time = 0.0
-
-    @property
-    def async_level(self) -> int:
-        return self.progress.step - self.ckpt_step
-
-    @property
-    def at_async_barrier(self) -> bool:
-        return self.async_level > self.max_async_level
 
     async def start(self) -> None:
-        """Background loop: poll for new checkpoints and apply weight updates.
-
-        1. If at latest checkpoint — sleep and retry
-        2. If at async barrier — pause train scheduler, wait for checkpoint
-        3. Update weights, drop stale groups, resume train scheduler
-        """
-
+        """Background loop: poll for new checkpoints and apply weight updates."""
         logger = get_logger()
         while True:
-            next_ckpt_step = self._get_next_ckpt_step()
-            if next_ckpt_step <= self.ckpt_step:
+            latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+            if latest_ckpt_step <= self.ckpt_step:
                 await asyncio.sleep(0.1)
                 continue
 
-            if self.at_async_barrier:
-                logger.info(
-                    f"At async barrier: Pausing training rollout scheduling and waiting for training checkpoint {next_ckpt_step}"
-                )
-                self.train_scheduler.pause()
-                t0 = time.perf_counter()
-                await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
-                self.wait_for_ckpt_time = time.perf_counter() - t0
-                logger.debug(
-                    f"Cleared async barrier: Training checkpoint {next_ckpt_step} ready after {print_time(self.wait_for_ckpt_time)}"
-                )
+            logger.info(f"Updating weights to training checkpoint {latest_ckpt_step}")
+            await self._update_weights(latest_ckpt_step)
+            logger.debug(f"Weights updated in {print_time(self.update_weights_time)}")
 
-            logger.info(f"Updating weights to training checkpoint {next_ckpt_step}")
-            await self._update_weights(next_ckpt_step)
-            logger.debug(
-                f"Weights updated to training checkpoint {next_ckpt_step} in {print_time(self.update_weights_time)}"
-            )
-
-            logger.info("Resuming training rollout scheduling")
-            await self.train_scheduler.drop_stale_groups(next_ckpt_step)
-            self.train_scheduler.resume()
-
-    def _get_next_ckpt_step(self) -> int:
-        """Compute the next training checkpoint to update to."""
-        orch_step = self.progress.step
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-        async_away_ckpt_step = max(orch_step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
+            await self.train_scheduler.drop_stale_groups(latest_ckpt_step)
+            logger.debug(f"Dropped stale rollouts for checkpoint {latest_ckpt_step}")
 
     async def _update_weights(self, ckpt_step: int) -> None:
         """Update the weights to the next training checkpoint."""
@@ -186,9 +139,7 @@ class PolicyScheduler:
 
     def get_metrics(self) -> dict[str, float]:
         return {
-            "time/wait_for_ckpt": self.wait_for_ckpt_time,
             "time/update_weights": self.update_weights_time,
-            "scheduler/async_level": self.async_level,
         }
 
 

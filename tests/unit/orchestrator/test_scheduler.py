@@ -30,18 +30,12 @@ def _make_train_scheduler() -> TrainScheduler:
 def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     """Create a minimal PolicyScheduler for testing."""
     ps = PolicyScheduler.__new__(PolicyScheduler)
-    ps.logger = MagicMock()
     ps.train_scheduler = train_scheduler
     ps.inference_pool = MagicMock()
-    ps.progress = Progress(step=9)
     ps.output_dir = Path("/tmp/prime-rl-test")
-    ps.max_async_level = 1
-    ps.strict_async_level = False
     ps.lora_name = None
     ps.ckpt_step = 7
     ps.update_weights_time = 0
-    ps.wait_for_ckpt_time = 0
-    train_scheduler.progress = ps.progress
     return ps
 
 

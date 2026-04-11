@@ -238,10 +238,7 @@ async def orchestrate(config: OrchestratorConfig):
         policy_scheduler = PolicyScheduler(
             train_scheduler=train_scheduler,
             inference_pool=inference_pool,
-            progress=progress,
             output_dir=config.output_dir,
-            max_async_level=config.max_async_level,
-            strict_async_level=config.strict_async_level,
             lora_name=config.model.lora.name if config.model.lora else None,
         )
 
@@ -475,7 +472,7 @@ async def orchestrate(config: OrchestratorConfig):
 
         # VLM: build image cache in a thread so it doesn't block the event loop.
         # This lets the scheduler continue servicing inflight rollout requests
-        # and — with max_async_level >= 2 — overlap with the next batch's inference.
+        # and overlap with the next batch's inference.
         if is_vlm:
             vlm_cache = await asyncio.to_thread(build_vlm_image_cache, train_rollouts, processor)
             logger.info(
@@ -718,8 +715,7 @@ async def orchestrate(config: OrchestratorConfig):
         reward_mean = by_example.reward.mean().mean()
         off_policy_levels = train_scheduler._off_policy_levels()
         max_off_policy = max(off_policy_levels) if off_policy_levels else 0
-        async_level = policy_scheduler.async_level if policy_scheduler else 0
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {async_level} | Max. Off-Policy Level: {max_off_policy}"
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Max. Off-Policy Level: {max_off_policy}"
         logger.success(step_message)
 
         # Increment step and advance train scheduler to next batch
