@@ -6,10 +6,11 @@ from abc import abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import verifiers as vf
+from verifiers.utils.logging_utils import print_time
 
-from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnv, TrainEnvs
@@ -97,16 +98,15 @@ class PolicyScheduler:
         self,
         train_scheduler: TrainScheduler,
         inference_pool: InferencePool,
-        config: OrchestratorConfig,
+        output_dir: Path,
         max_async_level: int,
         strict_async_level: bool,
         model_name: str,
         lora_name: str | None = None,
     ):
-        self.logger = get_logger()
         self.train_scheduler = train_scheduler
         self.inference_pool = inference_pool
-        self.output_dir = config.output_dir
+        self.output_dir = output_dir
         self.max_async_level = max_async_level
         self.strict_async_level = strict_async_level
         self.model_name = model_name
@@ -123,6 +123,17 @@ class PolicyScheduler:
             if next_ckpt_step <= self.ckpt_step:
                 return
             await self._apply_update(next_ckpt_step, step)
+
+    @property
+    def async_level(self) -> int:
+        return self.train_scheduler.step - self.ckpt_step
+
+    def get_metrics(self) -> dict[str, float]:
+        return {
+            "time/wait_for_ckpt": self.wait_for_ckpt_time,
+            "time/update_weights": self.update_weights_time,
+            "scheduler/async_level": self.async_level,
+        }
 
     async def run(self) -> None:
         """Background loop. Reads current step from train_scheduler.step."""
@@ -141,21 +152,26 @@ class PolicyScheduler:
         # Wait for checkpoint if we're at the async barrier
         async_away_ckpt_step = max(step - self.max_async_level, 0)
         if next_ckpt_step == async_away_ckpt_step:
-            self.logger.info(
-                f"Orchestrator paused: waiting for checkpoint {next_ckpt_step} (>{self.max_async_level} step(s) ahead)"
+            get_logger().info(
+                f"At async barrier: Pausing new rollout scheduling while waiting for checkpoint {next_ckpt_step}"
             )
             self.train_scheduler.pause()
             t0 = time.perf_counter()
             await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
             self.wait_for_ckpt_time = time.perf_counter() - t0
-            self.logger.info(f"Checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)")
+            get_logger().info(
+                f"Cleared async barrier: Checkpoint {next_ckpt_step} ready after {print_time(self.wait_for_ckpt_time)}"
+            )
 
         # Update weights on inference servers
+        get_logger().info(f"Updating weights to step {next_ckpt_step}")
         t0 = time.perf_counter()
-        weights_path = get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step)
-        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+        await self.inference_pool.update_weights(
+            weight_dir=get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step),
+            lora_name=self.lora_name,
+            step=next_ckpt_step,
+        )
         self.update_weights_time = time.perf_counter() - t0
-        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
 
         self.ckpt_step = next_ckpt_step
         if self.lora_name is not None:
@@ -166,6 +182,9 @@ class PolicyScheduler:
         # Resume scheduling and drop stale rollouts
         self.train_scheduler.resume()
         await self.train_scheduler.drop_stale_groups(next_ckpt_step)
+        get_logger().debug(
+            f"Updated weights to step {next_ckpt_step} in {print_time(self.update_weights_time)}. Resuming scheduling of training rollouts"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -186,35 +205,38 @@ class TrainScheduler:
         train_envs: TrainEnvs,
         inference_pool: InferencePool,
         buffer: Buffer,
-        config: OrchestratorConfig,
         rollout_limiter: RolloutLimiter,
+        output_dir: Path,
+        batch_size: int,
+        token_batch_size: int,
+        rollouts_per_example: int,
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
+        enable_policy_updates: bool,
         model_name: str,
-        enable_policy_updates: bool = True,
+        json_logging: bool,
         lora_name: str | None = None,
     ):
         self.logger = get_logger()
         self.limiter = rollout_limiter
         self.train_envs = train_envs
+        self.inference_pool = inference_pool
         self.buffer = buffer
-        self.config = config
-        self._uses_token_batching = config.token_batch_size is not None
-        self._batch_target = config.token_batch_size or config.batch_size
-        self.rollouts_per_example = config.rollouts_per_example
+        self._uses_token_batching = token_batch_size is not None
+        self._batch_target = token_batch_size or batch_size
+        self.rollouts_per_example = rollouts_per_example
         self.max_off_policy_steps = max_off_policy_steps
         self.enable_policy_updates = enable_policy_updates
         self.model_name = model_name
-        self.json_logging = config.log.json_logging
-        self.inference_pool = inference_pool
+        self.json_logging = json_logging
 
         self.policy: PolicyScheduler | None = None
         if enable_policy_updates:
             self.policy = PolicyScheduler(
                 train_scheduler=self,
                 inference_pool=inference_pool,
-                config=config,
+                output_dir=output_dir,
                 max_async_level=max_async_level,
                 strict_async_level=strict_async_level,
                 model_name=model_name,
@@ -256,10 +278,6 @@ class TrainScheduler:
     @property
     def num_inflight_rollouts(self) -> int:
         return sum(g.total_inflight_rollouts for g in self._groups.values())
-
-    @property
-    def async_level(self) -> int:
-        return self.step - self.ckpt_step
 
     def _off_policy_levels(self) -> list[int]:
         return [self.ckpt_step - r.ckpt_step for g in self._groups.values() for r in g.inflight_requests.values()]
@@ -601,9 +619,6 @@ class TrainScheduler:
     def get_metrics(self) -> dict[str, float]:
         total_rollouts = sum(self.total_rollouts_by_env.values())
         metrics = {
-            "time/wait_for_ckpt": self.policy.wait_for_ckpt_time if self.policy else 0,
-            "time/update_weights": self.policy.update_weights_time if self.policy else 0,
-            "scheduler/async_level": self.async_level,
             "scheduler/inflight_rollouts": self.num_inflight_rollouts,
             "scheduler/limiter_used": self.limiter.concurrency.used,
             "scheduler/limiter_remaining": self.limiter.remaining,
@@ -630,6 +645,8 @@ class TrainScheduler:
         self.total_rollouts_by_env.clear()
 
         metrics.update(self.inference_pool.get_metrics())
+        if self.policy:
+            metrics.update(self.policy.get_metrics())
         return metrics
 
 

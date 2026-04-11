@@ -219,16 +219,20 @@ async def orchestrate(config: OrchestratorConfig):
 
     train_scheduler = TrainScheduler(
         train_envs=train_envs,
-        buffer=buffer,
         inference_pool=inference_pool,
+        buffer=buffer,
         rollout_limiter=rollout_limiter,
+        output_dir=config.output_dir,
+        batch_size=config.batch_size,
+        token_batch_size=config.token_batch_size,
+        rollouts_per_example=config.rollouts_per_example,
         max_async_level=config.max_async_level,
         max_off_policy_steps=config.max_off_policy_steps,
         strict_async_level=config.strict_async_level,
         enable_policy_updates=enable_policy_updates,
         model_name=rollout_model_name,
+        json_logging=config.log.json_logging,
         lora_name=config.model.lora.name if config.model.lora else None,
-        config=config,
     )
 
     if eval_envs is not None:
@@ -704,7 +708,8 @@ async def orchestrate(config: OrchestratorConfig):
         reward_mean = by_example.reward.mean().mean()
         off_policy_levels = train_scheduler._off_policy_levels()
         max_off_policy = max(off_policy_levels) if off_policy_levels else 0
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {train_scheduler.async_level} | Max. Off-Policy Level: {max_off_policy}"
+        async_level = train_scheduler.policy.async_level if train_scheduler.policy else 0
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {async_level} | Max. Off-Policy Level: {max_off_policy}"
         logger.success(step_message)
 
         # Increment step and advance train scheduler to next batch
