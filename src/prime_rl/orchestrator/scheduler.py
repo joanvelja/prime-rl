@@ -619,7 +619,7 @@ class EvalScheduler:
         if eval_env.requires_group_scoring:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
-                await self.limiter.acquire(cost_per_coro)
+                await self.limiter.acquire(cost_per_coro, priority=True)
                 try:
                     client = await self.inference_pool.get_eval_client()
                     outputs = await eval_env.run_group(
@@ -642,7 +642,7 @@ class EvalScheduler:
         else:
 
             async def run_one(example: dict) -> list[vf.RolloutOutput] | None:
-                await self.limiter.acquire(1)
+                await self.limiter.acquire(1, priority=True)
                 try:
                     client = await self.inference_pool.get_eval_client()
                     output = await eval_env.run_rollout(client=client, example=example, model_name=model_name)

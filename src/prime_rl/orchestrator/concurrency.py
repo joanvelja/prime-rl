@@ -41,6 +41,7 @@ class ConcurrencyLimiter:
     def __init__(self, max_concurrency: int | None = None):
         self._max = max_concurrency
         self._used = 0
+        self._priority_pending = 0
         self._available = asyncio.Event()
         self._available.set()
 
@@ -62,16 +63,26 @@ class ConcurrencyLimiter:
             return math.inf
         return self._max - self._used
 
-    async def acquire(self, count: int = 1) -> None:
-        """Wait until *count* slots are available, then reserve them."""
+    async def acquire(self, count: int = 1, priority: bool = False) -> None:
+        """Wait until *count* slots are available, then reserve them.
+
+        When priority=True, this acquire is served before non-priority ones.
+        Non-priority acquires yield while any priority acquires are pending.
+        """
         if self._max is None:
             return
         if count > self._max:
             raise ValueError(f"Cannot acquire {count} slots (max_concurrency={self._max})")
-        while self.remaining < count:
-            self._available.clear()
-            await self._available.wait()
-        self._used += count
+        if priority:
+            self._priority_pending += count
+        try:
+            while self.remaining < count or (not priority and self._priority_pending > 0):
+                self._available.clear()
+                await self._available.wait()
+            self._used += count
+        finally:
+            if priority:
+                self._priority_pending -= count
 
     def try_acquire(self, count: int = 1) -> bool:
         """Non-blocking acquire. Returns True if slots were reserved."""
@@ -116,10 +127,10 @@ class RolloutLimiter:
     def remaining(self) -> float:
         return self.concurrency.remaining
 
-    async def acquire(self, count: int = 1) -> None:
+    async def acquire(self, count: int = 1, priority: bool = False) -> None:
         """Acquire rate tokens then concurrency slots (blocking)."""
         await self.rate.acquire(count)
-        await self.concurrency.acquire(count)
+        await self.concurrency.acquire(count, priority=priority)
 
     def release(self, count: int = 1) -> None:
         """Release concurrency slots."""
