@@ -81,6 +81,119 @@ class InflightGroup:
 
 
 # ---------------------------------------------------------------------------
+# Policy scheduler
+# ---------------------------------------------------------------------------
+
+
+class PolicyScheduler:
+    """Watches for new policy checkpoints and applies weight updates.
+
+    Runs as a background loop owned by TrainScheduler. On policy update:
+    pauses scheduling, waits for checkpoint, updates weights, drops stale
+    rollouts, then resumes scheduling.
+    """
+
+    def __init__(
+        self,
+        train_scheduler: TrainScheduler,
+        inference_pool: InferencePool,
+        config: OrchestratorConfig,
+        max_async_level: int,
+        strict_async_level: bool,
+        model_name: str,
+        lora_name: str | None = None,
+    ):
+        self.logger = get_logger()
+        self._train = train_scheduler
+        self.inference_pool = inference_pool
+        self.config = config
+        self.max_async_level = max_async_level
+        self.strict_async_level = strict_async_level
+        self.model_name = model_name
+        self.lora_name = lora_name
+
+        self.ckpt_step = 0
+        self.update_weights_time = 0.0
+        self.wait_for_ckpt_time = 0.0
+        self._inflight_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+
+    def _compute_next_ckpt_step(self, step: int) -> int:
+        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.config.output_dir)) or 0
+        async_away_ckpt_step = max(step - self.max_async_level, 0)
+        if self.strict_async_level:
+            return async_away_ckpt_step
+        return max(async_away_ckpt_step, latest_ckpt_step)
+
+    async def _apply_update(self, next_ckpt_step: int, step: int) -> None:
+        async_away_ckpt_step = max(step - self.max_async_level, 0)
+        if next_ckpt_step == async_away_ckpt_step:
+            self.logger.info(
+                f"Orchestrator paused: waiting for trainer process to complete checkpoint {next_ckpt_step} "
+                f"(>{self.max_async_level} step(s) ahead). Training is progressing normally."
+            )
+            self._train.pause()
+            t0 = time.perf_counter()
+            await wait_for_path(get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step) / "STABLE")
+            self.wait_for_ckpt_time = time.perf_counter() - t0
+            self.logger.info(
+                f"Orchestrator resumed: checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)"
+            )
+
+        self.logger.debug(f"Got new policy with step {next_ckpt_step}. Updating weights.")
+
+        t0 = time.perf_counter()
+        weights_path = get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step)
+        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+        self.update_weights_time = time.perf_counter() - t0
+        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
+
+        self.ckpt_step = next_ckpt_step
+        if self.lora_name is not None:
+            self.model_name = self.lora_name
+            self._train.model_name = self.lora_name
+            self.inference_pool.update_model_name(self.model_name)
+
+        self._train.resume()
+        await self._train._update_off_policy()
+
+    async def _get_or_start_update_task(self, next_ckpt_step: int, step: int) -> asyncio.Task:
+        async with self._lock:
+            if self._inflight_task is not None and not self._inflight_task.done():
+                return self._inflight_task
+
+            task = asyncio.create_task(self._apply_update(next_ckpt_step, step))
+            self._inflight_task = task
+
+            def _clear(done_task: asyncio.Task) -> None:
+                if self._inflight_task is done_task:
+                    self._inflight_task = None
+
+            task.add_done_callback(_clear)
+            return task
+
+    async def maybe_update(self, step: int) -> None:
+        """Check for and apply any pending policy updates."""
+        while True:
+            next_ckpt_step = self._compute_next_ckpt_step(step)
+            if next_ckpt_step <= self.ckpt_step:
+                return
+            task = await self._get_or_start_update_task(next_ckpt_step, step)
+            await asyncio.shield(task)
+
+    async def run(self, step_fn) -> None:
+        """Background loop. step_fn returns the current training step."""
+        while True:
+            await self.maybe_update(step_fn())
+            await asyncio.sleep(1)
+
+    async def stop(self) -> None:
+        if self._inflight_task is not None:
+            await safe_cancel(self._inflight_task)
+            self._inflight_task = None
+
+
+# ---------------------------------------------------------------------------
 # Train scheduler
 # ---------------------------------------------------------------------------
 
@@ -115,14 +228,23 @@ class TrainScheduler:
         self._uses_token_batching = config.token_batch_size is not None
         self._batch_target = config.token_batch_size or config.batch_size
         self.rollouts_per_example = config.rollouts_per_example
-        self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
-        self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
-        self.lora_name = lora_name
         self.model_name = model_name
         self.json_logging = config.log.json_logging
         self.inference_pool = inference_pool
+
+        self.policy: PolicyScheduler | None = None
+        if enable_policy_updates:
+            self.policy = PolicyScheduler(
+                train_scheduler=self,
+                inference_pool=inference_pool,
+                config=config,
+                max_async_level=max_async_level,
+                strict_async_level=strict_async_level,
+                model_name=model_name,
+                lora_name=lora_name,
+            )
 
         # Group tracking
         self._next_group_id = 0
@@ -141,12 +263,8 @@ class TrainScheduler:
         self._scheduling_task: asyncio.Task | None = None
         self._completion_task: asyncio.Task | None = None
 
-        # Policy update state
-        self.step, self.ckpt_step = 0, 0
-        self.update_weights_time, self.wait_for_ckpt_time = 0, 0
+        self.step = 0
         self._policy_loop_task: asyncio.Task | None = None
-        self._inflight_policy_update_task: asyncio.Task | None = None
-        self._policy_update_lock = asyncio.Lock()
 
         # Metrics (reset per step)
         self.cancelled_rollouts_count = 0
@@ -161,13 +279,8 @@ class TrainScheduler:
     # ------------------------------------------------------------------
 
     @property
-    def inflight_rollout_count(self) -> int:
+    def num_inflight_rollouts(self) -> int:
         return sum(g.total_inflight_rollouts for g in self._groups.values())
-
-    @property
-    def inflight_sample_count(self) -> int:
-        pending = sum(g.rollouts_to_schedule for g in self._groups.values())
-        return self.inflight_rollout_count + pending
 
     @property
     def async_level(self) -> int:
@@ -187,15 +300,23 @@ class TrainScheduler:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def ckpt_step(self) -> int:
+        return self.policy.ckpt_step if self.policy else self.step
+
+    @ckpt_step.setter
+    def ckpt_step(self, value: int) -> None:
+        if self.policy:
+            self.policy.ckpt_step = value
+
     async def start(self, step: int) -> None:
         """Start background loops. Call once at the beginning of training."""
         self.step = step
 
-        if self.enable_policy_updates:
-            await self._maybe_update_policy()
-            self._policy_loop_task = asyncio.create_task(self._policy_update_loop())
+        if self.policy:
+            await self.policy.maybe_update(step)
+            self._policy_loop_task = asyncio.create_task(self.policy.run(lambda: self.step))
         else:
-            self.ckpt_step = step
             self.resume()
 
         self._batch_start_time = time.perf_counter()
@@ -266,9 +387,8 @@ class TrainScheduler:
         self._completion_task = None
         self._policy_loop_task = None
 
-        if self._inflight_policy_update_task is not None:
-            await safe_cancel(self._inflight_policy_update_task)
-            self._inflight_policy_update_task = None
+        if self.policy:
+            await self.policy.stop()
 
         await self.cancel_inflight_rollouts()
 
@@ -488,85 +608,6 @@ class TrainScheduler:
         )
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
-    # ------------------------------------------------------------------
-    # Policy updates
-    # ------------------------------------------------------------------
-
-    async def _policy_update_loop(self) -> None:
-        """Continuously check for new policy checkpoints."""
-        while True:
-            await self._maybe_update_policy()
-            await asyncio.sleep(1)
-
-    def _compute_next_ckpt_step(self) -> int:
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.config.output_dir)) or 0
-        async_away_ckpt_step = max(self.step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
-
-    async def _apply_policy_update(self, next_ckpt_step: int) -> None:
-        async_away_ckpt_step = max(self.step - self.max_async_level, 0)
-        if next_ckpt_step == async_away_ckpt_step:
-            self.logger.info(
-                f"Orchestrator paused: waiting for trainer process to complete checkpoint {next_ckpt_step} "
-                f"(>{self.max_async_level} step(s) ahead). Training is progressing normally."
-            )
-            self.pause()
-            wait_for_ckpt_start_time = time.perf_counter()
-            await wait_for_path(get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step) / "STABLE")
-            self.wait_for_ckpt_time = time.perf_counter() - wait_for_ckpt_start_time
-            self.logger.info(
-                f"Orchestrator resumed: checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)"
-            )
-
-        self.logger.debug(
-            f"Got new policy with step {next_ckpt_step}. Updating weights and cancelling old rollout requests."
-        )
-
-        update_weights_start_time = time.perf_counter()
-        weights_path = get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step)
-        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
-        self.update_weights_time = time.perf_counter() - update_weights_start_time
-        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
-
-        self.ckpt_step = next_ckpt_step
-        if self.lora_name is not None:
-            self.model_name = self.lora_name
-            self.inference_pool.update_model_name(self.model_name)
-
-        self.resume()
-        await self._update_off_policy()
-
-    async def _get_or_start_policy_update_task(self, next_ckpt_step: int) -> asyncio.Task:
-        async with self._policy_update_lock:
-            task = self._inflight_policy_update_task
-            if task is not None and not task.done():
-                return task
-
-            task = asyncio.create_task(self._apply_policy_update(next_ckpt_step))
-            self._inflight_policy_update_task = task
-
-            def _clear(done_task: asyncio.Task) -> None:
-                if self._inflight_policy_update_task is done_task:
-                    self._inflight_policy_update_task = None
-
-            task.add_done_callback(_clear)
-            return task
-
-    async def _maybe_update_policy(self) -> None:
-        if not self.enable_policy_updates:
-            self.ckpt_step = self.step
-            self.resume()
-            return
-
-        while True:
-            next_ckpt_step = self._compute_next_ckpt_step()
-            if next_ckpt_step <= self.ckpt_step:
-                return
-            task = await self._get_or_start_policy_update_task(next_ckpt_step)
-            await asyncio.shield(task)
-
     async def _update_off_policy(self) -> None:
         """Increment off-policy counters and drop stale groups."""
         stale_group_ids = set()
@@ -598,11 +639,10 @@ class TrainScheduler:
     def get_metrics(self) -> dict[str, float]:
         total_rollouts = sum(self.total_rollouts_by_env.values())
         metrics = {
-            "time/wait_for_ckpt": self.wait_for_ckpt_time,
-            "time/update_weights": self.update_weights_time,
+            "time/wait_for_ckpt": self.policy.wait_for_ckpt_time if self.policy else 0,
+            "time/update_weights": self.policy.update_weights_time if self.policy else 0,
             "scheduler/async_level": self.async_level,
-            "scheduler/inflight_rollouts": self.inflight_rollout_count,
-            "scheduler/inflight_samples": self.inflight_sample_count,
+            "scheduler/inflight_rollouts": self.num_inflight_rollouts,
             "scheduler/limiter_used": self.limiter.concurrency.used,
             "scheduler/limiter_remaining": self.limiter.remaining,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,

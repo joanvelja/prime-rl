@@ -252,6 +252,8 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
         train_scheduler.model_name = config.model.lora.name
+        if train_scheduler.policy:
+            train_scheduler.policy.model_name = config.model.lora.name
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")
