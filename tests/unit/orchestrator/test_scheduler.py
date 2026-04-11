@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
 from prime_rl.orchestrator.scheduler import InflightGroup, InflightRolloutRequest, PolicyScheduler, TrainScheduler
-from prime_rl.utils.async_utils import safe_cancel
 
 
 def _make_train_scheduler() -> TrainScheduler:
@@ -33,9 +32,9 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     """Create a minimal PolicyScheduler for testing."""
     ps = PolicyScheduler.__new__(PolicyScheduler)
     ps.logger = MagicMock()
-    ps._train = train_scheduler
+    ps.train_scheduler = train_scheduler
     ps.inference_pool = MagicMock()
-    ps.config = SimpleNamespace(output_dir=Path("/tmp/prime-rl-test"))
+    ps.output_dir = Path("/tmp/prime-rl-test")
     ps.max_async_level = 1
     ps.strict_async_level = False
     ps.model_name = "test-model"
@@ -43,8 +42,6 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.ckpt_step = 7
     ps.update_weights_time = 0
     ps.wait_for_ckpt_time = 0
-    ps._inflight_task = None
-    ps._lock = asyncio.Lock()
     train_scheduler.policy = ps
     train_scheduler.step = 9
     return ps
@@ -90,18 +87,14 @@ def test_drop_stale_groups_drops_old_requests():
     asyncio.run(run())
 
 
-def test_maybe_update_reuses_inflight_update_after_cancellation():
+def test_maybe_update_applies_latest_checkpoint():
     async def run() -> None:
         scheduler = _make_train_scheduler()
         ps = _make_policy_scheduler(scheduler)
-        started = asyncio.Event()
-        release = asyncio.Event()
         applied_steps: list[int] = []
 
         async def update_weights(weight_dir, lora_name=None, step=0) -> None:
             applied_steps.append(step)
-            started.set()
-            await release.wait()
 
         ps.inference_pool = SimpleNamespace(
             update_weights=update_weights,
@@ -113,16 +106,7 @@ def test_maybe_update_reuses_inflight_update_after_cancellation():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            first = asyncio.create_task(ps.maybe_update(step=9))
-            await started.wait()
-            await safe_cancel(first)
-
-            second = asyncio.create_task(ps.maybe_update(step=9))
-            await asyncio.sleep(0)
-            assert applied_steps == [8]
-
-            release.set()
-            await second
+            await ps.maybe_update(step=9)
 
         assert applied_steps == [8]
         assert ps.ckpt_step == 8
@@ -160,7 +144,6 @@ def test_stop_cancels_inflight_policy_update_task():
 
         assert cancelled.is_set()
         assert scheduler._policy_loop_task is None
-        assert ps._inflight_task is None
 
     asyncio.run(run())
 

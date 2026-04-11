@@ -104,9 +104,9 @@ class PolicyScheduler:
         lora_name: str | None = None,
     ):
         self.logger = get_logger()
-        self._train = train_scheduler
+        self.train_scheduler = train_scheduler
         self.inference_pool = inference_pool
-        self.config = config
+        self.output_dir = config.output_dir
         self.max_async_level = max_async_level
         self.strict_async_level = strict_async_level
         self.model_name = model_name
@@ -115,62 +115,6 @@ class PolicyScheduler:
         self.ckpt_step = 0
         self.update_weights_time = 0.0
         self.wait_for_ckpt_time = 0.0
-        self._inflight_task: asyncio.Task | None = None
-        self._lock = asyncio.Lock()
-
-    def _compute_next_ckpt_step(self, step: int) -> int:
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.config.output_dir)) or 0
-        async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
-
-    async def _apply_update(self, next_ckpt_step: int, step: int) -> None:
-        async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if next_ckpt_step == async_away_ckpt_step:
-            self.logger.info(
-                f"Orchestrator paused: waiting for trainer process to complete checkpoint {next_ckpt_step} "
-                f"(>{self.max_async_level} step(s) ahead). Training is progressing normally."
-            )
-            self._train.pause()
-            t0 = time.perf_counter()
-            await wait_for_path(get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step) / "STABLE")
-            self.wait_for_ckpt_time = time.perf_counter() - t0
-            self.logger.info(
-                f"Orchestrator resumed: checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)"
-            )
-
-        self.logger.debug(f"Got new policy with step {next_ckpt_step}. Updating weights.")
-
-        t0 = time.perf_counter()
-        weights_path = get_step_path(get_broadcast_dir(self.config.output_dir), next_ckpt_step)
-        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
-        self.update_weights_time = time.perf_counter() - t0
-        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
-
-        self.ckpt_step = next_ckpt_step
-        if self.lora_name is not None:
-            self.model_name = self.lora_name
-            self._train.model_name = self.lora_name
-            self.inference_pool.update_model_name(self.model_name)
-
-        self._train.resume()
-        await self._train.drop_stale_groups(next_ckpt_step)
-
-    async def _get_or_start_update_task(self, next_ckpt_step: int, step: int) -> asyncio.Task:
-        async with self._lock:
-            if self._inflight_task is not None and not self._inflight_task.done():
-                return self._inflight_task
-
-            task = asyncio.create_task(self._apply_update(next_ckpt_step, step))
-            self._inflight_task = task
-
-            def _clear(done_task: asyncio.Task) -> None:
-                if self._inflight_task is done_task:
-                    self._inflight_task = None
-
-            task.add_done_callback(_clear)
-            return task
 
     async def maybe_update(self, step: int) -> None:
         """Check for and apply any pending policy updates."""
@@ -178,19 +122,50 @@ class PolicyScheduler:
             next_ckpt_step = self._compute_next_ckpt_step(step)
             if next_ckpt_step <= self.ckpt_step:
                 return
-            task = await self._get_or_start_update_task(next_ckpt_step, step)
-            await asyncio.shield(task)
+            await self._apply_update(next_ckpt_step, step)
 
-    async def run(self, step_fn) -> None:
-        """Background loop. step_fn returns the current training step."""
+    async def run(self) -> None:
+        """Background loop. Reads current step from train_scheduler.step."""
         while True:
-            await self.maybe_update(step_fn())
+            await self.maybe_update(self.train_scheduler.step)
             await asyncio.sleep(1)
 
-    async def stop(self) -> None:
-        if self._inflight_task is not None:
-            await safe_cancel(self._inflight_task)
-            self._inflight_task = None
+    def _compute_next_ckpt_step(self, step: int) -> int:
+        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+        async_away_ckpt_step = max(step - self.max_async_level, 0)
+        if self.strict_async_level:
+            return async_away_ckpt_step
+        return max(async_away_ckpt_step, latest_ckpt_step)
+
+    async def _apply_update(self, next_ckpt_step: int, step: int) -> None:
+        # Wait for checkpoint if we're at the async barrier
+        async_away_ckpt_step = max(step - self.max_async_level, 0)
+        if next_ckpt_step == async_away_ckpt_step:
+            self.logger.info(
+                f"Orchestrator paused: waiting for checkpoint {next_ckpt_step} (>{self.max_async_level} step(s) ahead)"
+            )
+            self.train_scheduler.pause()
+            t0 = time.perf_counter()
+            await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
+            self.wait_for_ckpt_time = time.perf_counter() - t0
+            self.logger.info(f"Checkpoint {next_ckpt_step} ready (after {self.wait_for_ckpt_time:.2f}s)")
+
+        # Update weights on inference servers
+        t0 = time.perf_counter()
+        weights_path = get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step)
+        await self.inference_pool.update_weights(weights_path, lora_name=self.lora_name, step=next_ckpt_step)
+        self.update_weights_time = time.perf_counter() - t0
+        self.logger.debug(f"Updated weights to step {next_ckpt_step} in {self.update_weights_time:.2f}s")
+
+        self.ckpt_step = next_ckpt_step
+        if self.lora_name is not None:
+            self.model_name = self.lora_name
+            self.train_scheduler.model_name = self.lora_name
+            self.inference_pool.update_model_name(self.model_name)
+
+        # Resume scheduling and drop stale rollouts
+        self.train_scheduler.resume()
+        await self.train_scheduler.drop_stale_groups(next_ckpt_step)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +283,7 @@ class TrainScheduler:
 
         if self.policy:
             await self.policy.maybe_update(step)
-            self._policy_loop_task = asyncio.create_task(self.policy.run(lambda: self.step))
+            self._policy_loop_task = asyncio.create_task(self.policy.run())
         else:
             self.resume()
 
@@ -379,10 +354,6 @@ class TrainScheduler:
         self._scheduling_task = None
         self._completion_task = None
         self._policy_loop_task = None
-
-        if self.policy:
-            await self.policy.stop()
-
         await self.cancel_inflight_rollouts()
 
     # ------------------------------------------------------------------
