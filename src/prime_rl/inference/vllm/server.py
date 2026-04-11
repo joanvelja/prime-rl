@@ -3,7 +3,7 @@ from http import HTTPStatus
 from typing import Any
 
 import uvloop
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
@@ -223,11 +223,10 @@ async def init_broadcaster(request: Request):
     timeout = data.get("timeout")
     rank_offset = data.get("rank_offset")
     inference_world_size = data.get("inference_world_size")
-    gpus_per_server = data.get("gpus_per_server")
     quantize_in_weight_transfer = data.get("quantize_in_weight_transfer", False)
     await engine_client(request).collective_rpc(
         "init_broadcaster",
-        args=(host, port, rank_offset, inference_world_size, gpus_per_server, timeout, quantize_in_weight_transfer),
+        args=(host, port, rank_offset, inference_world_size, timeout, quantize_in_weight_transfer),
     )
     return {"status": "ok"}
 
@@ -248,10 +247,7 @@ async def _chat_with_tokens(request: ChatCompletionRequestWithTokens, raw_reques
     handler = chat_with_tokens(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
-    try:
-        generator = await handler.create_chat_completion_with_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
+    generator = await handler.create_chat_completion_with_tokens(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
 
@@ -318,8 +314,14 @@ vllm.v1.utils.run_api_server_worker_proc = custom_run_api_server_worker_proc
 # Only difference we do some config translation (i.e. pass populated namespace
 # to `parse_args`) and additional arg validation
 def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
+    import os
+
     from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server
     from vllm.entrypoints.openai.api_server import run_server
+
+    # Signal worker processes to disable LoRA on MoE layers when LoRA targets don't include experts
+    if config.lora_target_modules and not any("expert" in m for m in config.lora_target_modules):
+        os.environ["PRIME_NO_MOE_LORA"] = "1"
 
     namespace = config.to_vllm()
     if vllm_extra:

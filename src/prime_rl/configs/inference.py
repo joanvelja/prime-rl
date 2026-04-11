@@ -140,6 +140,9 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
     router_port: Annotated[int, Field(description="Port for the vllm-router.")] = 8000
     backend_port: Annotated[int, Field(description="Port for vLLM backend instances.")] = 8100
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
 
 
 class KVCacheOffloadConfig(BaseModel):
@@ -189,6 +192,9 @@ class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
     router_port: Annotated[int, Field(description="Port for the vllm-router on each replica.")] = 8000
     prefill_port: Annotated[int, Field(description="Port for prefill vLLM instances.")] = 8100
     decode_port: Annotated[int, Field(description="Port for decode vLLM instances.")] = 8200
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
 
     prefill_env_overrides: Annotated[
         dict[str, str],
@@ -269,6 +275,13 @@ class InferenceConfig(BaseConfig):
         int | None,
         Field(
             description="The maximum LoRA rank to use. Passed to vLLM as `--max-lora-rank`",
+        ),
+    ] = None
+
+    lora_target_modules: Annotated[
+        list[str] | None,
+        Field(
+            description="The target modules for LoRA. Passed to vLLM as `--lora-target-modules`.",
         ),
     ] = None
 
@@ -486,6 +499,7 @@ class InferenceConfig(BaseConfig):
             "max_loras": "max_loras",
             "max_cpu_loras": "max_cpu_loras",
             "max_lora_rank": "max_lora_rank",
+            "lora_target_modules": "lora_target_modules",
             "gpu_memory_utilization": "gpu_memory_utilization",
             "api_server_count": "api_server_count",
             "enable_return_routed_experts": "enable_return_routed_experts",
@@ -506,6 +520,10 @@ class InferenceConfig(BaseConfig):
         # Remove reasoning_parser if not set (vLLM doesn't accept None)
         if namespace.reasoning_parser is None:
             delattr(namespace, "reasoning_parser")
+
+        # Remove lora_target_modules if not set (vLLM doesn't accept None)
+        if hasattr(namespace, "lora_target_modules") and namespace.lora_target_modules is None:
+            delattr(namespace, "lora_target_modules")
 
         # Remove rope_scaling if not set (vLLM doesn't accept None)
         if hasattr(namespace, "rope_scaling"):
