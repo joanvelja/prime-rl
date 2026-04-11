@@ -403,7 +403,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await train_scheduler.cancel_inflight_rollouts()
 
-            if config.eval.overlap_train_and_eval_rollouts:
+            if config.eval.overlap_with_train_rollouts:
                 # Overlapping mode: eval runs concurrently with training via the shared limiter.
                 # At most one eval task runs at a time — warn if the previous one hasn't finished.
                 if eval_task is not None and not eval_task.done():

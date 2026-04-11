@@ -548,11 +548,11 @@ class EvalConfig(BaseConfig):
     cancel_inflight_rollouts_on_eval: Annotated[
         bool,
         Field(
-            description="Whether to cancel in-flight training rollouts before starting online evals. This is useful to avoid congestion (e.g. do not have training + eval rollouts happening at the same time) but leads to slower training steps as rollouts get cancelled and the pipeline has to fill up after each eval. Incompatible with overlap_train_and_eval_rollouts.",
+            description="Whether to cancel in-flight training rollouts before starting online evals. This is useful to avoid congestion (e.g. do not have training + eval rollouts happening at the same time) but leads to slower training steps as rollouts get cancelled and the pipeline has to fill up after each eval. Can be combined with overlap_with_train_rollouts.",
         ),
     ] = False
 
-    overlap_train_and_eval_rollouts: Annotated[
+    overlap_with_train_rollouts: Annotated[
         bool,
         Field(
             description=(
