@@ -982,30 +982,21 @@ def monkey_patch_offloading_connector_cpu_block_count():
         if not cpu_bytes_to_use:
             return
 
-        page_sizes = {
-            g.kv_cache_spec.page_size_bytes
-            for g in kv_cache_config.kv_cache_groups
-        }
+        page_sizes = {g.kv_cache_spec.page_size_bytes for g in kv_cache_config.kv_cache_groups}
         assert len(page_sizes) == 1
         page_size_bytes = page_sizes.pop()
 
         # page_size_bytes already covers all layers in the group.
         # Only multiply by world_size (each TP rank stores its own copy).
-        kv_bytes_per_block = (
-            page_size_bytes * vllm_config.parallel_config.world_size
-        )
-        kv_bytes_per_offloaded_block = (
-            kv_bytes_per_block * self.block_size_factor
-        )
+        kv_bytes_per_block = page_size_bytes * vllm_config.parallel_config.world_size
+        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
-            int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
-            if kv_bytes_per_offloaded_block > 0
-            else 0
+            int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block if kv_bytes_per_offloaded_block > 0 else 0
         )
 
     CPUOffloadingSpec.__init__ = _patched_init
-    
-    
+
+
 def monkey_patch_no_moe_lora():
     """This disables LoRA for MoE layers and makes them pick better kernels.
 

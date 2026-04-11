@@ -154,7 +154,9 @@ class KVCacheOffloadConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading per worker.")] = 1_000_000_000
+    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading per worker.")] = (
+        1_000_000_000
+    )
 
 
 class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
