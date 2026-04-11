@@ -86,8 +86,8 @@ def test_drop_stale_groups_drops_old_requests():
     asyncio.run(run())
 
 
-def test_maybe_update_applies_latest_checkpoint():
-    async def run() -> None:
+def test_policy_scheduler_applies_latest_checkpoint():
+    async def run_test() -> None:
         scheduler = _make_train_scheduler()
         ps = _make_policy_scheduler(scheduler)
         applied_steps: list[int] = []
@@ -105,12 +105,19 @@ def test_maybe_update_applies_latest_checkpoint():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            await ps.maybe_update()
+            # Run the loop briefly — it should apply the update then sleep
+            task = asyncio.create_task(ps.run())
+            await asyncio.sleep(0.1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         assert applied_steps == [8]
         assert ps.ckpt_step == 8
 
-    asyncio.run(run())
+    asyncio.run(run_test())
 
 
 def test_stop_cancels_inflight_policy_update_task():
@@ -137,7 +144,7 @@ def test_stop_cancels_inflight_policy_update_task():
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
             patch("prime_rl.orchestrator.scheduler.wait_for_path", new=AsyncMock()),
         ):
-            policy_task = asyncio.create_task(ps.maybe_update())
+            policy_task = asyncio.create_task(ps.run())
             await started.wait()
             policy_task.cancel()
             try:

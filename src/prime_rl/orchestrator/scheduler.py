@@ -120,36 +120,22 @@ class PolicyScheduler:
 
     @property
     def async_level(self) -> int:
-        return self.progress.step - self.ckpt_step
+        return self.progress.step - self.ckpt_step, 0
 
-    def get_metrics(self) -> dict[str, float]:
-        return {
-            "time/wait_for_ckpt": self.wait_for_ckpt_time,
-            "time/update_weights": self.update_weights_time,
-            "scheduler/async_level": self.async_level,
-        }
+    async def run(self) -> None:
+        """Background loop: poll for new checkpoints and apply weight updates.
 
-    def _get_next_ckpt_step(self) -> int:
-        step = self.progress.step
-        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
-        async_away_ckpt_step = max(step - self.max_async_level, 0)
-        if self.strict_async_level:
-            return async_away_ckpt_step
-        return max(async_away_ckpt_step, latest_ckpt_step)
-
-    async def maybe_update(self) -> None:
-        """Check for and apply pending policy updates.
-
-        1. If at latest checkpoint — return
+        1. If at latest checkpoint — sleep and retry
         2. If at async barrier — pause train scheduler, wait for checkpoint
         3. Update weights, drop stale groups, resume train scheduler
         """
         while True:
             next_ckpt_step = self._get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
-                return
+                await asyncio.sleep(1)
+                continue
 
-            at_barrier = next_ckpt_step == max(self.progress.step - self.max_async_level, 0)
+            at_barrier = next_ckpt_step == self.async_level
             if at_barrier:
                 self.train_scheduler.pause()
                 t0 = time.perf_counter()
@@ -172,11 +158,20 @@ class PolicyScheduler:
             self.train_scheduler.model_name = self.lora_name
             self.inference_pool.update_model_name(self.model_name)
 
-    async def run(self) -> None:
-        """Background loop."""
-        while True:
-            await self.maybe_update()
-            await asyncio.sleep(1)
+    def _get_next_ckpt_step(self) -> int:
+        step = self.progress.step
+        latest_ckpt_step = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
+        async_away_ckpt_step = max(step - self.max_async_level, 0)
+        if self.strict_async_level:
+            return async_away_ckpt_step
+        return max(async_away_ckpt_step, latest_ckpt_step)
+
+    def get_metrics(self) -> dict[str, float]:
+        return {
+            "time/wait_for_ckpt": self.wait_for_ckpt_time,
+            "time/update_weights": self.update_weights_time,
+            "scheduler/async_level": self.async_level,
+        }
 
 
 # ---------------------------------------------------------------------------
