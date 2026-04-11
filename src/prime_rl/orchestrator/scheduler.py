@@ -417,6 +417,15 @@ class TrainScheduler:
             inflight_tasks = list(self.inflight_requests.keys())
 
             if not inflight_tasks:
+                if self.limiter.concurrency.used > 0:
+                    # Slots are held by eval (or other consumers) — wait for capacity to free up
+                    self.logger.debug(
+                        f"Train scheduler waiting for concurrency slots "
+                        f"(used={self.limiter.concurrency.used}, remaining={self.limiter.remaining})"
+                    )
+                    await self.limiter.concurrency.acquire(1)
+                    self.limiter.concurrency.release(1)
+                    continue
                 raise RuntimeError(
                     f"No in-flight rollouts and batch incomplete ({batch_progress}/{self.batch_target}). "
                     f"Limiter state: used={self.limiter.concurrency.used}, "
