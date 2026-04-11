@@ -141,6 +141,7 @@ class PolicyScheduler:
                 return async_away_ckpt_step
             return max(async_away_ckpt_step, latest_ckpt_step)
 
+        logger = get_logger()
         while True:
             next_ckpt_step = get_next_ckpt_step()
             if next_ckpt_step <= self.ckpt_step:
@@ -148,14 +149,21 @@ class PolicyScheduler:
                 continue
 
             if self.at_async_barrier:
+                logger.info(
+                    f"Waiting for checkpoint {next_ckpt_step} "
+                    f"(orchestrator is >{self.max_async_level} step(s) ahead of trainer)"
+                )
                 self.train_scheduler.pause()
                 t0 = time.perf_counter()
                 await wait_for_path(get_step_path(get_broadcast_dir(self.output_dir), next_ckpt_step) / "STABLE")
                 self.wait_for_ckpt_time = time.perf_counter() - t0
+                logger.debug(f"Checkpoint {next_ckpt_step} ready (waited {self.wait_for_ckpt_time:.2f}s)")
 
+            logger.info(f"Updating inference weights to checkpoint {next_ckpt_step}")
             await self.update_weights(next_ckpt_step)
             await self.train_scheduler.drop_stale_groups(next_ckpt_step)
             self.train_scheduler.resume()
+            logger.debug(f"Policy update to step {next_ckpt_step} complete ({self.update_weights_time:.2f}s)")
 
     async def update_weights(self, next_ckpt_step: int) -> None:
         t0 = time.perf_counter()
