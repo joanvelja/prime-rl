@@ -98,40 +98,35 @@ class Env:
         self._env_server_process = process
         return address
 
-    async def run_rollout(
+    async def run(
         self,
         client: vf.ClientConfig,
         example: dict,
         model_name: str,
-    ) -> vf.RolloutOutput:
-        """Run a single rollout for an example."""
-        return await self.env.run_rollout(
-            vf.RolloutInput(**example),
-            client=client,
-            model=model_name,
-            sampling_args=self.sampling_args,
-            max_retries=self.config.max_retries,
-            state_columns=REQUIRED_STATE_COLUMNS,
-            env_client=self.env_client,
-        )
-
-    async def run_group(
-        self,
-        client: vf.ClientConfig,
-        example: dict,
-        model_name: str,
-        rollouts_per_example: int,
+        n: int = 1,
     ) -> list[vf.RolloutOutput]:
-        """Run a group of rollouts for an example. Required for group-scoring envs."""
-        return await self.env.run_group(
-            [vf.RolloutInput(**example) for _ in range(rollouts_per_example)],
-            client=client,
-            model=model_name,
-            sampling_args=self.sampling_args,
-            max_retries=self.config.max_retries,
-            state_columns=REQUIRED_STATE_COLUMNS,
-            env_client=self.env_client,
-        )
+        """Run rollout(s) for an example. Dispatches to group or single based on the env."""
+        if self.requires_group_scoring:
+            return await self.env.run_group(
+                [vf.RolloutInput(**example) for _ in range(n)],
+                client=client,
+                model=model_name,
+                sampling_args=self.sampling_args,
+                max_retries=self.config.max_retries,
+                state_columns=REQUIRED_STATE_COLUMNS,
+                env_client=self.env_client,
+            )
+        return [
+            await self.env.run_rollout(
+                vf.RolloutInput(**example),
+                client=client,
+                model=model_name,
+                sampling_args=self.sampling_args,
+                max_retries=self.config.max_retries,
+                state_columns=REQUIRED_STATE_COLUMNS,
+                env_client=self.env_client,
+            )
+        ]
 
     def shutdown(self) -> None:
         if self._env_server_process is None:

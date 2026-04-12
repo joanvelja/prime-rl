@@ -229,6 +229,7 @@ async def orchestrate(config: OrchestratorConfig):
         token_batch_size=config.token_batch_size,
         rollouts_per_example=config.rollouts_per_example,
         max_off_policy_steps=config.max_off_policy_steps,
+        max_retries=config.max_rollout_retries,
         model_name=rollout_model_name,
         json_logging=config.log.json_logging,
     )
@@ -442,9 +443,7 @@ async def orchestrate(config: OrchestratorConfig):
             await policy_scheduler.wait_for_barrier()
 
         # Wait for the train batch to complete (background loops are always running)
-        batch = await train_scheduler.next_batch()
-        train_rollouts = batch.rollouts
-        generate_completions_time = batch.generation_time
+        train_rollouts, generate_completions_time = await train_scheduler.next_batch()
 
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)

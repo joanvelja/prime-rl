@@ -1,28 +1,30 @@
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from prime_rl.orchestrator.ckpt import Progress
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
-from prime_rl.orchestrator.scheduler import InflightGroup, InflightRequest, PolicyScheduler, TrainScheduler
+from prime_rl.orchestrator.scheduler import PolicyScheduler, RolloutGroup, RolloutRequest, TrainScheduler
 
 
 def _make_train_scheduler() -> TrainScheduler:
     """Create a minimal TrainScheduler for testing (no __init__)."""
     scheduler = TrainScheduler.__new__(TrainScheduler)
     scheduler.limiter = RolloutLimiter(128)
-    scheduler.logger = MagicMock()
-    scheduler._scheduling_enabled = asyncio.Event()
-    scheduler._scheduling_enabled.set()
+    scheduler._batch_gate = asyncio.Event()
+    scheduler._batch_gate.set()
+    scheduler._policy_gate = asyncio.Event()
+    scheduler._policy_gate.set()
     scheduler._groups = {}
-    scheduler._task_to_group = {}
-    scheduler.max_off_policy_steps = 1
+    scheduler._requests = {}
+    scheduler._retry_queue = asyncio.deque() if hasattr(asyncio, "deque") else __import__("collections").deque()
+    scheduler._schedule_queue = __import__("collections").deque()
+    scheduler.max_off_policy_steps = 2
+    scheduler.max_retries = 3
     scheduler.cancelled_rollouts_count = 0
     scheduler._scheduling_task = None
     scheduler._completion_task = None
     scheduler.progress = Progress(step=0)
-    scheduler.off_policy_steps = 0
     scheduler.model_name = "test-model"
     return scheduler
 
@@ -36,43 +38,54 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.lora_name = None
     ps.ckpt_step = 7
     ps.update_weights_time = 0
-    ps._barrier_cleared = asyncio.Event()
+    ps.wait_for_ckpt_time = 0
+    ps.async_barrier_clear = asyncio.Event()
+    ps.async_barrier_clear.set()
     ps.max_async_level = 1
     ps.progress = Progress(step=9)
     train_scheduler.progress = Progress(step=9)
     return ps
 
 
-def test_drop_stale_groups_drops_old_requests():
+def test_drop_stale_groups():
     async def run() -> None:
         scheduler = _make_train_scheduler()
 
-        client = SimpleNamespace(api_base_url="http://test")
         stale_task = asyncio.create_task(asyncio.sleep(60))
         survivor_task = asyncio.create_task(asyncio.sleep(60))
 
-        stale_request = InflightRequest(task=stale_task, client=client, off_policy_steps=0)
-        survivor_request = InflightRequest(task=survivor_task, client=client, off_policy_steps=1)
+        stale_group = RolloutGroup(
+            env_name="test",
+            example={},
+            requires_group_scoring=False,
+            rollouts_per_example=1,
+        )
+        stale_group.off_policy_steps = 1  # at max_off_policy_steps
 
-        stale_group = InflightGroup(
-            example={},
+        survivor_group = RolloutGroup(
             env_name="test",
-            inflight_requests={stale_task: stale_request},
-        )
-        survivor_group = InflightGroup(
             example={},
-            env_name="test",
-            inflight_requests={survivor_task: survivor_request},
+            requires_group_scoring=False,
+            rollouts_per_example=1,
         )
-        scheduler._groups = {stale_group.group_id: stale_group, survivor_group.group_id: survivor_group}
-        scheduler._task_to_group = {stale_task: stale_group.group_id, survivor_task: survivor_group.group_id}
+        survivor_group.off_policy_steps = 0  # below threshold
+
+        scheduler._groups = {
+            stale_group.group_id: stale_group,
+            survivor_group.group_id: survivor_group,
+        }
+        scheduler._requests = {
+            stale_task: RolloutRequest(group_id=stale_group.group_id, cost=1),
+            survivor_task: RolloutRequest(group_id=survivor_group.group_id, cost=1),
+        }
         scheduler.limiter.concurrency.try_acquire(2)
 
-        scheduler.off_policy_steps = 1
-        await scheduler.drop_stale_groups()
+        scheduler.on_weights_updated()
 
         assert stale_group.group_id not in scheduler._groups
         assert survivor_group.group_id in scheduler._groups
+        assert stale_task not in scheduler._requests
+        assert survivor_task in scheduler._requests
         assert scheduler.cancelled_rollouts_count == 1
 
         for task in (stale_task, survivor_task):
@@ -92,18 +105,18 @@ def test_policy_scheduler_applies_latest_checkpoint():
         async def update_weights(weight_dir, lora_name=None, step=0) -> None:
             applied_steps.append(step)
 
-        ps.inference_pool = SimpleNamespace(
+        ps.inference_pool = MagicMock(
             update_weights=update_weights,
             update_model_name=MagicMock(),
         )
-        scheduler.drop_stale_groups = AsyncMock()
+        scheduler.on_weights_updated = MagicMock()
 
         with (
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
+            patch("prime_rl.orchestrator.scheduler.wait_for_path", new_callable=AsyncMock),
         ):
-            # Run the loop briefly — it should apply the update then sleep
             task = asyncio.create_task(ps.start())
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
             task.cancel()
             try:
                 await task
@@ -130,14 +143,15 @@ def test_stop_cancels_inflight_policy_update_task():
             finally:
                 cancelled.set()
 
-        ps.inference_pool = SimpleNamespace(
+        ps.inference_pool = MagicMock(
             update_weights=update_weights,
             update_model_name=MagicMock(),
         )
-        scheduler.drop_stale_groups = AsyncMock()
+        scheduler.on_weights_updated = MagicMock()
 
         with (
             patch("prime_rl.orchestrator.scheduler.get_latest_ckpt_step", return_value=8),
+            patch("prime_rl.orchestrator.scheduler.wait_for_path", new_callable=AsyncMock),
         ):
             policy_task = asyncio.create_task(ps.start())
             await started.wait()

@@ -997,6 +997,14 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = 8
 
+    max_rollout_retries: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Maximum number of times a failed rollout request is retried before the entire group is dropped.",
+        ),
+    ] = 3
+
     max_async_level: Annotated[
         int,
         Field(

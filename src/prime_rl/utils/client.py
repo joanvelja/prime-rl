@@ -137,6 +137,11 @@ async def setup_inference_pool(
     )
 
 
+def client_identity(c: vf.ClientConfig) -> tuple[str, str | None]:
+    """Stable identity for a client config that survives elastic pool refreshes."""
+    return (c.api_base_url, c.extra_headers.get("X-data-parallel-rank"))
+
+
 def setup_clients(client_config: ClientConfig, client_type: str = "openai_chat_completions") -> list[vf.ClientConfig]:
     clients = []
     client_idx = 0
