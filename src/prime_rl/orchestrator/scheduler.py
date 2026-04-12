@@ -345,7 +345,7 @@ class TrainScheduler:
             await self.limiter.acquire(request.cost)
             env = self.train_envs.get(group.env_name)
             task = asyncio.create_task(
-                env.run(client=group.client, example=group.example, model_name=self.model_name, n=cost)
+                env.run(client=group.client, example=group.example, model_name=self.model_name, n=request.cost)
             )
             self._requests[task] = request
             self._client_load[client_identity(group.client)] += request.cost
