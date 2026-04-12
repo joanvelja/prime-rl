@@ -536,8 +536,12 @@ class TrainScheduler:
     # Metrics
     # ------------------------------------------------------------------
 
+    def off_policy_levels(self) -> list[int]:
+        """Return off-policy step counts for all inflight groups."""
+        return [g.off_policy_steps for g in self._groups.values()]
+
     def get_metrics(self) -> dict[str, float]:
-        levels = [g.off_policy_steps for g in self._groups.values()]
+        levels = self.off_policy_levels()
         total_rollouts = sum(self.total_rollouts_by_env.values())
         metrics = {
             "scheduler/inflight_rollouts": self.num_inflight_rollouts,
