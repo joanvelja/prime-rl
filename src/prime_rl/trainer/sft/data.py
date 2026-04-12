@@ -124,6 +124,7 @@ class SFTDataset(StatefulIterableDataset):
         seq_len: int = 128,
         non_dp_size: int = 1,
         loss_mask_config: LossMaskConfig = LossMaskConfig(),
+        chat_template_kwargs: dict | None = None,
         max_examples: int | None = None,
         max_epochs: int | None = None,
     ):
@@ -136,6 +137,7 @@ class SFTDataset(StatefulIterableDataset):
         self.seed = seed
         self.seq_len = seq_len
         self.loss_mask_config = loss_mask_config
+        self.chat_template_kwargs = chat_template_kwargs or {}
         self.max_examples = max_examples
         self.max_epochs = max_epochs
 
@@ -205,12 +207,16 @@ class SFTDataset(StatefulIterableDataset):
                 case _:
                     raise ValueError(f"Invalid message role: {message['role']}")
 
+        per_example_kwargs = example.get("chat_template_kwargs", {})
+        if self.chat_template_kwargs:
+            per_example_kwargs = {**self.chat_template_kwargs, **per_example_kwargs}
+
         input_ids, loss_mask = build_incremental_token_mask(
             self.tokenizer,
             messages,
             role_to_mask=should_mask,
             tools=tools,
-            chat_template_kwargs=example.get("chat_template_kwargs", {}),
+            chat_template_kwargs=per_example_kwargs,
             collapse_consecutive_tool_messages=True,
         )
 
@@ -547,6 +553,7 @@ def setup_dataset(
             seed=config.seed,
             seq_len=config.seq_len,
             loss_mask_config=config.loss_mask,
+            chat_template_kwargs=config.chat_template_kwargs,
             non_dp_size=non_dp_size,
             max_epochs=max_epochs,
         )
