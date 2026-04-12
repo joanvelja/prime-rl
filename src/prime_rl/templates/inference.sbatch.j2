@@ -225,7 +225,7 @@ srun bash -c '
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
             --intra-node-data-parallel-size {{ dp_per_node }} \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs 4200 \
             --log-level debug \
             >> $ROUTER_LOG 2>&1 &
     fi
@@ -255,7 +255,7 @@ srun bash -c '
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
             --intra-node-data-parallel-size {{ dp_per_node }} \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs 4200 \
             --log-level debug \
             >> $ROUTER_LOG 2>&1 &
     fi
