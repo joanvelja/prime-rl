@@ -25,8 +25,6 @@ def _make_train_scheduler() -> TrainScheduler:
     scheduler._policy_gate.set()
     scheduler._groups = {}
     scheduler._requests = {}
-    scheduler._retry_queue = __import__("collections").deque()
-    scheduler._schedule_queue = __import__("collections").deque()
     scheduler.max_off_policy_steps = 2
     scheduler.max_retries = 3
     scheduler.cancelled_rollouts_count = 0

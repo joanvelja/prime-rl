@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,19 +98,29 @@ class RolloutGroup:
     client: vf.ClientConfig | None = None
     off_policy_steps: int = 0
     completed: list[vf.RolloutOutput] = field(default_factory=list)
+    remaining: int = -1  # individual rollouts left to schedule (set in __post_init__)
+    pending_retries: int = 0
+    failure_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.remaining < 0:
+            self.remaining = 0 if self.requires_group_scoring else self.rollouts_per_example
 
     @property
     def is_complete(self) -> bool:
         return len(self.completed) >= self.rollouts_per_example
 
+    @property
+    def needs_scheduling(self) -> bool:
+        return self.pending_retries > 0 or self.remaining > 0
+
 
 @dataclass
 class RolloutRequest:
-    """Tracks a single rollout task — lives in queues, then in the inflight dict."""
+    """Metadata for a single in-flight rollout task."""
 
     group_id: str
     cost: int  # limiter slots: 1 for individual, N for group scoring
-    failure_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +286,6 @@ class TrainScheduler:
         # Group + request tracking
         self._groups: dict[str, RolloutGroup] = {}
         self._requests: dict[asyncio.Task, RolloutRequest] = {}
-        self._retry_queue: deque[RolloutRequest] = deque()
-        self._schedule_queue: deque[RolloutRequest] = deque()
 
         # Batch accumulation
         self._batch_rollouts: list[vf.RolloutOutput] = []
@@ -333,8 +341,6 @@ class TrainScheduler:
         await safe_cancel_all(all_tasks)
         self._requests.clear()
         self._groups.clear()
-        self._retry_queue.clear()
-        self._schedule_queue.clear()
         self.dispatcher.clear()
         self.cancelled_rollouts_count += count
         self.dispatcher.limiter.release(count)
@@ -399,16 +405,22 @@ class TrainScheduler:
             self._requests[task] = request
 
     def _next_request(self) -> RolloutRequest:
-        """Return the next request to schedule: retries first, then queued, then new."""
-        for queue in (self._retry_queue, self._schedule_queue):
-            while queue:
-                request = queue.popleft()
-                if request.group_id in self._groups:
-                    return request
+        """Return the next request: retries first, then remaining work, then new group."""
+        for group in self._groups.values():
+            if group.pending_retries > 0:
+                group.pending_retries -= 1
+                cost = group.rollouts_per_example if group.requires_group_scoring else 1
+                return RolloutRequest(group_id=group.group_id, cost=cost)
+
+        for group in self._groups.values():
+            if group.remaining > 0:
+                group.remaining -= 1
+                return RolloutRequest(group_id=group.group_id, cost=1)
+
         return self._create_new_request()
 
     def _create_new_request(self) -> RolloutRequest:
-        """Sample an example, create a group, and enqueue its requests."""
+        """Sample an example, create a group, and return its first request."""
         example = self.buffer.sample_examples(n=1)[0]
         env = self.train_envs.get(example["env_name"])
         group = RolloutGroup(
@@ -422,12 +434,8 @@ class TrainScheduler:
         if group.requires_group_scoring:
             return RolloutRequest(group_id=group.group_id, cost=group.rollouts_per_example)
 
-        for _ in range(self.rollouts_per_example - 1):
-            self._schedule_queue.append(RolloutRequest(group_id=group.group_id, cost=1))
+        group.remaining -= 1
         return RolloutRequest(group_id=group.group_id, cost=1)
-
-    def _fire(self, group: RolloutGroup, cost: int) -> asyncio.Task:
-        """Create an asyncio task for a rollout request."""
 
     # ------------------------------------------------------------------
     # Completion loop
@@ -478,15 +486,16 @@ class TrainScheduler:
         self._record_rollout_metrics(group, rollouts)
 
         if num_failed:
-            request.failure_count += 1
-            if request.failure_count >= self.max_retries:
+            group.failure_count += num_failed
+            if group.failure_count >= self.max_retries:
                 self._drop_group(group.group_id)
                 return
             if group.requires_group_scoring:
                 group.completed.clear()
+                group.pending_retries += 1
             else:
                 group.completed.extend(valid)
-            self._retry_queue.append(request)
+                group.pending_retries += num_failed
         else:
             group.completed.extend(valid)
 
