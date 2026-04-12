@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import time
 import uuid
 from collections import Counter, defaultdict
@@ -98,21 +99,11 @@ class RolloutGroup:
     client: vf.ClientConfig | None = None
     off_policy_steps: int = 0
     completed: list[vf.RolloutOutput] = field(default_factory=list)
-    remaining: int = -1  # individual rollouts left to schedule (set in __post_init__)
-    pending_retries: int = 0
     failure_count: int = 0
-
-    def __post_init__(self) -> None:
-        if self.remaining < 0:
-            self.remaining = 0 if self.requires_group_scoring else self.rollouts_per_example
 
     @property
     def is_complete(self) -> bool:
         return len(self.completed) >= self.rollouts_per_example
-
-    @property
-    def needs_scheduling(self) -> bool:
-        return self.pending_retries > 0 or self.remaining > 0
 
 
 @dataclass
@@ -242,6 +233,10 @@ class PolicyScheduler:
 # Train scheduler
 # ---------------------------------------------------------------------------
 
+# Heap priorities (lower = scheduled first)
+_PRIORITY_RETRY = 0
+_PRIORITY_NORMAL = 1
+
 
 class TrainScheduler:
     """Always-on scheduler with two background loops: scheduling and completion processing.
@@ -286,6 +281,8 @@ class TrainScheduler:
         # Group + request tracking
         self._groups: dict[str, RolloutGroup] = {}
         self._requests: dict[asyncio.Task, RolloutRequest] = {}
+        self._work_queue: list[tuple[int, int, str, int]] = []  # heap of (priority, seq, group_id, cost)
+        self._work_seq = 0  # tiebreaker for heap ordering (FIFO within same priority)
 
         # Batch accumulation
         self._batch_rollouts: list[vf.RolloutOutput] = []
@@ -341,6 +338,7 @@ class TrainScheduler:
         await safe_cancel_all(all_tasks)
         self._requests.clear()
         self._groups.clear()
+        self._work_queue.clear()
         self.dispatcher.clear()
         self.cancelled_rollouts_count += count
         self.dispatcher.limiter.release(count)
@@ -404,23 +402,21 @@ class TrainScheduler:
             )
             self._requests[task] = request
 
+    def _enqueue(self, group_id: str, cost: int, priority: int = _PRIORITY_NORMAL) -> None:
+        """Push a work item onto the scheduling heap."""
+        heapq.heappush(self._work_queue, (priority, self._work_seq, group_id, cost))
+        self._work_seq += 1
+
     def _next_request(self) -> RolloutRequest:
-        """Return the next request: retries first, then remaining work, then new group."""
-        for group in self._groups.values():
-            if group.pending_retries > 0:
-                group.pending_retries -= 1
-                cost = group.rollouts_per_example if group.requires_group_scoring else 1
-                return RolloutRequest(group_id=group.group_id, cost=cost)
-
-        for group in self._groups.values():
-            if group.remaining > 0:
-                group.remaining -= 1
-                return RolloutRequest(group_id=group.group_id, cost=1)
-
+        """Pop the next request from the heap. Skips dropped groups. Creates new work if empty."""
+        while self._work_queue:
+            _, _, group_id, cost = heapq.heappop(self._work_queue)
+            if group_id in self._groups:
+                return RolloutRequest(group_id=group_id, cost=cost)
         return self._create_new_request()
 
     def _create_new_request(self) -> RolloutRequest:
-        """Sample an example, create a group, and return its first request."""
+        """Sample an example, create a group, enqueue its work, and return the first request."""
         example = self.buffer.sample_examples(n=1)[0]
         env = self.train_envs.get(example["env_name"])
         group = RolloutGroup(
@@ -434,7 +430,9 @@ class TrainScheduler:
         if group.requires_group_scoring:
             return RolloutRequest(group_id=group.group_id, cost=group.rollouts_per_example)
 
-        group.remaining -= 1
+        # Enqueue N-1 items, return first immediately
+        for _ in range(self.rollouts_per_example - 1):
+            self._enqueue(group.group_id, cost=1)
         return RolloutRequest(group_id=group.group_id, cost=1)
 
     # ------------------------------------------------------------------
@@ -492,10 +490,11 @@ class TrainScheduler:
                 return
             if group.requires_group_scoring:
                 group.completed.clear()
-                group.pending_retries += 1
+                self._enqueue(group.group_id, group.rollouts_per_example, _PRIORITY_RETRY)
             else:
                 group.completed.extend(valid)
-                group.pending_retries += num_failed
+                for _ in range(num_failed):
+                    self._enqueue(group.group_id, 1, _PRIORITY_RETRY)
         else:
             group.completed.extend(valid)
 
