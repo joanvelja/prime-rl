@@ -439,12 +439,12 @@ async def orchestrate(config: OrchestratorConfig):
 
         # Enforce async barrier: don't schedule new rollouts until policy is fresh
         if policy_scheduler:
-            await policy_scheduler.wait_for_async_barrier()
-        train_scheduler.resume()
+            await policy_scheduler.wait_for_barrier()
 
         # Wait for the train batch to complete (background loops are always running)
-        train_rollouts = await train_scheduler.wait_for_batch()
-        generate_completions_time = train_scheduler.last_batch_generation_time
+        batch = await train_scheduler.next_batch()
+        train_rollouts = batch.rollouts
+        generate_completions_time = batch.generation_time
 
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
@@ -718,7 +718,7 @@ async def orchestrate(config: OrchestratorConfig):
             )
 
         reward_mean = by_example.reward.mean().mean()
-        off_policy_levels = train_scheduler._off_policy_levels()
+        off_policy_levels = train_scheduler.off_policy_levels()
         max_off_policy = max(off_policy_levels) if off_policy_levels else 0
         async_level = policy_scheduler.async_level if policy_scheduler else 0
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Reward: {reward_mean:.4f} | Seq. Length: {by_example.seq_len.mean().mean():.1f} tokens/sample | Async Level: {async_level} | Max. Off-Policy Level: {max_off_policy}"
