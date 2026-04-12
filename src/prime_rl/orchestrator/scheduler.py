@@ -408,15 +408,16 @@ class TrainScheduler:
         self._work_seq += 1
 
     def _next_request(self) -> RolloutRequest:
-        """Pop the next request from the heap. Skips dropped groups. Creates new work if empty."""
-        while self._work_queue:
+        """Pop the next request from the heap, creating new groups as needed."""
+        while True:
+            if not self._work_queue:
+                self._enqueue_new_group()
             _, _, group_id, cost = heapq.heappop(self._work_queue)
             if group_id in self._groups:
                 return RolloutRequest(group_id=group_id, cost=cost)
-        return self._create_new_request()
 
-    def _create_new_request(self) -> RolloutRequest:
-        """Sample an example, create a group, enqueue its work, and return the first request."""
+    def _enqueue_new_group(self) -> None:
+        """Sample an example, create a group, and enqueue all its work."""
         example = self.buffer.sample_examples(n=1)[0]
         env = self.train_envs.get(example["env_name"])
         group = RolloutGroup(
@@ -428,12 +429,10 @@ class TrainScheduler:
         self._groups[group.group_id] = group
 
         if group.requires_group_scoring:
-            return RolloutRequest(group_id=group.group_id, cost=group.rollouts_per_example)
-
-        # Enqueue N-1 items, return first immediately
-        for _ in range(self.rollouts_per_example - 1):
-            self._enqueue(group.group_id, cost=1)
-        return RolloutRequest(group_id=group.group_id, cost=1)
+            self._enqueue(group.group_id, cost=group.rollouts_per_example)
+        else:
+            for _ in range(self.rollouts_per_example):
+                self._enqueue(group.group_id, cost=1)
 
     # ------------------------------------------------------------------
     # Completion loop
