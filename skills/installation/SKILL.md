@@ -12,6 +12,13 @@ uv sync --group dev  # dev tools: pytest, ruff, pre-commit
 uv sync --all-extras # recommended: includes flash-attn, flash-attn-cute, etc.
 ```
 
+If `uv` is missing on a fresh machine, bootstrap it first:
+
+```bash
+python3 -m pip install uv
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 ## Advanced
 
 ### Mamba-SSM (NemotronH models)
