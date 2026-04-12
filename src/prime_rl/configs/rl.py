@@ -53,7 +53,12 @@ from prime_rl.utils.validation import (
 class SharedLogConfig(BaseConfig):
     """Configures shared logging."""
 
-    level: Annotated[str | None, Field(description="The log level to use.")] = "info"
+    level: Annotated[
+        str | None,
+        Field(
+            description="The log level to use. When unset, the trainer and orchestrator log levels are used as-is (which themselves default to the PRIME_LOG_LEVEL env var if set, else 'info').",
+        ),
+    ] = None
 
     json_logging: Annotated[
         bool,

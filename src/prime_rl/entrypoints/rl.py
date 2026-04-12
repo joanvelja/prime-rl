@@ -100,7 +100,7 @@ def rl_local(config: RLConfig):
     assert config.deployment.type == "single_node"
 
     logger = setup_logger(
-        config.log.level or "info",
+        config.log.level or os.environ.get("PRIME_LOG_LEVEL", "info"),
         json_logging=config.log.json_logging,
     )
 
@@ -479,7 +479,9 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
 def rl_slurm(config: RLConfig):
     assert config.slurm is not None
 
-    logger = setup_logger(config.log.level or "info", json_logging=config.log.json_logging)
+    logger = setup_logger(
+        config.log.level or os.environ.get("PRIME_LOG_LEVEL", "info"), json_logging=config.log.json_logging
+    )
 
     config_dir = config.output_dir / "configs"
     log_dir = get_log_dir(config.output_dir)
