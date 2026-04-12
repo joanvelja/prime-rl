@@ -15,8 +15,9 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.expert_parallel import expert_parallel
 
 from prime_rl.configs.trainer import EPCommBackend
-
-_SELECTIVE_AC_PATCHED_METHODS_ATTR = "_prime_rl_selective_ac_patched_methods"
+from prime_rl.trainer.models.layers.checkpointing import (
+    _PATCHED_METHODS_ATTR as _SELECTIVE_AC_PATCHED_METHODS_ATTR,
+)
 
 
 def _is_selective_ac_patched(module: nn.Module, method_name: str) -> bool:

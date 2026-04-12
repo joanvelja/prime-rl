@@ -5,6 +5,8 @@ from pathlib import Path
 
 import torch
 
+from prime_rl.trainer.models.layers.checkpointing import checkpoint_method
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 MOE_MODULE_PATH = PROJECT_ROOT / "src/prime_rl/trainer/models/layers/moe.py"
@@ -32,6 +34,48 @@ def _fake_grouped_mm(x: torch.Tensor, w: torch.Tensor, offs: torch.Tensor) -> to
 
 def _run_split_directly(func, w1, w2, w3, x, num_tokens_per_expert):
     return func(w1, w2, w3, x, num_tokens_per_expert)
+
+
+def test_checkpoint_method_enables_split_moe_path(monkeypatch) -> None:
+    moe_module = _load_moe_module()
+    counts = torch.tensor([1, 0], dtype=torch.int32)
+    x = torch.randn(1, 4)
+    moe = moe_module.MoE(
+        moe_args=moe_module.MoEArgs(num_experts=2, num_shared_experts=0, use_grouped_mm=True),
+        dim=4,
+        hidden_dim=6,
+    )
+    calls: list[str] = []
+
+    def fail_unsplit_path(*args, **kwargs):
+        raise AssertionError("expected split expert path")
+
+    def fake_fc1(x_in: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        del num_tokens_per_expert
+        calls.append("fc1")
+        return torch.ones((x_in.shape[0], 4), dtype=x_in.dtype, device=x_in.device)
+
+    def fake_moe_act(expert_fc1_output: torch.Tensor) -> torch.Tensor:
+        calls.append("act")
+        return expert_fc1_output[:, :2]
+
+    def fake_fc2(x_in: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        del num_tokens_per_expert
+        calls.append("fc2")
+        return torch.full((x_in.shape[0], x.shape[-1]), 7.0, dtype=x_in.dtype, device=x_in.device)
+
+    monkeypatch.setattr(moe.experts, "forward", fail_unsplit_path)
+    monkeypatch.setattr(moe.experts, "_run_expert_fc1", fake_fc1)
+    monkeypatch.setattr(moe, "_run_moe_act", fake_moe_act)
+    monkeypatch.setattr(moe.experts, "_run_expert_fc2", fake_fc2)
+
+    checkpoint_method(moe, "_run_moe_act")
+    moe.eval()
+
+    actual = moe._run_local_routed_experts(x, counts)
+
+    assert calls == ["fc1", "act", "fc2"]
+    torch.testing.assert_close(actual, torch.full_like(x, 7.0))
 
 
 def test_moe_selective_ac_grouped_mm_restores_input_dtype(monkeypatch) -> None:
