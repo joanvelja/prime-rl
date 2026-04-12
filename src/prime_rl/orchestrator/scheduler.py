@@ -27,6 +27,61 @@ from prime_rl.utils.utils import (
 )
 
 # ---------------------------------------------------------------------------
+# Rollout dispatcher
+# ---------------------------------------------------------------------------
+
+
+class RolloutDispatcher:
+    """Shared rollout dispatch: limiter, client selection, load tracking.
+
+    Both TrainScheduler and EvalScheduler use this for acquiring limiter
+    slots, selecting the least-loaded client, and tracking per-client load.
+    """
+
+    def __init__(self, limiter: RolloutLimiter, inference_pool: InferencePool):
+        self.limiter = limiter
+        self.inference_pool = inference_pool
+        self._client_load: Counter[tuple[str, str | None]] = Counter()
+
+    async def acquire(
+        self, cost: int, client: vf.ClientConfig | None = None, priority: bool = False
+    ) -> vf.ClientConfig:
+        """Acquire limiter slots and return a client.
+
+        If *client* is provided it is reused (for pinning to a group).
+        Otherwise the least-loaded client is selected.
+        """
+        await self.limiter.acquire(cost, priority=priority)
+        if client is None:
+            clients = self.inference_pool.train_clients
+            while not clients:
+                await asyncio.sleep(1)
+                clients = self.inference_pool.train_clients
+            client = min(clients, key=lambda c: self._client_load[client_identity(c)])
+        self._client_load[client_identity(client)] += cost
+        return client
+
+    def release(self, client: vf.ClientConfig, cost: int) -> None:
+        """Release limiter slots and untrack client load."""
+        self._client_load[client_identity(client)] -= cost
+        self.limiter.release(cost)
+
+    def cancel(self, client: vf.ClientConfig | None, cost: int) -> None:
+        """Release slots + untrack load for a cancelled request (client may be None)."""
+        if client is not None:
+            self._client_load[client_identity(client)] -= cost
+        self.limiter.release(cost)
+
+    def clear(self) -> None:
+        """Reset all tracking state."""
+        self._client_load.clear()
+
+    @property
+    def remaining(self) -> float:
+        return self.limiter.remaining
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -195,10 +250,9 @@ class TrainScheduler:
     def __init__(
         self,
         train_envs: TrainEnvs,
-        inference_pool: InferencePool,
+        dispatcher: RolloutDispatcher,
         buffer: Buffer,
         progress: Progress,
-        rollout_limiter: RolloutLimiter,
         batch_size: int | None,
         token_batch_size: int | None,
         rollouts_per_example: int,
@@ -208,10 +262,9 @@ class TrainScheduler:
         json_logging: bool = False,
     ):
         self.train_envs = train_envs
-        self.inference_pool = inference_pool
+        self.dispatcher = dispatcher
         self.buffer = buffer
         self.progress = progress
-        self.limiter = rollout_limiter
         self._uses_token_batching = token_batch_size is not None
         self._batch_target = token_batch_size or batch_size
         self.rollouts_per_example = rollouts_per_example
@@ -225,7 +278,6 @@ class TrainScheduler:
         self._requests: dict[asyncio.Task, RolloutRequest] = {}
         self._retry_queue: deque[RolloutRequest] = deque()
         self._schedule_queue: deque[RolloutRequest] = deque()
-        self._client_load: Counter[tuple[str, str | None]] = Counter()
 
         # Batch accumulation
         self._batch_rollouts: list[vf.RolloutOutput] = []
@@ -283,9 +335,9 @@ class TrainScheduler:
         self._groups.clear()
         self._retry_queue.clear()
         self._schedule_queue.clear()
-        self._client_load.clear()
+        self.dispatcher.clear()
         self.cancelled_rollouts_count += count
-        self.limiter.release(count)
+        self.dispatcher.limiter.release(count)
 
     async def next_batch(self) -> tuple[list[vf.RolloutOutput], float]:
         """Block until the current batch is complete, then return (rollouts, generation_time).
@@ -339,16 +391,12 @@ class TrainScheduler:
             request = self._next_request()
             group = self._groups[request.group_id]
 
-            if group.client is None:
-                group.client = await self._select_least_loaded_client()
-
-            await self.limiter.acquire(request.cost)
+            group.client = await self.dispatcher.acquire(request.cost, client=group.client)
             env = self.train_envs.get(group.env_name)
             task = asyncio.create_task(
                 env.run(client=group.client, example=group.example, model_name=self.model_name, n=request.cost)
             )
             self._requests[task] = request
-            self._client_load[client_identity(group.client)] += request.cost
 
     def _next_request(self) -> RolloutRequest:
         """Return the next request to schedule: retries first, then queued, then new."""
@@ -399,14 +447,12 @@ class TrainScheduler:
                 if request is None:
                     continue  # already removed by _drop_group
 
-                self.limiter.release(request.cost)
-
                 group = self._groups.get(request.group_id)
                 if group is None:
+                    self.dispatcher.limiter.release(request.cost)
                     continue
 
-                if group.client is not None:
-                    self._client_load[client_identity(group.client)] -= request.cost
+                self.dispatcher.release(group.client, request.cost)
 
                 try:
                     result = task.result()
@@ -498,23 +544,13 @@ class TrainScheduler:
                 self._requests.pop(task)
 
         if count:
-            if group is not None and group.client is not None:
-                self._client_load[client_identity(group.client)] -= count
-            self.limiter.release(count)
+            self.dispatcher.cancel(group.client if group else None, count)
             self.cancelled_rollouts_count += count
 
         for task in tasks_to_cancel:
             task.cancel()
 
         return count
-
-    async def _select_least_loaded_client(self) -> vf.ClientConfig:
-        """Select the client with the fewest in-flight requests."""
-        clients = self.inference_pool.train_clients
-        while not clients:
-            await asyncio.sleep(1)
-            clients = self.inference_pool.train_clients
-        return min(clients, key=lambda c: self._client_load[client_identity(c)])
 
     def on_weights_updated(self) -> None:
         """Called after a weight update: increment off-policy steps and drop stale groups."""
@@ -545,8 +581,8 @@ class TrainScheduler:
         total_rollouts = sum(self.total_rollouts_by_env.values())
         metrics = {
             "scheduler/inflight_rollouts": self.num_inflight_rollouts,
-            "scheduler/limiter_used": self.limiter.concurrency.used,
-            "scheduler/limiter_remaining": self.limiter.remaining,
+            "scheduler/limiter_used": self.dispatcher.limiter.concurrency.used,
+            "scheduler/limiter_remaining": self.dispatcher.remaining,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
             "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
             "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
@@ -568,7 +604,7 @@ class TrainScheduler:
         self.errored_rollouts_by_env.clear()
         self.total_rollouts_by_env.clear()
 
-        metrics.update(self.inference_pool.get_metrics())
+        metrics.update(self.dispatcher.inference_pool.get_metrics())
         return metrics
 
 
@@ -589,16 +625,11 @@ class EvalResult:
 
 
 class EvalScheduler:
-    """Schedules eval rollouts with shared concurrency and rate limiting."""
+    """Schedules eval rollouts through the shared RolloutDispatcher."""
 
-    def __init__(
-        self,
-        rollout_limiter: RolloutLimiter,
-        inference_pool: InferencePool,
-    ):
+    def __init__(self, dispatcher: RolloutDispatcher):
         self.logger = get_logger()
-        self.limiter = rollout_limiter
-        self.inference_pool = inference_pool
+        self.dispatcher = dispatcher
 
     async def evaluate_envs(
         self,
@@ -630,9 +661,8 @@ class EvalScheduler:
         eval_start = time.perf_counter()
 
         async def run_one(example: dict, n: int) -> list[vf.RolloutOutput] | None:
-            await self.limiter.acquire(cost, priority=True)
+            client = await self.dispatcher.acquire(cost, priority=True)
             try:
-                client = await self.inference_pool.get_eval_client()
                 outputs = await eval_env.run(client=client, example=example, model_name=model_name, n=n)
                 pbar.update(n)
                 return outputs
@@ -641,7 +671,7 @@ class EvalScheduler:
                 pbar.update(n)
                 return None
             finally:
-                self.limiter.release(cost)
+                self.dispatcher.release(client, cost)
 
         if eval_env.requires_group_scoring:
             coros = [run_one(example, rollouts_per_example) for example in eval_env.examples]

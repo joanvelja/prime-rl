@@ -38,7 +38,7 @@ from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
-from prime_rl.orchestrator.scheduler import EvalScheduler, PolicyScheduler, TrainScheduler
+from prime_rl.orchestrator.scheduler import EvalScheduler, PolicyScheduler, RolloutDispatcher, TrainScheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
     get_weight_dir,
@@ -219,12 +219,13 @@ async def orchestrate(config: OrchestratorConfig):
         max_rollouts_per_minute=config.max_rollouts_per_minute,
     )
 
+    dispatcher = RolloutDispatcher(limiter=rollout_limiter, inference_pool=inference_pool)
+
     train_scheduler = TrainScheduler(
         train_envs=train_envs,
-        inference_pool=inference_pool,
+        dispatcher=dispatcher,
         buffer=buffer,
         progress=progress,
-        rollout_limiter=rollout_limiter,
         batch_size=config.batch_size,
         token_batch_size=config.token_batch_size,
         rollouts_per_example=config.rollouts_per_example,
@@ -247,10 +248,7 @@ async def orchestrate(config: OrchestratorConfig):
         )
 
     if eval_envs is not None:
-        eval_scheduler = EvalScheduler(
-            rollout_limiter=rollout_limiter,
-            inference_pool=inference_pool,
-        )
+        eval_scheduler = EvalScheduler(dispatcher=dispatcher)
 
     # Get checkpoint manager
     logger.info(f"Initializing checkpoint manager ({config.ckpt})")

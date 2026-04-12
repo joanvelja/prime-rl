@@ -4,20 +4,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from prime_rl.orchestrator.ckpt import Progress
 from prime_rl.orchestrator.concurrency import ConcurrencyLimiter, RolloutLimiter
-from prime_rl.orchestrator.scheduler import PolicyScheduler, RolloutGroup, RolloutRequest, TrainScheduler
+from prime_rl.orchestrator.scheduler import (
+    PolicyScheduler,
+    RolloutDispatcher,
+    RolloutGroup,
+    RolloutRequest,
+    TrainScheduler,
+)
+
+
+def _make_dispatcher() -> RolloutDispatcher:
+    return RolloutDispatcher(limiter=RolloutLimiter(128), inference_pool=MagicMock())
 
 
 def _make_train_scheduler() -> TrainScheduler:
     """Create a minimal TrainScheduler for testing (no __init__)."""
     scheduler = TrainScheduler.__new__(TrainScheduler)
-    scheduler.limiter = RolloutLimiter(128)
-    scheduler._batch_gate = asyncio.Event()
-    scheduler._batch_gate.set()
+    scheduler.dispatcher = _make_dispatcher()
     scheduler._policy_gate = asyncio.Event()
     scheduler._policy_gate.set()
     scheduler._groups = {}
     scheduler._requests = {}
-    scheduler._retry_queue = asyncio.deque() if hasattr(asyncio, "deque") else __import__("collections").deque()
+    scheduler._retry_queue = __import__("collections").deque()
     scheduler._schedule_queue = __import__("collections").deque()
     scheduler.max_off_policy_steps = 2
     scheduler.max_retries = 3
@@ -79,7 +87,7 @@ def test_drop_stale_groups():
             stale_task: RolloutRequest(group_id=stale_group.group_id, cost=1),
             survivor_task: RolloutRequest(group_id=survivor_group.group_id, cost=1),
         }
-        scheduler.limiter.concurrency.try_acquire(2)
+        scheduler.dispatcher.limiter.concurrency.try_acquire(2)
 
         scheduler.on_weights_updated()
 
