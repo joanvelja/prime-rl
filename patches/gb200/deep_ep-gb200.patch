@@ -1,0 +1,28 @@
+diff --git a/csrc/kernels/configs.cuh b/csrc/kernels/configs.cuh
+index e3bf650..64f0d38 100644
+--- a/csrc/kernels/configs.cuh
++++ b/csrc/kernels/configs.cuh
+@@ -8,8 +8,8 @@
+ #define NUM_WAIT_NANOSECONDS 500
+ 
+ #ifndef ENABLE_FAST_DEBUG
+-#define NUM_CPU_TIMEOUT_SECS 100
+-#define NUM_TIMEOUT_CYCLES 200000000000ull  // 200G cycles ~= 100s
++#define NUM_CPU_TIMEOUT_SECS 10000
++#define NUM_TIMEOUT_CYCLES 20000000000000ull  // 20T cycles ~= 10000s
+ #else
+ #define NUM_CPU_TIMEOUT_SECS 10
+ #define NUM_TIMEOUT_CYCLES 20000000000ull  // 20G cycles ~= 10s
+diff --git a/deep_ep/buffer.py b/deep_ep/buffer.py
+index 6039ee6..8187f76 100644
+--- a/deep_ep/buffer.py
++++ b/deep_ep/buffer.py
+@@ -34,7 +34,7 @@ class Buffer:
+                  num_qps_per_rank: int = 24,
+                  allow_nvlink_for_low_latency_mode: bool = True,
+                  allow_mnnvl: bool = False,
+-                 use_fabric: bool = False,
++                 use_fabric: bool = True,
+                  explicitly_destroy: bool = False,
+                  enable_shrink: bool = False,
+                  comm: Optional["mpi4py.MPI.Comm"] = None) -> None:  # noqa: F821

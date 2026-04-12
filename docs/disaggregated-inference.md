@@ -10,6 +10,8 @@ See [`configs/glm5_disagg_inference/inference.toml`](../configs/glm5_disagg_infe
 uv run inference @ configs/glm5_disagg_inference/inference.toml --output-dir /data/$USER/outputs
 ```
 
+For the production GB200 container build and published wheel flow, see [`gb200-images.md`](./gb200-images.md).
+
 ## Prefill/Decode Ratio
 
 | Workload | Recommended ratio (P:D) | Why |

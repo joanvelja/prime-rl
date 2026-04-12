@@ -1,0 +1,77 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_TOOLKIT_VERSION=12.8.1
+ARG CUDA_RUN_FILENAME=cuda_12.8.1_570.124.06
+ARG TORCH_CUDA_ARCH_LIST=10.0
+ARG VLLM_VERSION=0.19.0
+ARG DEEPGEMM_COMMIT=477618c
+ARG DEEPEP_COMMIT=9249c25
+ARG UCX_VERSION=v1.19.x
+ARG NVSHMEM_VERSION=3.3.24
+ARG NIXL_GIT_REF=v1.0.0
+ARG NIXL_PYTHON_VERSION=0.10.1
+ARG PATCHSET_REV=gb200.1
+ARG RELEASE_VERSION=dev
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    ibverbs-providers \
+    libibverbs-dev \
+    libnuma-dev \
+    librdmacm-dev \
+    libtool \
+    ninja-build \
+    patch \
+    pkg-config \
+    rdma-core \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH="$(uname -m)" \
+    && case "${ARCH}" in \
+        x86_64) SUFFIX=linux ;; \
+        aarch64) SUFFIX=linux_sbsa ;; \
+        *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://developer.download.nvidia.com/compute/cuda/${CUDA_TOOLKIT_VERSION}/local_installers/${CUDA_RUN_FILENAME}_${SUFFIX}.run" -o /tmp/cuda.run \
+    && chmod +x /tmp/cuda.run \
+    && /tmp/cuda.run --toolkit --silent --toolkitpath=/usr/local/cuda-12.8 --no-man-page --no-opengl-libs \
+    && rm -f /tmp/cuda.run
+
+ENV VIRTUAL_ENV=/app/.venv
+ENV CUDA_HOME=/usr/local/cuda-12.8
+ENV PATH=/app/.venv/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+ENV ARTIFACT_DIR=/out
+ENV WORKDIR_ROOT=/tmp/gb200-build
+ENV PYTHON_BIN=python
+ENV VLLM_VERSION=${VLLM_VERSION}
+ENV DEEPGEMM_COMMIT=${DEEPGEMM_COMMIT}
+ENV DEEPEP_COMMIT=${DEEPEP_COMMIT}
+ENV UCX_VERSION=${UCX_VERSION}
+ENV NVSHMEM_VERSION=${NVSHMEM_VERSION}
+ENV NIXL_GIT_REF=${NIXL_GIT_REF}
+ENV NIXL_PYTHON_VERSION=${NIXL_PYTHON_VERSION}
+ENV PATCHSET_REV=${PATCHSET_REV}
+ENV RELEASE_VERSION=${RELEASE_VERSION}
+
+COPY patches/gb200 /app/patches/gb200
+COPY scripts/gb200 /app/scripts/gb200
+
+RUN python /app/scripts/gb200/patch_cuda_math_header.py /usr/local/cuda-12.8/include/crt/math_functions.h \
+    && chmod +x /app/scripts/gb200/*.sh \
+    && /app/scripts/gb200/build-wheelhouse.sh
+
+FROM scratch AS export
+COPY --from=0 /out/ /

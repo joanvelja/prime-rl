@@ -1,0 +1,267 @@
+name: Release GB200 Images
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: false
+        default: "main"
+        type: string
+      release_tag:
+        description: "Release tag / asset namespace to publish"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  BASE_IMAGE_REPO: ghcr.io/primeintellect-ai/pi-rft/prime-rl
+  RUNTIME_IMAGE_REPO: ghcr.io/primeintellect-ai/pi-rft/prime-rl-gb200-runtime
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.vars.outputs.source_ref }}
+      release_tag: ${{ steps.vars.outputs.release_tag }}
+      base_image: ${{ steps.vars.outputs.base_image }}
+      runtime_image: ${{ steps.vars.outputs.runtime_image }}
+      final_image: ${{ steps.vars.outputs.final_image }}
+      wheel_base_url: ${{ steps.vars.outputs.wheel_base_url }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+    steps:
+      - name: Resolve versioning
+        id: vars
+        env:
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            SOURCE_REF="${GITHUB_REF_NAME}"
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            PRERELEASE="false"
+          else
+            SOURCE_REF="${INPUT_REF:-main}"
+            RELEASE_TAG="${INPUT_RELEASE_TAG:-manual-${GITHUB_SHA::12}}"
+            PRERELEASE="true"
+          fi
+
+          echo "source_ref=${SOURCE_REF}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "base_image=${BASE_IMAGE_REPO}:${RELEASE_TAG}-arm64" >> "$GITHUB_OUTPUT"
+          echo "runtime_image=${RUNTIME_IMAGE_REPO}:${RELEASE_TAG}-arm64" >> "$GITHUB_OUTPUT"
+          echo "final_image=${BASE_IMAGE_REPO}:${RELEASE_TAG}-gb200-arm64" >> "$GITHUB_OUTPUT"
+          echo "wheel_base_url=https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+  create-release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          target_commitish: ${{ needs.prepare.outputs.source_ref }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            GB200 release artifacts for `${{ needs.prepare.outputs.release_tag }}`.
+
+            Included:
+            - GB200 native runtime base image (`UCX`, `NVSHMEM`)
+            - DeepEP, DeepGEMM, NIXL wheels
+            - Final `prime-rl:<tag>-gb200-arm64` image
+
+            Intentionally omitted for now:
+            - baked `vllm/distributed/device_communicators/all2all.py` HT/MNNVL override
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-base-image:
+    needs: prepare
+    runs-on: image-builder-arm-2204
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push arm64 base image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --file Dockerfile.cuda \
+            --tag "${{ needs.prepare.outputs.base_image }}" \
+            --push \
+            .
+
+  build-runtime-image:
+    needs: prepare
+    runs-on: image-builder-arm-2204
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push GB200 runtime image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --file Dockerfile.gb200-runtime \
+            --tag "${{ needs.prepare.outputs.runtime_image }}" \
+            --push \
+            .
+
+  build-wheelhouse:
+    needs: [prepare, build-base-image]
+    runs-on: image-builder-arm-2204
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wheelhouse locally
+        run: |
+          rm -rf dist/gb200
+          mkdir -p dist/gb200
+          docker buildx build \
+            --platform linux/arm64 \
+            --file Dockerfile.gb200-wheels \
+            --build-arg BASE_IMAGE="${{ needs.prepare.outputs.base_image }}" \
+            --build-arg RELEASE_VERSION="${{ needs.prepare.outputs.release_tag }}" \
+            --output "type=local,dest=dist/gb200" \
+            .
+
+      - name: Upload wheelhouse artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb200-wheelhouse
+          path: dist/gb200
+          if-no-files-found: error
+
+  publish-wheel-assets:
+    needs: [prepare, create-release, build-wheelhouse]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download wheelhouse artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gb200-wheelhouse
+          path: dist/gb200
+
+      - name: Upload wheelhouse to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          files: dist/gb200/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-final-image:
+    needs: [prepare, build-base-image, build-runtime-image, publish-wheel-assets]
+    runs-on: image-builder-arm-2204
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_ref }}
+
+      - name: Download wheelhouse manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: gb200-wheelhouse
+          path: dist/gb200
+
+      - name: Resolve wheel filenames
+        id: wheels
+        run: |
+          MANIFEST="dist/gb200/gb200-release-manifest.json"
+          python3 -c "import json, sys; manifest=json.load(open(sys.argv[1], 'r', encoding='utf-8')); out=open(sys.argv[2], 'a', encoding='utf-8'); out.write('deep_gemm=' + manifest['wheels']['deep_gemm']['file'] + '\n'); out.write('deep_ep=' + manifest['wheels']['deep_ep']['file'] + '\n'); out.write('nixl=' + manifest['wheels']['nixl']['file'] + '\n'); out.write('nixl_cu12=' + manifest['wheels']['nixl_cu12']['file'] + '\n'); out.close()" "$MANIFEST" "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push final GB200 image
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --file Dockerfile.gb200 \
+            --build-arg BASE_IMAGE="${{ needs.prepare.outputs.base_image }}" \
+            --build-arg GB200_RUNTIME_IMAGE="${{ needs.prepare.outputs.runtime_image }}" \
+            --build-arg WHEEL_BASE_URL="${{ needs.prepare.outputs.wheel_base_url }}" \
+            --build-arg DEEP_GEMM_WHEEL="${{ steps.wheels.outputs.deep_gemm }}" \
+            --build-arg DEEP_EP_WHEEL="${{ steps.wheels.outputs.deep_ep }}" \
+            --build-arg NIXL_WHEEL="${{ steps.wheels.outputs.nixl }}" \
+            --build-arg NIXL_CU12_WHEEL="${{ steps.wheels.outputs.nixl_cu12 }}" \
+            --tag "${{ needs.prepare.outputs.final_image }}" \
+            --tag "${{ env.BASE_IMAGE_REPO }}:${{ needs.prepare.outputs.release_tag }}-gb200" \
+            --push \
+            .
+
+      - name: Smoke test final image
+        run: |
+          docker pull "${{ needs.prepare.outputs.final_image }}"
+          docker run --rm --entrypoint bash "${{ needs.prepare.outputs.final_image }}" -lc '
+            python -c "import deep_ep, deep_gemm, nixl, prime_rl; print(deep_ep.__file__); print(deep_gemm.__file__); print(nixl.__file__)"
+            test -d /opt/ucx
+            test -d /opt/nvshmem
+          '

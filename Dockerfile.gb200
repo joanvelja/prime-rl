@@ -1,0 +1,59 @@
+ARG BASE_IMAGE
+ARG GB200_RUNTIME_IMAGE
+
+FROM ${GB200_RUNTIME_IMAGE} AS gb200-runtime
+FROM ${BASE_IMAGE}
+
+USER root
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG WHEEL_AUTH_TOKEN
+ARG DEEP_GEMM_WHEEL
+ARG DEEP_EP_WHEEL
+ARG NIXL_WHEEL
+ARG NIXL_CU12_WHEEL
+ARG DEEP_GEMM_WHEEL_URL
+ARG DEEP_EP_WHEEL_URL
+ARG NIXL_WHEEL_URL
+ARG NIXL_CU12_WHEEL_URL
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ibverbs-providers \
+    libibverbs1 \
+    libnuma1 \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gb200-runtime /opt/ucx /opt/ucx
+COPY --from=gb200-runtime /opt/nvshmem /opt/nvshmem
+
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH=/app/.venv/bin:/opt/ucx/bin:/usr/local/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:/opt/ucx/lib/ucx:/opt/nvshmem/lib
+ENV NVSHMEM_DIR=/opt/nvshmem
+ENV UCX_HOME=/opt/ucx
+
+RUN mkdir -p /tmp/wheels \
+    && fetch_wheel() { \
+        url="$1"; \
+        out="$2"; \
+        if [ -n "${WHEEL_AUTH_TOKEN}" ]; then \
+            curl -fsSL -H "Authorization: Bearer ${WHEEL_AUTH_TOKEN}" -H "Accept: application/octet-stream" "$url" -o "/tmp/wheels/$out"; \
+        else \
+            curl -fsSL "$url" -o "/tmp/wheels/$out"; \
+        fi; \
+    } \
+    && fetch_wheel "${DEEP_GEMM_WHEEL_URL}" "${DEEP_GEMM_WHEEL}" \
+    && fetch_wheel "${DEEP_EP_WHEEL_URL}" "${DEEP_EP_WHEEL}" \
+    && fetch_wheel "${NIXL_WHEEL_URL}" "${NIXL_WHEEL}" \
+    && fetch_wheel "${NIXL_CU12_WHEEL_URL}" "${NIXL_CU12_WHEEL}" \
+    && uv pip install --no-deps --force-reinstall \
+        "/tmp/wheels/${DEEP_GEMM_WHEEL}" \
+        "/tmp/wheels/${DEEP_EP_WHEEL}" \
+        "/tmp/wheels/${NIXL_WHEEL}" \
+        "/tmp/wheels/${NIXL_CU12_WHEEL}" \
+    && rm -rf /tmp/wheels
+
+USER appuser

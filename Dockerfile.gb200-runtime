@@ -1,0 +1,93 @@
+FROM python:3.12-slim AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_TOOLKIT_VERSION=12.8.1
+ARG CUDA_RUN_FILENAME=cuda_12.8.1_570.124.06
+ARG UCX_VERSION=v1.19.x
+ARG NVSHMEM_VERSION=3.3.24
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    libibverbs-dev \
+    libnuma-dev \
+    libxml2 \
+    librdmacm-dev \
+    libtool \
+    pkg-config \
+    rdma-core \
+    ibverbs-providers \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH="$(uname -m)" \
+    && case "${ARCH}" in \
+        x86_64) SUFFIX=linux ;; \
+        aarch64) SUFFIX=linux_sbsa ;; \
+        *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://developer.download.nvidia.com/compute/cuda/${CUDA_TOOLKIT_VERSION}/local_installers/${CUDA_RUN_FILENAME}_${SUFFIX}.run" -o /tmp/cuda.run \
+    && chmod +x /tmp/cuda.run \
+    && /tmp/cuda.run --toolkit --silent --toolkitpath=/usr/local/cuda-12.8 --no-man-page --no-opengl-libs \
+    && rm -f /tmp/cuda.run
+
+COPY scripts/gb200/patch_cuda_math_header.py /tmp/patch_cuda_math_header.py
+RUN python3 /tmp/patch_cuda_math_header.py /usr/local/cuda-12.8/include/crt/math_functions.h \
+    && rm -f /tmp/patch_cuda_math_header.py
+
+ENV CUDA_HOME=/usr/local/cuda-12.8
+
+RUN git clone https://github.com/openucx/ucx.git /tmp/ucx \
+    && cd /tmp/ucx \
+    && git checkout "${UCX_VERSION}" \
+    && ./autogen.sh \
+    && ./configure \
+        --prefix=/opt/ucx \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --enable-mt \
+        --with-verbs \
+        --with-cuda="${CUDA_HOME}" \
+        --with-ze=no \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/ucx
+
+RUN ARCH="$(uname -m)" \
+    && case "${ARCH}" in \
+        x86_64) NVSHMEM_SUBDIR=linux-x86_64 ;; \
+        aarch64) NVSHMEM_SUBDIR=linux-sbsa ;; \
+        *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && NVSHMEM_FILE="libnvshmem-${NVSHMEM_SUBDIR}-${NVSHMEM_VERSION}_cuda12-archive.tar.xz" \
+    && curl -fsSL "https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/${NVSHMEM_SUBDIR}/${NVSHMEM_FILE}" -o /tmp/nvshmem.tar.xz \
+    && mkdir -p /opt/nvshmem \
+    && tar -xf /tmp/nvshmem.tar.xz -C /tmp \
+    && mv "/tmp/${NVSHMEM_FILE%.tar.xz}"/* /opt/nvshmem/ \
+    && rm -rf /tmp/nvshmem.tar.xz "/tmp/${NVSHMEM_FILE%.tar.xz}"
+
+FROM python:3.12-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ibverbs-providers \
+    libibverbs1 \
+    libnuma1 \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/ucx /opt/ucx
+COPY --from=builder /opt/nvshmem /opt/nvshmem
+
+ENV PATH=/opt/ucx/bin:${PATH}
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:/opt/ucx/lib/ucx:/opt/nvshmem/lib
+ENV NVSHMEM_DIR=/opt/nvshmem
