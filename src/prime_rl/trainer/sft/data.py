@@ -205,14 +205,18 @@ class SFTDataset(StatefulIterableDataset):
                 case _:
                     raise ValueError(f"Invalid message role: {message['role']}")
 
-        input_ids, loss_mask = build_incremental_token_mask(
-            self.tokenizer,
-            messages,
-            role_to_mask=should_mask,
-            tools=tools,
-            chat_template_kwargs=example.get("chat_template_kwargs", {}),
-            collapse_consecutive_tool_messages=True,
-        )
+        try:
+            input_ids, loss_mask = build_incremental_token_mask(
+                self.tokenizer,
+                messages,
+                role_to_mask=should_mask,
+                tools=tools,
+                chat_template_kwargs=example.get("chat_template_kwargs", {}),
+                collapse_consecutive_tool_messages=True,
+            )
+        except ValueError as e:
+            self.logger.warning(f"Skipping example {example.get('__index', '')}: {e}")
+            return None
 
         # If EOS token is not found, manually append it
         if not self.tokenizer.eos_token_id in input_ids:

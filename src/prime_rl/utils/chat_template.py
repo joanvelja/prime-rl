@@ -130,7 +130,12 @@ def build_incremental_token_mask(
             processor=processor,
         )
 
-        assert prev_ids == cur_ids[:prev_len], "Mismatch in incremental tokenization with chat template."
+        if prev_ids != cur_ids[:prev_len]:
+            raise ValueError(
+                f"Mismatch in incremental tokenization with chat template at message {idx} (role={role}). "
+                "This usually means the chat template is not stable under incremental application. "
+                "The sample will be skipped."
+            )
 
         token_mask.extend([role_to_mask(message)] * (len(cur_ids) - prev_len))
         prev_ids = cur_ids
