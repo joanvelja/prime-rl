@@ -280,7 +280,7 @@ def _run_experts_fc2_grouped_mm_impl(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     assert x.dim() == 2
 
-    return torch._grouped_mm(x, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+    return torch._grouped_mm(x, w2.bfloat16().transpose(-2, -1), offs=offsets)
 
 
 class GroupedExperts(nn.Module):
@@ -563,9 +563,10 @@ class MoE(nn.Module):
         if not _is_selective_ac_patched(self, "_run_moe_act"):
             return self.experts(x, num_tokens_per_expert)
 
+        expert_input_dtype = x.dtype
         expert_fc1_output = self.experts._run_expert_fc1(x, num_tokens_per_expert)
         activated_output = self._run_moe_act(expert_fc1_output)
-        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert)
+        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert).to(expert_input_dtype)
 
     def _run_routed_experts(
         self,
@@ -1067,9 +1068,10 @@ class LatentMoE(nn.Module):
         if not _is_selective_ac_patched(self, "_run_moe_act"):
             return self.experts(x, num_tokens_per_expert)
 
+        expert_input_dtype = x.dtype
         expert_fc1_output = self.experts._run_expert_fc1(x, num_tokens_per_expert)
         activated_output = self._run_moe_act(expert_fc1_output)
-        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert)
+        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert).to(expert_input_dtype)
 
     def _run_routed_experts(
         self,
