@@ -42,6 +42,7 @@ def _make_policy_scheduler(train_scheduler: TrainScheduler) -> PolicyScheduler:
     ps.async_barrier_clear = asyncio.Event()
     ps.async_barrier_clear.set()
     ps.max_async_level = 1
+    ps.strict_async_level = False
     ps.progress = Progress(step=9)
     train_scheduler.progress = Progress(step=9)
     return ps

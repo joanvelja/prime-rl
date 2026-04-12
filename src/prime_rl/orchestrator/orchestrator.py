@@ -242,6 +242,7 @@ async def orchestrate(config: OrchestratorConfig):
             progress=progress,
             output_dir=config.output_dir,
             max_async_level=config.max_async_level,
+            strict_async_level=config.strict_async_level,
             lora_name=config.model.lora.name if config.model.lora else None,
         )
 

@@ -77,6 +77,7 @@ class PolicyScheduler:
         progress: Progress,
         output_dir: Path,
         max_async_level: int,
+        strict_async_level: bool = False,
         lora_name: str | None = None,
     ):
         self.train_scheduler = train_scheduler
@@ -84,6 +85,7 @@ class PolicyScheduler:
         self.progress = progress
         self.output_dir = output_dir
         self.max_async_level = max_async_level
+        self.strict_async_level = strict_async_level
         self.lora_name = lora_name
 
         self.ckpt_step = 0
@@ -103,13 +105,18 @@ class PolicyScheduler:
     def _next_ckpt_step(self) -> int:
         """Compute the next checkpoint step to update to.
 
-        Returns the maximum of the latest available checkpoint and the
-        minimum required to stay within ``max_async_level``. When the
-        orchestrator is far ahead, this may return a step whose checkpoint
-        hasn't been written yet — the caller must wait for it.
+        In strict mode, always returns exactly ``step - max_async_level``
+        (ignoring newer checkpoints). In non-strict mode, returns the
+        maximum of that and the latest available checkpoint — using the
+        freshest weights possible.
+
+        Either way, the returned step may not exist yet. The caller must
+        wait for it.
         """
-        latest = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
         min_required = max(self.progress.step - self.max_async_level, 0)
+        if self.strict_async_level:
+            return min_required
+        latest = get_latest_ckpt_step(get_broadcast_dir(self.output_dir)) or 0
         return max(min_required, latest)
 
     async def start(self) -> None:
