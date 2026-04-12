@@ -5,14 +5,59 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import torch
 import torch.nn.functional as F
+import torchtitan.distributed.expert_parallel as torchtitan_expert_parallel
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torchtitan.distributed.expert_parallel import expert_parallel
 
 from prime_rl.configs.trainer import EPCommBackend
+
+_SELECTIVE_AC_PATCHED_METHODS_ATTR = "_prime_rl_selective_ac_patched_methods"
+
+
+def _is_selective_ac_patched(module: nn.Module, method_name: str) -> bool:
+    return method_name in getattr(module, _SELECTIVE_AC_PATCHED_METHODS_ATTR, ())
+
+
+def _run_split_expert_parallel(
+    func: Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(w1, DTensor):
+        w1 = w1.to_local()
+        w2 = w2.to_local()
+        w3 = w3.to_local()
+
+    from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+
+    experts_per_ep_rank = w1.shape[0]
+    num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
+
+    with torch.no_grad():
+        permuted_indices, num_tokens_per_expert, _ = generate_permute_indices(
+            num_tokens_per_expert,
+            experts_per_ep_rank,
+            num_ep_ranks,
+            x.shape[0] + experts_per_ep_rank * torchtitan_expert_parallel.TOKEN_GROUP_ALIGN_SIZE_M,
+            torchtitan_expert_parallel.TOKEN_GROUP_ALIGN_SIZE_M,
+        )
+
+    x = torch.vstack((x, x.new_zeros((1, x.shape[-1]))))
+    padded_tokens = x.shape[0]
+    x = x[permuted_indices, :]
+
+    out = func(w1, w2, w3, x, num_tokens_per_expert)
+    out_unpermuted = out.new_empty((padded_tokens, out.shape[-1]))
+    out_unpermuted[permuted_indices, :] = out
+    return out_unpermuted[:-1]
 
 
 @dataclass
@@ -162,6 +207,82 @@ def _run_experts_grouped_mm_impl(
     return out
 
 
+def _run_experts_fc1_for_loop_impl(
+    w1: torch.Tensor,
+    _w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    num_tokens_per_expert = num_tokens_per_expert.tolist()
+    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+    x = torch.split(
+        x[: sum(num_tokens_per_expert)],
+        split_size_or_sections=num_tokens_per_expert,
+        dim=0,
+    )
+    out_experts_splits = []
+    for expert_idx, x_expert in enumerate(x):
+        gate_output = torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1))
+        up_output = torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
+        out_experts_splits.append(torch.cat((gate_output, up_output), dim=-1))
+    out = torch.cat(out_experts_splits, dim=0)
+    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    return out
+
+
+def _run_experts_fc1_grouped_mm_impl(
+    w1: torch.Tensor,
+    _w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    assert x.dim() == 2
+
+    gate_output = torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+    up_output = torch._grouped_mm(x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets)
+    return torch.cat((gate_output, up_output), dim=-1)
+
+
+def _run_experts_fc2_for_loop_impl(
+    _w1: torch.Tensor,
+    w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    num_tokens_per_expert = num_tokens_per_expert.tolist()
+    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+    x = torch.split(
+        x[: sum(num_tokens_per_expert)],
+        split_size_or_sections=num_tokens_per_expert,
+        dim=0,
+    )
+    out_experts_splits = []
+    for expert_idx, x_expert in enumerate(x):
+        out_experts_splits.append(torch.matmul(x_expert, w2[expert_idx].transpose(-2, -1)))
+    out = torch.cat(out_experts_splits, dim=0)
+    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    return out
+
+
+def _run_experts_fc2_grouped_mm_impl(
+    _w1: torch.Tensor,
+    w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    assert x.dim() == 2
+
+    return torch._grouped_mm(x, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+
+
 class GroupedExperts(nn.Module):
     def __init__(
         self,
@@ -188,6 +309,18 @@ class GroupedExperts(nn.Module):
         if self.use_grouped_mm:
             return _run_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
         return _run_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
+
+    def _run_expert_fc1(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        func = _run_experts_fc1_grouped_mm_impl if self.use_grouped_mm else _run_experts_fc1_for_loop_impl
+        if self.ep_comm_backend == "deepep":
+            return func(self.w1.to_local(), self.w2.to_local(), self.w3.to_local(), x, num_tokens_per_expert)
+        return _run_split_expert_parallel(func, self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+
+    def _run_expert_fc2(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        func = _run_experts_fc2_grouped_mm_impl if self.use_grouped_mm else _run_experts_fc2_for_loop_impl
+        if self.ep_comm_backend == "deepep":
+            return func(self.w1.to_local(), self.w2.to_local(), self.w3.to_local(), x, num_tokens_per_expert)
+        return _run_split_expert_parallel(func, self.w1, self.w2, self.w3, x, num_tokens_per_expert)
 
     def forward(
         self,
@@ -290,12 +423,10 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices.reshape(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+            minlength=self.num_experts,
+        ).to(torch.int32)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -342,12 +473,10 @@ class TokenReorderer(nn.Module):
         """
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         selected_experts_indices = selected_experts_indices.reshape(-1)
-        num_tokens_per_expert = torch.histc(
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices,
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+            minlength=self.num_experts,
+        ).to(torch.int32)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
@@ -422,12 +551,21 @@ class MoE(nn.Module):
     def set_deepep_token_chunk_size(self, chunk_size: int | None) -> None:
         self.deepep_token_chunk_size = chunk_size
 
+    def _run_moe_act(self, expert_fc1_output: torch.Tensor) -> torch.Tensor:
+        gate_output, up_output = expert_fc1_output.chunk(2, dim=-1)
+        return F.silu(gate_output) * up_output
+
     def _run_local_routed_experts(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        return self.experts(x, num_tokens_per_expert)
+        if not _is_selective_ac_patched(self, "_run_moe_act"):
+            return self.experts(x, num_tokens_per_expert)
+
+        expert_fc1_output = self.experts._run_expert_fc1(x, num_tokens_per_expert)
+        activated_output = self._run_moe_act(expert_fc1_output)
+        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert)
 
     def _run_routed_experts(
         self,
@@ -443,7 +581,10 @@ class MoE(nn.Module):
         if self.score_before_experts:
             routed_input = (routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
 
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
+        if _is_selective_ac_patched(self, "_run_moe_act"):
+            routed_output = self._run_local_routed_experts(routed_input, num_tokens_per_expert)
+        else:
+            routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         if not self.score_before_experts:
             routed_output = (routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
@@ -484,8 +625,8 @@ class MoE(nn.Module):
         def run_pending_chunk(pending_state):
             hidden_states, num_tokens_per_expert, dispatch_state = finalize_dispatch_tokens(pending_state)
             routed_output = self._run_local_routed_experts(hidden_states, num_tokens_per_expert)
-            # Keep combine outside the checkpointed routed-expert region so
-            # selective AC only recomputes local expert matmuls.
+            # Keep combine outside the checkpointed local expert region so
+            # selective AC never recomputes dispatch/combine work.
             return combine_tokens(routed_output, dispatch_state)
 
         pending_state = dispatch_chunk(0, chunk_size)
@@ -540,7 +681,7 @@ class MoE(nn.Module):
         # in backward. The selective MoE path avoids that by checkpointing only the
         # routed expert compute below.
         with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert)
+            self.tokens_per_expert.add_(num_tokens_per_expert.to(self.tokens_per_expert.dtype))
 
         if self.ep_comm_backend == "deepep":
             routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
@@ -594,6 +735,42 @@ class MoE(nn.Module):
 
 def relu2(x: torch.Tensor) -> torch.Tensor:
     return F.relu(x).square()
+
+
+def _run_nongated_experts_fc1_for_loop_impl(
+    w1: torch.Tensor,
+    _w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    num_tokens_per_expert = num_tokens_per_expert.tolist()
+    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+
+    x = torch.split(
+        x[: sum(num_tokens_per_expert)],
+        split_size_or_sections=num_tokens_per_expert,
+        dim=0,
+    )
+    out_experts_splits = []
+    for expert_idx, x_expert in enumerate(x):
+        out_experts_splits.append(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
+    out = torch.cat(out_experts_splits, dim=0)
+    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    return out
+
+
+def _run_nongated_experts_fc1_grouped_mm_impl(
+    w1: torch.Tensor,
+    _w2: torch.Tensor,
+    _w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    assert x.dim() == 2
+
+    return torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
 
 
 def _run_nongated_experts_for_loop_impl(
@@ -686,6 +863,22 @@ class NonGatedGroupedExperts(nn.Module):
             return _run_nongated_experts_grouped_mm_impl(w1, w2, w3, x, num_tokens_per_expert)
         return _run_nongated_experts_for_loop_impl(w1, w2, w3, x, num_tokens_per_expert)
 
+    def _run_expert_fc1(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        func = (
+            _run_nongated_experts_fc1_grouped_mm_impl
+            if self.use_grouped_mm
+            else _run_nongated_experts_fc1_for_loop_impl
+        )
+        if self.ep_comm_backend == "deepep":
+            return func(self.w1.to_local(), self.w2.to_local(), self.w3.to_local(), x, num_tokens_per_expert)
+        return _run_split_expert_parallel(func, self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+
+    def _run_expert_fc2(self, x: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        func = _run_experts_fc2_grouped_mm_impl if self.use_grouped_mm else _run_experts_fc2_for_loop_impl
+        if self.ep_comm_backend == "deepep":
+            return func(self.w1.to_local(), self.w2.to_local(), self.w3.to_local(), x, num_tokens_per_expert)
+        return _run_split_expert_parallel(func, self.w1, self.w2, self.w3, x, num_tokens_per_expert)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -761,12 +954,10 @@ class NemotronHRouter(nn.Module):
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
 
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.reshape(-1).float(),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
+        num_tokens_per_expert = torch.bincount(
+            selected_experts_indices.reshape(-1),
+            minlength=self.num_experts,
+        ).to(torch.int32)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -865,12 +1056,20 @@ class LatentMoE(nn.Module):
     def set_deepep_token_chunk_size(self, chunk_size: int | None) -> None:
         self.deepep_token_chunk_size = chunk_size
 
+    def _run_moe_act(self, expert_fc1_output: torch.Tensor) -> torch.Tensor:
+        return relu2(expert_fc1_output)
+
     def _run_local_routed_experts(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        return self.experts(x, num_tokens_per_expert)
+        if not _is_selective_ac_patched(self, "_run_moe_act"):
+            return self.experts(x, num_tokens_per_expert)
+
+        expert_fc1_output = self.experts._run_expert_fc1(x, num_tokens_per_expert)
+        activated_output = self._run_moe_act(expert_fc1_output)
+        return self.experts._run_expert_fc2(activated_output, num_tokens_per_expert)
 
     def _run_routed_experts(
         self,
@@ -884,7 +1083,10 @@ class LatentMoE(nn.Module):
         routed_input = torch.gather(x, dim=0, index=token_indices_expanded)
 
         routed_input = self.fc1_latent_proj(routed_input)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
+        if _is_selective_ac_patched(self, "_run_moe_act"):
+            routed_output = self._run_local_routed_experts(routed_input, num_tokens_per_expert)
+        else:
+            routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         routed_output = (routed_output.float() * top_scores_experts_sorted.reshape(-1, 1)).to(routed_output.dtype)
         routed_output = routed_output * self.routed_scaling_factor
@@ -954,7 +1156,7 @@ class LatentMoE(nn.Module):
         top_scores, selected_experts_indices, num_tokens_per_expert = self.router(x_flat, self.expert_bias)
 
         with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert)
+            self.tokens_per_expert.add_(num_tokens_per_expert.to(self.tokens_per_expert.dtype))
 
         if self.ep_comm_backend == "deepep":
             routed_output = self._run_deepep_routed_experts(x_flat, selected_experts_indices, top_scores)
