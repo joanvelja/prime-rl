@@ -708,6 +708,7 @@ async def orchestrate(config: OrchestratorConfig):
             heart.beat()
 
     if config.eval and eval_envs is not None:
+        await scheduler.cancel_inflight_rollouts()
         logger.info("Running final evals")
         eval_results = await asyncio.gather(
             *[
