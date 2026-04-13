@@ -543,6 +543,12 @@ class RLConfig(BaseConfig):
                 if self.inference is not None:
                     self.inference.model.vlm = self.model.vlm
 
+            # Re-propagate model name to tokenizer since TrainerConfig.auto_setup_tokenizer
+            # already ran with the default model name before this validator.
+            self.trainer.tokenizer.name = self.trainer.model.name
+            if self.trainer.tokenizer.trust_remote_code is None:
+                self.trainer.tokenizer.trust_remote_code = self.trainer.model.trust_remote_code
+
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
         return self
