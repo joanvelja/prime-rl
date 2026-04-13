@@ -54,6 +54,8 @@ RUN mkdir -p /tmp/wheels \
         "/tmp/wheels/${DEEP_EP_WHEEL}" \
         "/tmp/wheels/${NIXL_WHEEL}" \
         "/tmp/wheels/${NIXL_CU12_WHEEL}" \
+    && uv pip install --no-deps --upgrade flashinfer-python flashinfer-cubin \
+    && uv pip install --no-deps --upgrade flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu128 \
     && rm -rf /tmp/wheels
 
 USER appuser
