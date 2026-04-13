@@ -305,6 +305,14 @@ class InferenceConfig(BaseConfig):
         ),
     ] = None
 
+    reset_prefix_cache_after_update: Annotated[
+        bool,
+        Field(
+            description="Whether to reset the prefix cache after weight updates (update_weights, load_lora_adapter). "
+            "Disabling this avoids the latency of cache invalidation when prefix caching correctness is not a concern.",
+        ),
+    ] = True
+
     gpu_memory_utilization: Annotated[
         float,
         Field(
