@@ -1091,8 +1091,17 @@ class OrchestratorConfig(BaseConfig):
                 oversampling_factor = self.oversampling_factor if self.oversampling_factor is not None else 1.0
                 self.max_inflight_rollouts = int(self.batch_size * oversampling_factor)
 
-        if self.max_inflight_rollouts is not None and self.max_inflight_rollouts < self.rollouts_per_example:
-            raise ValueError("max_inflight_rollouts must be at least the number of rollouts per example")
+        if self.max_inflight_rollouts is not None:
+            if self.max_inflight_rollouts < self.rollouts_per_example:
+                raise ValueError("max_inflight_rollouts must be at least rollouts_per_example (train)")
+            if self.eval is not None:
+                for env_cfg in self.eval.env:
+                    if env_cfg.rollouts_per_example > self.max_inflight_rollouts:
+                        raise ValueError(
+                            f"max_inflight_rollouts ({self.max_inflight_rollouts}) must be at least "
+                            f"rollouts_per_example ({env_cfg.rollouts_per_example}) of eval env '{env_cfg.name}', "
+                            f"otherwise group-scoring evals will deadlock"
+                        )
 
         # Resolve train env num_workers from max_inflight_rollouts
         for env_cfg in self.train.env:

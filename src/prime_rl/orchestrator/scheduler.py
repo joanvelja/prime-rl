@@ -135,8 +135,10 @@ class Scheduler:
 
     async def cancel_inflight_rollouts(self):
         """Cancel all in-flight rollout requests."""
-        count = sum(info.rollout_count for info in self.inflight_requests.values())
         await safe_cancel_all(list(self.inflight_requests))
+        # Compute count after cancellation — other coroutines (e.g. drop_group) may have
+        # popped and released some tasks during the yield in safe_cancel_all.
+        count = sum(info.rollout_count for info in self.inflight_requests.values())
         self.inflight_requests.clear()
         self.groups.clear()
         self.limiter.release(count)
