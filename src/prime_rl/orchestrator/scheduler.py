@@ -240,7 +240,7 @@ class Scheduler:
         return self.inflight_rollout_count + pending
 
     async def _schedule_next_request(self) -> bool:
-        remaining = self.limiter.remaining
+        remaining = self.limiter.concurrency.remaining
 
         if remaining <= 0:
             return False

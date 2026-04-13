@@ -101,10 +101,6 @@ class RolloutLimiter:
         else:
             get_logger().info("RolloutLimiter initialized (unlimited)")
 
-    @property
-    def remaining(self) -> float:
-        return self.concurrency.remaining
-
     async def acquire(self, count: int = 1) -> None:
         """Acquire rate tokens then concurrency slots (blocks until both are available)."""
         await self.rate.acquire(count)
