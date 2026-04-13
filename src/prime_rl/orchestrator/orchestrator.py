@@ -716,6 +716,7 @@ async def orchestrate(config: OrchestratorConfig):
                     get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
+                    limiter=rollout_limiter,
                 )
                 for eval_env in eval_envs
             ]

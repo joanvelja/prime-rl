@@ -174,7 +174,7 @@ class EvalEnv(Env):
         get_client: Callable[[], Awaitable[vf.ClientConfig]],
         ckpt_step: int,
         step: int,
-        limiter: RolloutLimiter | None = None,
+        limiter: RolloutLimiter,
     ) -> list[vf.RolloutOutput]:
         num_examples = len(self.examples)
         rollouts_per_example = self.config.rollouts_per_example
@@ -188,8 +188,7 @@ class EvalEnv(Env):
 
             async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
                 """Run rollouts_per_example rollouts as a scored group for one example."""
-                if limiter is not None:
-                    await limiter.acquire(cost)
+                await limiter.acquire(cost)
                 try:
                     client = await get_client()
                     outputs = await self.run_group(
@@ -205,8 +204,7 @@ class EvalEnv(Env):
                     pbar.update(rollouts_per_example)
                     return None
                 finally:
-                    if limiter is not None:
-                        limiter.release(cost)
+                    limiter.release(cost)
 
             coros = [run_with_progress(example) for example in self.examples]
 
@@ -214,8 +212,7 @@ class EvalEnv(Env):
 
             async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
                 """Run a single rollout for one example."""
-                if limiter is not None:
-                    await limiter.acquire(1)
+                await limiter.acquire(1)
                 try:
                     client = await get_client()
                     output = await self.run_rollout(client=client, example=example, model_name=model_name)
@@ -226,8 +223,7 @@ class EvalEnv(Env):
                     pbar.update(1)
                     return None
                 finally:
-                    if limiter is not None:
-                        limiter.release(1)
+                    limiter.release(1)
 
             coros = [run_with_progress(example) for example in self.examples for _ in range(rollouts_per_example)]
 
