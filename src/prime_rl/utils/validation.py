@@ -104,6 +104,18 @@ def validate_shared_max_async_level(
         )
 
 
+def validate_shared_tokenizer(
+    trainer: TrainerConfig,
+    orchestrator: OrchestratorConfig,
+) -> None:
+    if trainer.tokenizer != orchestrator.tokenizer:
+        raise ValueError(
+            f"Trainer and orchestrator tokenizer configs must match. "
+            f"Trainer: {trainer.tokenizer}, Orchestrator: {orchestrator.tokenizer}. "
+            f"Use the shared [tokenizer] config to set tokenizer options for both."
+        )
+
+
 def validate_shared_weight_broadcast(
     trainer: TrainerConfig,
     orchestrator: OrchestratorConfig,

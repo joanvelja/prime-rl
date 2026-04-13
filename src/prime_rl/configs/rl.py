@@ -46,6 +46,7 @@ from prime_rl.utils.validation import (
     validate_shared_max_steps,
     validate_shared_model_name,
     validate_shared_output_dir,
+    validate_shared_tokenizer,
     validate_shared_wandb_config,
     validate_shared_weight_broadcast,
 )
@@ -580,6 +581,8 @@ class RLConfig(BaseConfig):
             for component in (self.trainer, self.orchestrator):
                 component.tokenizer.name = component.model.name
                 component.tokenizer.trust_remote_code = component.model.trust_remote_code
+
+        validate_shared_tokenizer(self.trainer, self.orchestrator)
 
         # Propagate chat_template to inference (vLLM --chat-template)
         if self.inference is not None:
