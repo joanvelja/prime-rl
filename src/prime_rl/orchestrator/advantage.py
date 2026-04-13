@@ -61,36 +61,33 @@ def _efficiency_length_shaping(
     completion_lengths: Float[Tensor, "num_problems rollouts_per_example"],
     threshold: float,
 ) -> Float[Tensor, "num_problems rollouts_per_example"]:
-    """Advantage-level length shaping for correct rollouts.
+    """Correctness-gated length shaping with bounded advantages.
 
     Mixed groups (some correct, some incorrect):
-        A_i = (R_i - mean(R)) * w_i, where w_i = mean_correct_len / len_i for correct, 1 for incorrect.
-        Preserves positive advantage for all correct rollouts.
+        Correct rollouts get standard GRPO advantage amplified by up to 2x based on relative brevity.
+        Incorrect rollouts are untouched. All correct rollouts keep positive advantage.
 
     All-correct groups:
-        A_i = w_i - mean(w), giving length differentiation when correctness is saturated.
+        Below-average-length rollouts get positive advantage in [0, 1]; others get 0.
     """
     correct_mask = rewards >= threshold
     num_correct = correct_mask.sum(dim=1, keepdim=True)
     G = rewards.shape[1]
+    all_correct = num_correct == G
 
-    # Mean length of correct rollouts per problem (0 where none correct)
+    # Mean length of correct rollouts per problem
     correct_lengths = completion_lengths * correct_mask
     mean_correct_len = correct_lengths.sum(dim=1, keepdim=True) / num_correct.clamp(min=1)
 
-    # Efficiency weight: mean_correct_len / len for correct, 1 for incorrect
-    w = torch.where(correct_mask, mean_correct_len / completion_lengths, torch.ones_like(completion_lengths))
+    # Length bonus: bounded [0, 1], positive for below-average, zero for above-average
+    bonus = (1 - completion_lengths / mean_correct_len).clamp(0, 1)
 
-    all_correct = num_correct == G
+    # Mixed groups: standard advantage with bounded amplification for correct rollouts
     baseline = rewards.mean(dim=1, keepdim=True)
+    mixed = (rewards - baseline) * (1 + bonus * correct_mask)
 
-    # Mixed: advantage-level shaping (preserves signs)
-    mixed_advantages = (rewards - baseline) * w
-
-    # All-correct: reward-level shaping (provides length signal)
-    all_correct_advantages = w - w.mean(dim=1, keepdim=True)
-
-    return torch.where(all_correct, all_correct_advantages, mixed_advantages)
+    # All-correct groups: length-only signal, bounded [0, 1]
+    return torch.where(all_correct, bonus, mixed)
 
 
 def setup_advantage_fn(config: AdvantageConfig) -> AdvantageFn:

@@ -566,11 +566,12 @@ class DefaultAdvantageConfig(BaseModel):
         Literal["off", "efficiency", "gr3"],
         Field(
             description=(
-                "Length shaping strategy for reward adjustment. "
-                "'efficiency': advantage-level shaping that weights correct rollouts by relative efficiency "
-                "(mean_correct_len / len_i). In mixed groups, preserves positive advantage for all correct "
-                "rollouts. In all-correct groups, switches to reward-level shaping for length differentiation. "
-                "'gr3': multiplicatively scale all rollouts by (1 + alpha * L_i / L_mean)^-1. "
+                "Length shaping strategy. "
+                "'efficiency': correctness-gated shaping — in mixed groups, shorter correct rollouts get "
+                "amplified advantage (up to 2x), longer correct rollouts are unchanged, incorrect untouched. "
+                "In all-correct groups, below-average-length rollouts get advantage in [0, 1], others get 0. "
+                "'gr3': multiplicative reward rescaling by (1 + alpha * L_i / L_mean)^-1 (requires "
+                "online_difficulty_filtering). "
                 "'off': no length shaping."
             )
         ),
