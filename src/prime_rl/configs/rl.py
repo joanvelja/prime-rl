@@ -582,13 +582,13 @@ class RLConfig(BaseConfig):
                 component.tokenizer.name = component.model.name
                 component.tokenizer.trust_remote_code = component.model.trust_remote_code
 
-        validate_shared_tokenizer(self.trainer, self.orchestrator)
-
         # Propagate chat_template to inference (vLLM --chat-template)
         if self.inference is not None:
             chat_template = self.trainer.tokenizer.chat_template
-            if chat_template is not None:
+            if chat_template is not None and self.inference.chat_template is None:
                 self.inference.chat_template = chat_template
+
+        validate_shared_tokenizer(self.trainer, self.orchestrator, self.inference)
 
         return self
 

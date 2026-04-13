@@ -107,6 +107,7 @@ def validate_shared_max_async_level(
 def validate_shared_tokenizer(
     trainer: TrainerConfig,
     orchestrator: OrchestratorConfig,
+    inference: Optional[InferenceConfig] = None,
 ) -> None:
     if trainer.tokenizer != orchestrator.tokenizer:
         raise ValueError(
@@ -114,6 +115,14 @@ def validate_shared_tokenizer(
             f"Trainer: {trainer.tokenizer}, Orchestrator: {orchestrator.tokenizer}. "
             f"Use the shared [tokenizer] config to set tokenizer options for both."
         )
+    if inference is not None:
+        chat_template = trainer.tokenizer.chat_template
+        if chat_template != inference.chat_template:
+            raise ValueError(
+                f"Inference chat_template ({inference.chat_template!r}) does not match "
+                f"the shared tokenizer chat_template ({chat_template!r}). "
+                f"Use the shared [tokenizer] config to set chat_template for all components."
+            )
 
 
 def validate_shared_weight_broadcast(
