@@ -111,9 +111,8 @@ All2AllBackend = Literal[
     "allgather_reducescatter",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "flashinfer_all2allv",
-    "naive",
-    "pplx",
+    "flashinfer_nvlink_one_sided",
+    "flashinfer_nvlink_two_sided",
 ]
 
 
