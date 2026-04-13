@@ -559,12 +559,7 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_tokenizer(self):
-        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference.
-
-        Re-runs tokenizer auto-setup on trainer/orchestrator since their validators
-        ran during construction with default model names, before auto_setup_model
-        could set the correct ones.
-        """
+        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference."""
         if self.tokenizer is not None:
             # Shared tokenizer config: propagate to all components, then fill
             # in name/trust_remote_code from model config where still unset.
