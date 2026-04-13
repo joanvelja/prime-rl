@@ -119,9 +119,8 @@ All2AllBackend = Literal[
     "allgather_reducescatter",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "flashinfer_all2allv",
-    "naive",
-    "pplx",
+    "flashinfer_nvlink_one_sided",
+    "flashinfer_nvlink_two_sided",
 ]
 
 
@@ -154,17 +153,17 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
 
 class KVCacheOffloadConfig(BaseModel):
-    """CPU KV cache offloading for disaggregated prefill nodes.
+    """CPU KV cache offloading for disaggregated serving.
 
-    When configured, prefill nodes use MultiConnector (NixlConnector + OffloadingConnector).
-    Decode nodes always use NixlConnector only.
+    When configured, both prefill and decode nodes use
+    MultiConnector (NixlConnector + OffloadingConnector).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    block_size: Annotated[int, Field(ge=1, description="Block size for the CPU offloading connector.")] = 64
-
-    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading.")] = 1_000_000_000
+    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading per worker.")] = (
+        1_000_000_000
+    )
 
 
 class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
