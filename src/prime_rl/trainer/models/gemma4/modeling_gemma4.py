@@ -20,7 +20,6 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from transformers.activations import ACT2FN
-from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -651,12 +650,9 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
     def convert_to_prime(cls, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4.converting_gemma4 import convert_hf_to_prime
 
-        vlm = _has_vlm_keys(state_dict)
-        if vlm:
+        if _has_vlm_keys(state_dict):
             _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_to_prime(state_dict)
-        if vlm:
-            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
     @classmethod
@@ -675,12 +671,9 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4.converting_gemma4 import convert_hf_layer_to_prime
 
-        vlm = _has_vlm_keys(state_dict)
-        if vlm:
+        if _has_vlm_keys(state_dict):
             _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_layer_to_prime(state_dict, layer_idx)
-        if vlm:
-            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
 
@@ -764,60 +757,12 @@ class Gemma4Model(Gemma4PreTrainedModel):
 
 
 # ---------------------------------------------------------------------------
-# VLM composite model
-# ---------------------------------------------------------------------------
-
-
-class Gemma4VLMModel(nn.Module):
-    """Composite VLM body: HF vision tower + custom PrimeRL text model."""
-
-    def __init__(self, config: PretrainedConfig):
-        super().__init__()
-        self.config = config
-        from transformers.models.gemma4.modeling_gemma4 import Gemma4MultimodalEmbedder, Gemma4VisionModel
-
-        self.vision_tower = Gemma4VisionModel._from_config(config.vision_config)
-        self.embed_vision = Gemma4MultimodalEmbedder(config.vision_config, config.text_config)
-        self.language_model = Gemma4Model(config.text_config)
-
-    def get_input_embeddings(self):
-        return self.language_model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.language_model.embed_tokens = value
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        **kwargs,
-    ) -> BaseModelOutputWithPast:
-        if inputs_embeds is None:
-            inputs_embeds = self.language_model.embed_tokens(input_ids)
-
-        if pixel_values is not None:
-            pixel_values = pixel_values.type(self.vision_tower.dtype)
-            vision_output = self.vision_tower(pixel_values, return_dict=True)
-            image_features = self.embed_vision(vision_output.last_hidden_state)
-            image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-
-            image_mask = input_ids == self.config.image_token_id
-            image_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features)
-
-        if position_ids is None:
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0)
-
-        return self.language_model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-        )
-
-
-# ---------------------------------------------------------------------------
 # Causal LM (unified text-only + VLM)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Causal LM
 # ---------------------------------------------------------------------------
 
 
@@ -832,37 +777,27 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config, **kwargs):
+        # Always unwrap composite VLM config to text-only.
+        # We never create a vision tower — text-only training doesn't need it,
+        # and keeping it causes optimizer state mismatches on checkpoint resume.
+        text_config = getattr(config, "text_config", config)
+        if text_config is not config:
+            if hasattr(config, "_attn_implementation"):
+                text_config._attn_implementation = config._attn_implementation
+            config = text_config
+
         super().__init__(config, **kwargs)
-        self._is_vlm = hasattr(config, "vision_config")
-
-        if self._is_vlm:
-            self.model = Gemma4VLMModel(config)
-            text_config = config.text_config
-            self._tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
-        else:
-            self.model = Gemma4Model(config)
-            text_config = config
-
-        self.vocab_size = text_config.vocab_size
-        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
-        self.final_logit_softcapping = text_config.final_logit_softcapping
-
-        # Propagate to composite config so inject_prime_lm_head can find it
-        if self._is_vlm and not hasattr(config, "final_logit_softcapping"):
-            config.final_logit_softcapping = text_config.final_logit_softcapping
-
+        self.model = Gemma4Model(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.final_logit_softcapping = config.final_logit_softcapping
         self.post_init()
 
     def get_input_embeddings(self):
-        if self._is_vlm:
-            return self.model.get_input_embeddings()
         return self.model.embed_tokens
 
     def set_input_embeddings(self, value):
-        if self._is_vlm:
-            self.model.set_input_embeddings(value)
-        else:
-            self.model.embed_tokens = value
+        self.model.embed_tokens = value
 
     @can_return_tuple
     @auto_docstring
@@ -874,7 +809,6 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
         labels: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         temperature: Optional[torch.Tensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> PrimeLmOutput:
         if position_ids is None:
@@ -883,19 +817,11 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             else:
                 position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
 
-        if self._is_vlm:
-            outputs = self.model(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                inputs_embeds=inputs_embeds,
-                pixel_values=pixel_values,
-            )
-        else:
-            outputs = self.model(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                inputs_embeds=inputs_embeds,
-            )
+        outputs = self.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+        )
 
         hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -905,25 +831,11 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             temperature=temperature,
         )
 
-    def _get_text_config(self):
-        return self.config.text_config if self._is_vlm else self.config
-
     def init_buffers_post_meta(self):
-        text_config = self._get_text_config()
-
-        # Reinitialize embed_scale (non-persistent buffer)
-        if self._is_vlm:
-            embed_tokens = self.model.language_model.embed_tokens
-            rotary_emb = self.model.language_model.rotary_emb
-        else:
-            embed_tokens = self.model.embed_tokens
-            rotary_emb = self.model.rotary_emb
-
-        embed_tokens.embed_scale.fill_(text_config.hidden_size**0.5)
-
-        # Initialize dual RoPE inv_freq buffers
+        self.model.embed_tokens.embed_scale.fill_(self.config.hidden_size**0.5)
+        rotary_emb = self.model.rotary_emb
         for layer_type in rotary_emb.layer_types:
-            rope_params = text_config.rope_parameters[layer_type]
+            rope_params = self.config.rope_parameters[layer_type]
             rope_type = rope_params["rope_type"]
             if rope_type != "default":
                 rope_init_fn = ROPE_INIT_FUNCTIONS[rope_type]
@@ -934,6 +846,6 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             if layer_type == "full_attention" and rope_type == "proportional":
                 kwargs["head_dim_key"] = "global_head_dim"
 
-            inv_freq, attn_scaling = rope_init_fn(text_config, **kwargs)
+            inv_freq, attn_scaling = rope_init_fn(self.config, **kwargs)
             getattr(rotary_emb, f"{layer_type}_inv_freq").copy_(inv_freq)
             rotary_emb.attention_scaling[layer_type] = attn_scaling
