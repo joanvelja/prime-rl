@@ -144,7 +144,6 @@ class TrainSamplingConfig(BaseConfig):
         return args
 
     @model_validator(mode="before")
-    @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
             get_logger().warning(
@@ -243,7 +242,6 @@ class EvalSamplingConfig(BaseConfig):
         return args
 
     @model_validator(mode="before")
-    @classmethod
     def _deprecate_max_tokens(cls, data: Any) -> Any:
         if isinstance(data, dict) and "max_tokens" in data and "max_completion_tokens" not in data:
             get_logger().warning(
@@ -1030,7 +1028,6 @@ class OrchestratorConfig(BaseConfig):
         return data
 
     @model_validator(mode="before")
-    @classmethod
     def _env_to_train(cls, data: Any) -> Any:
         """Allow [[env]] and [sampling] as shorthand for [train] with [[train.env]] and [train.sampling]."""
         if not isinstance(data, dict):
