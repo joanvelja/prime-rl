@@ -184,8 +184,10 @@ class Scheduler:
         env = self.train_envs.get(env_name)
         cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
 
-        # Rate limit then reserve concurrency slots
-        await self.limiter.acquire(cost)
+        # Rate limit (blocking), then reserve concurrency slots (non-blocking).
+        # Concurrency is non-blocking here because _fill_inflight_requests must not stall;
+        # the caller already checked remaining slots before invoking this method.
+        await self.limiter.rate.acquire(cost)
         if not self.limiter.try_acquire(cost):
             return
 
@@ -405,6 +407,11 @@ class Scheduler:
         while batch_progress < self.batch_target:
             await self._fill_inflight_requests()
             inflight_tasks = list(self.inflight_requests.keys())
+
+            if not inflight_tasks:
+                # All slots are consumed but no tasks are tracked — wait briefly for slots to free up
+                await asyncio.sleep(0.1)
+                continue
 
             finished_tasks, _ = await asyncio.wait(
                 inflight_tasks,

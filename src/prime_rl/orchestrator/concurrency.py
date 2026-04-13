@@ -62,6 +62,15 @@ class ConcurrencyLimiter:
             return math.inf
         return self._max - self._used
 
+    async def acquire(self, count: int = 1) -> None:
+        """Block until *count* concurrency slots are available, then reserve them."""
+        if self._max is None:
+            return
+        while self.remaining < count:
+            self._available.clear()
+            await self._available.wait()
+        self._used += count
+
     def try_acquire(self, count: int = 1) -> bool:
         """Non-blocking acquire. Returns True if slots were reserved."""
         if self._max is None:
@@ -106,8 +115,9 @@ class RolloutLimiter:
         return self.concurrency.remaining
 
     async def acquire(self, count: int = 1) -> None:
-        """Acquire rate tokens then concurrency slots (non-blocking for concurrency via try_acquire is separate)."""
+        """Acquire rate tokens then concurrency slots (blocks until both are available)."""
         await self.rate.acquire(count)
+        await self.concurrency.acquire(count)
 
     def try_acquire(self, count: int = 1) -> bool:
         """Non-blocking concurrency acquire. Returns True if slots were reserved."""

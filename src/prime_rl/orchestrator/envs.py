@@ -190,7 +190,6 @@ class EvalEnv(Env):
                 """Run rollouts_per_example rollouts as a scored group for one example."""
                 if limiter is not None:
                     await limiter.acquire(cost)
-                    limiter.try_acquire(cost)
                 try:
                     client = await get_client()
                     outputs = await self.run_group(
@@ -217,7 +216,6 @@ class EvalEnv(Env):
                 """Run a single rollout for one example."""
                 if limiter is not None:
                     await limiter.acquire(1)
-                    limiter.try_acquire(1)
                 try:
                     client = await get_client()
                     output = await self.run_rollout(client=client, example=example, model_name=model_name)
