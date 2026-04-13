@@ -990,7 +990,7 @@ class OrchestratorConfig(BaseConfig):
             ge=0,
             description="Maximum number of steps the inference can be ahead of training. If 0, will degenerate to synchronous on-policy RL. If >=1, training and inference will be overlapped.",
         ),
-    ] = 1
+    ] = 2
 
     strict_async_level: Annotated[
         bool,
