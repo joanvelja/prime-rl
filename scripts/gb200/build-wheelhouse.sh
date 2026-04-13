@@ -30,7 +30,7 @@ log "Writing GB200 release manifest"
     --patchset-rev "${PATCHSET_REV}" \
     --vllm-version "${VLLM_VERSION}" \
     --deepgemm-commit "${DEEPGEMM_COMMIT}" \
-    --deepep-commit "${DEEPEP_COMMIT}" \
+    --deepep-source "${DEEPEP_REPO_URL}@${DEEPEP_REF}" \
     --ucx-version "${UCX_VERSION}" \
     --nvshmem-version "${NVSHMEM_VERSION}" \
     --nixl-git-ref "${NIXL_GIT_REF}" \

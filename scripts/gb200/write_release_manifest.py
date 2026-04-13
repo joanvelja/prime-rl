@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument("--patchset-rev", required=True)
     parser.add_argument("--vllm-version", required=True)
     parser.add_argument("--deepgemm-commit", required=True)
-    parser.add_argument("--deepep-commit", required=True)
+    parser.add_argument("--deepep-source", required=True)
     parser.add_argument("--ucx-version", required=True)
     parser.add_argument("--nvshmem-version", required=True)
     parser.add_argument("--nixl-git-ref", required=True)
@@ -59,8 +59,14 @@ def main() -> None:
             },
             "deep_gemm": {"source_commit": args.deepgemm_commit},
             "deep_ep": {
-                "source_commit": args.deepep_commit,
-                "patches": ["patches/gb200/deep_ep-gb200.patch"],
+                "source_ref": args.deepep_source,
+                "patches": [
+                    "use_fabric default forced to True",
+                    "NUM_CPU_TIMEOUT_SECS 100 -> 10000",
+                    "NUM_CPU_TIMEOUT_SECS 10 -> 1000",
+                    "NUM_TIMEOUT_CYCLES 200000000000ull -> 20000000000000ull",
+                    "NUM_TIMEOUT_CYCLES 20000000000ull -> 2000000000000ull",
+                ],
             },
             "ucx": {"source_ref": args.ucx_version},
             "nvshmem": {"version": args.nvshmem_version},
