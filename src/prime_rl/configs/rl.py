@@ -296,12 +296,12 @@ class RLConfig(BaseConfig):
     ] = None
 
     tokenizer: Annotated[
-        TokenizerConfig,
+        TokenizerConfig | None,
         Field(
             description="Shared tokenizer config. Propagated to trainer, orchestrator, and inference. "
-            "Fields left unset (None) are filled from the model config.",
+            "If None, each component uses its own tokenizer config (defaulting to model name).",
         ),
-    ] = TokenizerConfig()
+    ] = None
 
     max_steps: Annotated[
         int | None,
@@ -559,16 +559,22 @@ class RLConfig(BaseConfig):
 
     @model_validator(mode="after")
     def auto_setup_tokenizer(self):
-        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference.
-
-        Must run after auto_setup_model so model names are already propagated.
-        """
-        self.trainer.tokenizer = self.tokenizer.model_copy()
-        self.orchestrator.tokenizer = self.tokenizer.model_copy()
-        for component in (self.trainer, self.orchestrator):
-            if component.tokenizer.name is None:
+        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference."""
+        if self.tokenizer is not None:
+            # Shared tokenizer config: propagate to all components, then fill
+            # in name/trust_remote_code from model config where still unset.
+            self.trainer.tokenizer = self.tokenizer.model_copy()
+            self.orchestrator.tokenizer = self.tokenizer.model_copy()
+            for component in (self.trainer, self.orchestrator):
+                if component.tokenizer.name is None:
+                    component.tokenizer.name = component.model.name
+                if component.tokenizer.trust_remote_code is None:
+                    component.tokenizer.trust_remote_code = component.model.trust_remote_code
+        else:
+            # No shared tokenizer: re-derive from (now-correct) model names,
+            # since auto_setup_tokenizer on sub-configs already ran with defaults.
+            for component in (self.trainer, self.orchestrator):
                 component.tokenizer.name = component.model.name
-            if component.tokenizer.trust_remote_code is None:
                 component.tokenizer.trust_remote_code = component.model.trust_remote_code
 
         # Propagate chat_template to inference (vLLM --chat-template)
