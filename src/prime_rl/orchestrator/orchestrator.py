@@ -248,9 +248,9 @@ async def orchestrate(config: OrchestratorConfig):
 
     logger.success("Inference pool ready")
 
-    # Start inference metrics collector (only when W&B monitoring is enabled)
-    inference_metrics_collector: InferenceMetricsCollector | None = None
-    if config.wandb is not None:
+    # Start inference metrics collector (requires W&B)
+    inference_metrics_collector = None
+    if config.wandb is not None and config.collect_inference_metrics:
         inference_metrics_collector = InferenceMetricsCollector(inference_pool.admin_clients)
         await inference_metrics_collector.start()
 

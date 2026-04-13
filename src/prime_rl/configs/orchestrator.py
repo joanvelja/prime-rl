@@ -887,6 +887,9 @@ class OrchestratorConfig(BaseConfig):
     # The prime monitor configuration
     prime_monitor: PrimeMonitorConfig | None = None
 
+    # Whether to collect inference server metrics (requires wandb)
+    collect_inference_metrics: bool = True
+
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
 

@@ -14,7 +14,6 @@ POLL_INTERVAL = 5.0
 WINDOW_SIZE = 20
 
 # Gauge metrics: collected as instantaneous values
-# Aggregation strategy per metric is defined in _aggregate_gauge
 GAUGE_METRICS = {
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
@@ -42,12 +41,19 @@ HISTOGRAM_METRICS = {
 
 _COUNTER_TOTAL_TO_NAME = {f"{name}_total": name for name in COUNTER_METRICS}
 
-# Metrics where "max across engines" is the right aggregation
-_MAX_GAUGES = {"vllm:gpu_cache_usage_perc", "vllm:gpu_prefix_cache_hit_rate"}
+# Gauges where we log both max and mean across engines (to show imbalance)
+_DUAL_AGG_GAUGES = {"vllm:gpu_cache_usage_perc", "vllm:gpu_prefix_cache_hit_rate"}
+
+# Gauges where we sum across engines
+_SUM_GAUGES = GAUGE_METRICS - _DUAL_AGG_GAUGES
 
 
 def parse_prometheus_text(text: str) -> tuple[dict[str, float], dict[str, float], dict[str, tuple[float, float]]]:
-    """Parse Prometheus exposition format into (gauges, counters, histograms)."""
+    """Parse Prometheus exposition format into (gauges, counters, histograms).
+
+    For gauge metrics, returns the per-server aggregate (sum for queue sizes,
+    max for per-engine metrics like kv cache within a single server).
+    """
     gauges: dict[str, float] = {}
     counters: dict[str, float] = {}
     histograms: dict[str, tuple[float, float]] = {}
@@ -55,7 +61,7 @@ def parse_prometheus_text(text: str) -> tuple[dict[str, float], dict[str, float]
     for family in text_string_to_metric_families(text):
         if family.type == "gauge" and family.name in GAUGE_METRICS:
             for sample in family.samples:
-                if family.name in _MAX_GAUGES:
+                if family.name in _DUAL_AGG_GAUGES:
                     gauges[family.name] = max(gauges.get(family.name, 0.0), sample.value)
                 else:
                     gauges[family.name] = gauges.get(family.name, 0.0) + sample.value
@@ -124,7 +130,9 @@ class InferenceMetricsCollector:
 
         results = await asyncio.gather(*[fetch(client) for client in self.admin_clients])
 
-        agg_gauges: dict[str, float] = {}
+        # For dual-agg gauges, collect per-server values to compute both max and mean
+        dual_agg_values: dict[str, list[float]] = {}
+        agg_sum_gauges: dict[str, float] = {}
         agg_counters: dict[str, float] = {}
         agg_histograms: dict[str, tuple[float, float]] = {}
         n_servers = 0
@@ -136,10 +144,10 @@ class InferenceMetricsCollector:
             gauges, counters, histograms = parse_prometheus_text(text)
 
             for name, value in gauges.items():
-                if name in _MAX_GAUGES:
-                    agg_gauges[name] = max(agg_gauges.get(name, 0.0), value)
+                if name in _DUAL_AGG_GAUGES:
+                    dual_agg_values.setdefault(name, []).append(value)
                 else:
-                    agg_gauges[name] = agg_gauges.get(name, 0.0) + value
+                    agg_sum_gauges[name] = agg_sum_gauges.get(name, 0.0) + value
 
             for name, value in counters.items():
                 agg_counters[name] = agg_counters.get(name, 0.0) + value
@@ -151,12 +159,24 @@ class InferenceMetricsCollector:
         if n_servers == 0:
             return
 
-        # Update gauge history (sliding window)
-        for name, value in agg_gauges.items():
+        # Update gauge history — sum gauges
+        for name, value in agg_sum_gauges.items():
             short = name.removeprefix("vllm:")
             if short not in self._gauge_history:
                 self._gauge_history[short] = deque(maxlen=WINDOW_SIZE)
             self._gauge_history[short].append(value)
+
+        # Update gauge history — dual-agg gauges (max + mean across engines)
+        for name, values in dual_agg_values.items():
+            short = name.removeprefix("vllm:")
+            max_key = f"{short}_max"
+            mean_key = f"{short}_mean"
+            if max_key not in self._gauge_history:
+                self._gauge_history[max_key] = deque(maxlen=WINDOW_SIZE)
+            if mean_key not in self._gauge_history:
+                self._gauge_history[mean_key] = deque(maxlen=WINDOW_SIZE)
+            self._gauge_history[max_key].append(max(values))
+            self._gauge_history[mean_key].append(sum(values) / len(values))
 
         # Compute rates from counters
         for name, value in agg_counters.items():
