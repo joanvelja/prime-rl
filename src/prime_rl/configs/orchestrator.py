@@ -901,12 +901,24 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = Path("outputs/run_default")
 
+    max_inflight_rollouts: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum number of concurrent train and eval rollouts. Required for token-based batching. "
+                "If batch_size is set and this is unset, defaults to batch_size * oversampling_factor "
+                "(or batch_size when oversampling_factor is unset)."
+            ),
+        ),
+    ] = None
+
     max_rollouts_per_minute: Annotated[
         int | None,
         Field(
             ge=1,
             validation_alias=AliasChoices("max_rollouts_per_minute", "tasks_per_minute"),
-            description="Rate limit for rollouts per minute. Recommended for sandbox-backed environments to prevent sandbox-not-ready errors during autoscaling. When set to None, no rate limiting is applied.",
+            description="Rate limit for train and eval rollouts per minute. Recommended if rollouts are attached to sensitive infrastructure (e.g. sandbox-backed environments to prevent load peaks). When set to None, no rate limiting is applied.",
         ),
     ] = None
 
@@ -933,18 +945,6 @@ class OrchestratorConfig(BaseConfig):
             description=(
                 "Rollout-mode batching only. Multiplier used to derive max_inflight_rollouts from batch_size "
                 "when max_inflight_rollouts is unset."
-            ),
-        ),
-    ] = None
-
-    max_inflight_rollouts: Annotated[
-        int | None,
-        Field(
-            ge=1,
-            description=(
-                "Maximum number of rollouts to keep in-flight. Required for token-based batching. "
-                "If batch_size is set and this is unset, defaults to batch_size * oversampling_factor "
-                "(or batch_size when oversampling_factor is unset)."
             ),
         ),
     ] = None
