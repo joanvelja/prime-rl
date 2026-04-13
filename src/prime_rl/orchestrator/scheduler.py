@@ -6,10 +6,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 import verifiers as vf
-from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
+from prime_rl.orchestrator.concurrency import RolloutLimiter
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
 from prime_rl.utils.async_utils import safe_cancel, safe_cancel_all
@@ -61,26 +61,21 @@ class Scheduler:
         inference_pool: InferencePool,
         buffer: Buffer,
         config: OrchestratorConfig,
-        max_inflight_rollouts: int,
+        limiter: RolloutLimiter,
         max_async_level: int,
         max_off_policy_steps: int,
         strict_async_level: bool,
-        tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
     ):
         self.logger = get_logger()
-        if tasks_per_minute is not None:
-            self.rate_limiter = AsyncLimiter(max_rate=tasks_per_minute, time_period=60)
-        else:
-            self.rate_limiter = None
+        self.limiter = limiter
         self.train_envs = train_envs
         self.buffer = buffer
         self.config = config
         self.batch_size = config.batch_size
         self.token_batch_size = config.token_batch_size
         self.rollouts_per_example = config.rollouts_per_example
-        self.max_inflight_rollouts = max_inflight_rollouts
         self.max_async_level = max_async_level
         self.max_off_policy_steps = max_off_policy_steps
         self.strict_async_level = strict_async_level
@@ -144,6 +139,7 @@ class Scheduler:
         await safe_cancel_all(list(self.inflight_requests))
         self.inflight_requests.clear()
         self.groups.clear()
+        self.limiter.release(count)
         self.cancelled_rollouts_count += count
 
     @staticmethod
@@ -175,14 +171,28 @@ class Scheduler:
             rollout_count += info.rollout_count
         self.groups.pop(group_id, None)
         await safe_cancel_all(tasks_to_cancel)
+        self.limiter.release(rollout_count)
         return rollout_count
 
     async def schedule_rollout(self, group_id: int):
         """Asynchronously schedules a rollout request (or a group request for group-scoring envs)."""
-        if self.rate_limiter:
-            await self.rate_limiter.acquire()
         group = self.groups.get(group_id)
         if group is None or group.rollouts_to_schedule <= 0:
+            return
+
+        env_name = group.example["env_name"]
+        env = self.train_envs.get(env_name)
+        cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
+
+        # Rate limit then reserve concurrency slots
+        await self.limiter.acquire(cost)
+        if not self.limiter.try_acquire(cost):
+            return
+
+        # Re-check group validity after potentially yielding during rate limit
+        group = self.groups.get(group_id)
+        if group is None or group.rollouts_to_schedule <= 0:
+            self.limiter.release(cost)
             return
 
         if group.pinned_client is not None:
@@ -190,11 +200,9 @@ class Scheduler:
         else:
             client_config = await self._select_least_loaded_client()
             if group_id not in self.groups:
+                self.limiter.release(cost)
                 return
             group.pinned_client = client_config
-
-        env_name = group.example["env_name"]
-        env = self.train_envs.get(env_name)
 
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
@@ -235,9 +243,9 @@ class Scheduler:
         return self.inflight_rollout_count + pending
 
     async def _schedule_next_request(self) -> bool:
-        remaining_capacity = self.max_inflight_rollouts - self.inflight_rollout_count
+        remaining = self.limiter.remaining
 
-        if remaining_capacity <= 0:
+        if remaining <= 0:
             return False
 
         for group_id, group in self.groups.items():
@@ -245,11 +253,11 @@ class Scheduler:
                 continue
             env = self.train_envs.get(group.example["env_name"])
             cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
-            if cost <= remaining_capacity:
+            if cost <= remaining:
                 await self.schedule_rollout(group_id=group_id)
                 return True
 
-        if remaining_capacity < self.rollouts_per_example:
+        if remaining < self.rollouts_per_example:
             return False
 
         example = self.buffer.sample_examples(n=1)[0]
@@ -412,6 +420,7 @@ class Scheduler:
                 if rollout_info is None:
                     continue
 
+                self.limiter.release(rollout_info.rollout_count)
                 group_id = rollout_info.group_id
                 env_name = rollout_info.env_name
 
@@ -521,6 +530,8 @@ class Scheduler:
             "scheduler/async_level": self.async_level,
             "scheduler/inflight_rollouts": self.inflight_rollout_count,
             "scheduler/inflight_samples": self.inflight_sample_count,
+            "scheduler/limiter_used": self.limiter.concurrency.used,
+            "scheduler/limiter_remaining": self.limiter.remaining,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
             "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
             "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
