@@ -71,15 +71,6 @@ class ConcurrencyLimiter:
             await self._available.wait()
         self._used += count
 
-    def try_acquire(self, count: int = 1) -> bool:
-        """Non-blocking acquire. Returns True if slots were reserved."""
-        if self._max is None:
-            return True
-        if self.remaining >= count:
-            self._used += count
-            return True
-        return False
-
     def release(self, count: int = 1) -> None:
         """Return *count* slots to the pool and wake any blocked acquirers."""
         if self._max is None:
@@ -118,10 +109,6 @@ class RolloutLimiter:
         """Acquire rate tokens then concurrency slots (blocks until both are available)."""
         await self.rate.acquire(count)
         await self.concurrency.acquire(count)
-
-    def try_acquire(self, count: int = 1) -> bool:
-        """Non-blocking concurrency acquire. Returns True if slots were reserved."""
-        return self.concurrency.try_acquire(count)
 
     def release(self, count: int = 1) -> None:
         """Release concurrency slots."""

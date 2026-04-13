@@ -184,12 +184,7 @@ class Scheduler:
         env = self.train_envs.get(env_name)
         cost = group.rollouts_to_schedule if env.requires_group_scoring else 1
 
-        # Rate limit (blocking), then reserve concurrency slots (non-blocking).
-        # Concurrency is non-blocking here because _fill_inflight_requests must not stall;
-        # the caller already checked remaining slots before invoking this method.
-        await self.limiter.rate.acquire(cost)
-        if not self.limiter.try_acquire(cost):
-            return
+        await self.limiter.acquire(cost)
 
         # Re-check group validity after potentially yielding during rate limit
         group = self.groups.get(group_id)
@@ -537,8 +532,6 @@ class Scheduler:
             "scheduler/async_level": self.async_level,
             "scheduler/inflight_rollouts": self.inflight_rollout_count,
             "scheduler/inflight_samples": self.inflight_sample_count,
-            "scheduler/limiter_used": self.limiter.concurrency.used,
-            "scheduler/limiter_remaining": self.limiter.remaining,
             "scheduler/cancelled_rollouts": self.cancelled_rollouts_count,
             "empty_rollouts/all": sum(self.empty_rollouts_by_env.values()) / max(total_rollouts, 1),
             "errored_rollouts/all": sum(self.errored_rollouts_by_env.values()) / max(total_rollouts, 1),
