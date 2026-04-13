@@ -650,9 +650,12 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
     def convert_to_prime(cls, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4.converting_gemma4 import convert_hf_to_prime
 
-        if _has_vlm_keys(state_dict):
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
             _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_to_prime(state_dict)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
     @classmethod
@@ -671,9 +674,12 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
     def convert_layer_to_prime(cls, state_dict: dict[str, Tensor], layer_idx: int) -> dict[str, Tensor]:
         from prime_rl.trainer.models.gemma4.converting_gemma4 import convert_hf_layer_to_prime
 
-        if _has_vlm_keys(state_dict):
+        vlm = _has_vlm_keys(state_dict)
+        if vlm:
             _remap_lm_keys(state_dict, to_flat=True)
         convert_hf_layer_to_prime(state_dict, layer_idx)
+        if vlm:
+            _remap_lm_keys(state_dict, to_flat=False)
         return state_dict
 
 
@@ -825,11 +831,7 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        return self.lm_head(
-            hidden_states[:, slice_indices, :],
-            labels[:, slice_indices] if labels is not None else None,
-            temperature=temperature,
-        )
+        return self.lm_head(hidden_states[:, slice_indices, :])
 
     def init_buffers_post_meta(self):
         self.model.embed_tokens.embed_scale.fill_(self.config.hidden_size**0.5)
