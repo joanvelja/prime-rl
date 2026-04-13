@@ -117,9 +117,9 @@ def validate_shared_tokenizer(
         )
     if inference is not None:
         chat_template = trainer.tokenizer.chat_template
-        if chat_template != inference.chat_template:
+        if chat_template != inference.model.chat_template:
             raise ValueError(
-                f"Inference chat_template ({inference.chat_template!r}) does not match "
+                f"Inference chat_template ({inference.model.chat_template!r}) does not match "
                 f"the shared tokenizer chat_template ({chat_template!r}). "
                 f"Use the shared [tokenizer] config to set chat_template for all components."
             )

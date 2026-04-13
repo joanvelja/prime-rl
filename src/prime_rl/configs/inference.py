@@ -71,6 +71,14 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = False
 
+    chat_template: Annotated[
+        str | None,
+        Field(
+            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
+            "Passed to vLLM as `--chat-template`. If None, uses the model's default.",
+        ),
+    ] = None
+
     tool_call_parser: Annotated[
         str | None,
         Field(
@@ -248,14 +256,6 @@ class InferenceConfig(BaseConfig):
 
     # The parallel configuration
     parallel: ParallelConfig = ParallelConfig()
-
-    chat_template: Annotated[
-        str | None,
-        Field(
-            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
-            "Passed to vLLM as `--chat-template`. If None, uses the model's default.",
-        ),
-    ] = None
 
     enable_lora: Annotated[
         bool,
@@ -497,12 +497,12 @@ class InferenceConfig(BaseConfig):
             "model.max_model_len": "max_model_len",
             "model.enforce_eager": "enforce_eager",
             "model.trust_remote_code": "trust_remote_code",
+            "model.chat_template": "chat_template",
             "model.tool_call_parser": "tool_call_parser",
             "model.reasoning_parser": "reasoning_parser",
             "model.rope_scaling": "rope_scaling",
             "parallel.tp": "tensor_parallel_size",
             "parallel.dp": "data_parallel_size",
-            "chat_template": "chat_template",
             "data_parallel_size_local": "data_parallel_size_local",
             "data_parallel_rpc_port": "data_parallel_rpc_port",
             "enable_lora": "enable_lora",

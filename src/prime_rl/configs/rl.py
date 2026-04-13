@@ -585,8 +585,8 @@ class RLConfig(BaseConfig):
         # Propagate chat_template to inference (vLLM --chat-template)
         if self.inference is not None:
             chat_template = self.trainer.tokenizer.chat_template
-            if chat_template is not None and self.inference.chat_template is None:
-                self.inference.chat_template = chat_template
+            if chat_template is not None and self.inference.model.chat_template is None:
+                self.inference.model.chat_template = chat_template
 
         validate_shared_tokenizer(self.trainer, self.orchestrator, self.inference)
 
