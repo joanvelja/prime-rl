@@ -135,13 +135,11 @@ class Scheduler:
 
     async def cancel_inflight_rollouts(self):
         """Cancel all in-flight rollout requests."""
-        await safe_cancel_all(list(self.inflight_requests))
-        # Compute count after cancellation — other coroutines (e.g. drop_group) may have
-        # popped and released some tasks during the yield in safe_cancel_all.
         count = sum(info.rollout_count for info in self.inflight_requests.values())
+        await safe_cancel_all(list(self.inflight_requests))
         self.inflight_requests.clear()
         self.groups.clear()
-        self.limiter.release(count)
+        # Limiter slots are released by done callbacks on the cancelled tasks.
         self.cancelled_rollouts_count += count
 
     @staticmethod
@@ -173,7 +171,7 @@ class Scheduler:
             rollout_count += info.rollout_count
         self.groups.pop(group_id, None)
         await safe_cancel_all(tasks_to_cancel)
-        self.limiter.release(rollout_count)
+        # Limiter slots are released by done callbacks on the cancelled tasks.
         return rollout_count
 
     async def schedule_rollout(self, group_id: int):
@@ -231,6 +229,9 @@ class Scheduler:
             group_id=group_id,
             rollout_count=rollout_count,
         )
+        # Release limiter slots when the task finishes (success, error, or cancellation)
+        # so that eval coroutines can acquire slots even when generate_batch is not running.
+        task.add_done_callback(lambda _, count=rollout_count: self.limiter.release(count))
 
     @property
     def inflight_rollout_count(self) -> int:
@@ -424,7 +425,6 @@ class Scheduler:
                 if rollout_info is None:
                     continue
 
-                self.limiter.release(rollout_info.rollout_count)
                 group_id = rollout_info.group_id
                 env_name = rollout_info.env_name
 
