@@ -131,6 +131,14 @@ class SharedModelConfig(BaseConfig):
         Field(description="The name of the model to use."),
     ] = "Qwen/Qwen3-0.6B"
 
+    chat_template: Annotated[
+        str | None,
+        Field(
+            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
+            "Propagated to inference, orchestrator, and trainer.",
+        ),
+    ] = None
+
     vlm: Annotated[
         "VLMConfig | None",
         Field(description="VLM configuration. Set to enable vision-language model support."),
@@ -543,11 +551,19 @@ class RLConfig(BaseConfig):
                 if self.inference is not None:
                     self.inference.model.vlm = self.model.vlm
 
-            # Re-propagate model name to tokenizer since TrainerConfig.auto_setup_tokenizer
-            # already ran with the default model name before this validator.
-            self.trainer.tokenizer.name = self.trainer.model.name
-            if self.trainer.tokenizer.trust_remote_code is None:
-                self.trainer.tokenizer.trust_remote_code = self.trainer.model.trust_remote_code
+            if self.model.chat_template is not None:
+                self.trainer.model.chat_template = self.model.chat_template
+                self.orchestrator.model.chat_template = self.model.chat_template
+                if self.inference is not None:
+                    self.inference.model.chat_template = self.model.chat_template
+
+            # Re-propagate to tokenizer configs since auto_setup_tokenizer on
+            # TrainerConfig/OrchestratorConfig already ran with defaults before
+            # this validator could set the correct model name.
+            for component in (self.trainer, self.orchestrator):
+                component.tokenizer.name = component.model.name
+                component.tokenizer.trust_remote_code = component.model.trust_remote_code
+                component.tokenizer.chat_template = component.model.chat_template
 
         validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 

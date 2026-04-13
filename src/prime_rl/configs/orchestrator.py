@@ -14,6 +14,7 @@ from prime_rl.configs.shared import (
     TransportConfig,
     WandbWithExtrasConfig,
 )
+from prime_rl.configs.trainer import TokenizerConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 
@@ -842,6 +843,9 @@ class OrchestratorConfig(BaseConfig):
     # The model configuration
     model: ModelConfig = ModelConfig()
 
+    # The tokenizer configuration
+    tokenizer: TokenizerConfig = TokenizerConfig()
+
     # The optimizer configuration (per-run LR for multi-run training)
     optim: OptimizerConfig = OptimizerConfig()
 
@@ -1041,6 +1045,16 @@ class OrchestratorConfig(BaseConfig):
                     )
                     train.setdefault("sampling", data.pop("sampling"))
         return data
+
+    @model_validator(mode="after")
+    def auto_setup_tokenizer(self):
+        if self.tokenizer.name is None:
+            self.tokenizer.name = self.model.name
+        if self.tokenizer.trust_remote_code is None:
+            self.tokenizer.trust_remote_code = self.model.trust_remote_code
+        if self.tokenizer.chat_template is None and self.model.chat_template is not None:
+            self.tokenizer.chat_template = self.model.chat_template
+        return self
 
     @model_validator(mode="after")
     def validate_unique_filter_types(self):

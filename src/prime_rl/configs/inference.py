@@ -489,6 +489,7 @@ class InferenceConfig(BaseConfig):
             "model.max_model_len": "max_model_len",
             "model.enforce_eager": "enforce_eager",
             "model.trust_remote_code": "trust_remote_code",
+            "model.chat_template": "chat_template",
             "model.tool_call_parser": "tool_call_parser",
             "model.reasoning_parser": "reasoning_parser",
             "model.rope_scaling": "rope_scaling",
@@ -518,6 +519,10 @@ class InferenceConfig(BaseConfig):
 
         # Set `logprobs_mode` to `processed_logprobs` by default
         rsetattr(namespace, "logprobs_mode", "processed_logprobs")
+
+        # Remove chat_template if not set (vLLM doesn't accept None)
+        if namespace.chat_template is None:
+            delattr(namespace, "chat_template")
 
         # Remove reasoning_parser if not set (vLLM doesn't accept None)
         if namespace.reasoning_parser is None:
