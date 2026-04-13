@@ -124,14 +124,6 @@ class BaseModelConfig(BaseConfig):
         ),
     ] = False
 
-    chat_template: Annotated[
-        str | None,
-        Field(
-            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
-            "If None, uses the model's default chat template.",
-        ),
-    ] = None
-
     vlm: Annotated[
         "VLMConfig | None",
         Field(

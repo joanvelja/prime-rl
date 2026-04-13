@@ -26,6 +26,7 @@ from prime_rl.configs.shared import (
 from prime_rl.configs.trainer import (
     BenchConfig,
     FakeDataLoaderConfig,
+    TokenizerConfig,
     TrainerConfig,
 )
 from prime_rl.configs.trainer import (
@@ -130,14 +131,6 @@ class SharedModelConfig(BaseConfig):
         str,
         Field(description="The name of the model to use."),
     ] = "Qwen/Qwen3-0.6B"
-
-    chat_template: Annotated[
-        str | None,
-        Field(
-            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
-            "Propagated to inference, orchestrator, and trainer.",
-        ),
-    ] = None
 
     vlm: Annotated[
         "VLMConfig | None",
@@ -298,6 +291,14 @@ class RLConfig(BaseConfig):
         SharedModelConfig | None,
         Field(
             description="Shared model configs. If None, will fallback to the model configs specified on submodule configs."
+        ),
+    ] = None
+
+    tokenizer: Annotated[
+        TokenizerConfig | None,
+        Field(
+            description="Shared tokenizer config. Propagated to trainer, orchestrator, and inference. "
+            "If None, each component uses its own tokenizer config (defaulting to model name).",
         ),
     ] = None
 
@@ -551,21 +552,40 @@ class RLConfig(BaseConfig):
                 if self.inference is not None:
                     self.inference.model.vlm = self.model.vlm
 
-            if self.model.chat_template is not None:
-                self.trainer.model.chat_template = self.model.chat_template
-                self.orchestrator.model.chat_template = self.model.chat_template
-                if self.inference is not None:
-                    self.inference.model.chat_template = self.model.chat_template
+        validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
 
-            # Re-propagate to tokenizer configs since auto_setup_tokenizer on
-            # TrainerConfig/OrchestratorConfig already ran with defaults before
-            # this validator could set the correct model name.
+        return self
+
+    @model_validator(mode="after")
+    def auto_setup_tokenizer(self):
+        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference.
+
+        Re-runs tokenizer auto-setup on trainer/orchestrator since their validators
+        ran during construction with default model names, before auto_setup_model
+        could set the correct ones.
+        """
+        if self.tokenizer is not None:
+            # Shared tokenizer config: propagate to all components, then fill
+            # in name/trust_remote_code from model config where still unset.
+            self.trainer.tokenizer = self.tokenizer.model_copy()
+            self.orchestrator.tokenizer = self.tokenizer.model_copy()
+            for component in (self.trainer, self.orchestrator):
+                if component.tokenizer.name is None:
+                    component.tokenizer.name = component.model.name
+                if component.tokenizer.trust_remote_code is None:
+                    component.tokenizer.trust_remote_code = component.model.trust_remote_code
+        else:
+            # No shared tokenizer: re-derive from (now-correct) model names,
+            # since auto_setup_tokenizer on sub-configs already ran with defaults.
             for component in (self.trainer, self.orchestrator):
                 component.tokenizer.name = component.model.name
                 component.tokenizer.trust_remote_code = component.model.trust_remote_code
-                component.tokenizer.chat_template = component.model.chat_template
 
-        validate_shared_model_name(self.trainer, self.orchestrator, self.inference)
+        # Propagate chat_template to inference (vLLM --chat-template)
+        if self.inference is not None:
+            chat_template = self.trainer.tokenizer.chat_template
+            if chat_template is not None:
+                self.inference.chat_template = chat_template
 
         return self
 

@@ -1052,8 +1052,6 @@ class OrchestratorConfig(BaseConfig):
             self.tokenizer.name = self.model.name
         if self.tokenizer.trust_remote_code is None:
             self.tokenizer.trust_remote_code = self.model.trust_remote_code
-        if self.tokenizer.chat_template is None and self.model.chat_template is not None:
-            self.tokenizer.chat_template = self.model.chat_template
         return self
 
     @model_validator(mode="after")
