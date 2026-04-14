@@ -889,6 +889,7 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
             input_ids=input_ids,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state
@@ -896,7 +897,7 @@ class Gemma4ForCausalLM(Gemma4PreTrainedModel, GenerationMixin):
         return self.lm_head(
             hidden_states[:, slice_indices, :],
             labels[:, slice_indices] if labels is not None else None,
-            temperature=temperature,
+            temperature=temperature[:, slice_indices] if temperature is not None else None,
         )
 
     def _get_text_config(self):
