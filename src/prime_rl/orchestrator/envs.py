@@ -200,6 +200,7 @@ class EvalEnv(Env):
                         example=example,
                         model_name=model_name,
                         rollouts_per_example=rollouts_per_example,
+                        cache_salt=str(ckpt_step),
                     )
                     pbar.update(rollouts_per_example)
                     return outputs
@@ -216,7 +217,9 @@ class EvalEnv(Env):
                 """Run a single rollout for one example."""
                 try:
                     client = await get_client()
-                    output = await self.run_rollout(client=client, example=example, model_name=model_name)
+                    output = await self.run_rollout(
+                        client=client, example=example, model_name=model_name, cache_salt=str(ckpt_step)
+                    )
                     pbar.update(1)
                     return [output]
                 except Exception as e:
