@@ -39,6 +39,9 @@ MODEL_TOOL_CALL_PARSER: dict[str, str] = {
     # GLM-5
     "zai-org/GLM-5": "glm47",
     "zai-org/GLM-5-FP8": "glm47",
+    # GLM-5.1
+    "zai-org/GLM-5.1": "glm47",
+    "zai-org/GLM-5.1-FP8": "glm47",
     # MiniMax M2
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
     "MiniMaxAI/MiniMax-M2.1": "minimax_m2",
