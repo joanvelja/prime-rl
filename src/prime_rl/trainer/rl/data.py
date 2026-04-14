@@ -39,6 +39,9 @@ class TensorMicroBatch(TypedDict):
     # mm_token_type_ids: token type per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: Int[Tensor, "batch seq"] | None
 
+    # Per-batch loss override (e.g. "sft" for hard distill); None = use trainer config default
+    loss_type: str | None
+
 
 class FakeDataLoader:
     def __init__(self, config: FakeDataLoaderConfig, seq_len: int, dp_world_size: int):
@@ -111,6 +114,7 @@ class FakeDataLoader:
             "pixel_values": None,
             "image_grid_thw": None,
             "mm_token_type_ids": None,
+            "loss_type": None,
         }
 
     def _get_micro_batch(self, generator: torch.Generator) -> TensorMicroBatch:
@@ -137,6 +141,7 @@ class FakeDataLoader:
             "pixel_values": None,
             "image_grid_thw": None,
             "mm_token_type_ids": None,
+            "loss_type": None,
         }
 
 
@@ -218,4 +223,5 @@ class DataLoader:
             )  # [1, seq_len, layers, topk]
             if micro_batch.routed_experts is not None
             else None,
+            loss_type=micro_batch.loss_type,
         )

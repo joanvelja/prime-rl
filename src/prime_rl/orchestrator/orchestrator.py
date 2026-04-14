@@ -477,6 +477,8 @@ async def orchestrate(config: OrchestratorConfig):
                 for sample in samples:
                     sample.advantage = rollout["advantage"]
                     sample.reward = rollout["reward"]
+                    if config.teacher_rollout_model is not None:
+                        sample.loss_type = "sft"
                     sample_decode_tokens = sum(sample.completion_mask)
                     sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
                     rollout_decode_tokens += sample_decode_tokens
