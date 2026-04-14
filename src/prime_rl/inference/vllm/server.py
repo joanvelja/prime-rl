@@ -2,8 +2,8 @@ from argparse import Namespace
 from typing import Any
 
 import uvloop
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import init_app_state
@@ -245,32 +245,6 @@ async def init_broadcaster(request: Request):
         args=(host, port, rank_offset, inference_world_size, timeout, quantize_in_weight_transfer),
     )
     return {"status": "ok"}
-
-
-@router.post(
-    "/v1/chat/completions/tokens",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def _chat_with_tokens(request: ChatCompletionRequestWithTokens, raw_request: Request):
-    handler = chat_with_tokens(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
-    generator = await handler.create_chat_completion_with_tokens(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
-
-    elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 async def custom_init_app_state(
