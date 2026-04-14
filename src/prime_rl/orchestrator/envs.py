@@ -104,18 +104,27 @@ class Env:
         self._env_server_process = process
         return address
 
+    def _sampling_args_with_salt(self, cache_salt: str | None) -> dict:
+        if cache_salt is None:
+            return self.sampling_args
+        sampling_args = {**self.sampling_args}
+        extra_body = {**sampling_args.get("extra_body", {}), "cache_salt": cache_salt}
+        sampling_args["extra_body"] = extra_body
+        return sampling_args
+
     async def run_rollout(
         self,
         client: vf.ClientConfig,
         example: dict,
         model_name: str,
+        cache_salt: str | None = None,
     ) -> vf.RolloutOutput:
         """Run a single rollout for an example."""
         return await self.env.run_rollout(
             vf.RolloutInput(**example),
             client=client,
             model=model_name,
-            sampling_args=self.sampling_args,
+            sampling_args=self._sampling_args_with_salt(cache_salt),
             max_retries=self.config.max_retries,
             state_columns=REQUIRED_STATE_COLUMNS,
             env_client=self.env_client,
@@ -127,13 +136,14 @@ class Env:
         example: dict,
         model_name: str,
         rollouts_per_example: int,
+        cache_salt: str | None = None,
     ) -> list[vf.RolloutOutput]:
         """Run a group of rollouts for an example. Required for group-scoring envs."""
         return await self.env.run_group(
             [vf.RolloutInput(**example) for _ in range(rollouts_per_example)],
             client=client,
             model=model_name,
-            sampling_args=self.sampling_args,
+            sampling_args=self._sampling_args_with_salt(cache_salt),
             max_retries=self.config.max_retries,
             state_columns=REQUIRED_STATE_COLUMNS,
             env_client=self.env_client,
