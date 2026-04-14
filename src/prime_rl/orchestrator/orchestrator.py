@@ -236,6 +236,7 @@ async def orchestrate(config: OrchestratorConfig):
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
         config=config,
+        use_prefix_cache_salt=config.experimental.use_prefix_cache_salt,
     )
     scheduler.model_name = rollout_model_name
 
@@ -312,6 +313,15 @@ async def orchestrate(config: OrchestratorConfig):
     else:
         logger.info("Training from scratch")
 
+    # Set initial cache salt on all envs
+    if config.experimental.use_prefix_cache_salt:
+        salt = str(scheduler.ckpt_step)
+        for env in train_envs:
+            env.set_cache_salt(salt)
+        if eval_envs is not None:
+            for env in eval_envs:
+                env.set_cache_salt(salt)
+
     # Iterate over dataset in batches
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
@@ -369,6 +379,10 @@ async def orchestrate(config: OrchestratorConfig):
         if envs_to_eval:
             env_names = ", ".join(e.name for e in envs_to_eval)
             logger.info(f"Running evals at {ckpt_step=} for {env_names}")
+
+            if config.experimental.use_prefix_cache_salt:
+                for eval_env in envs_to_eval:
+                    eval_env.set_cache_salt(str(ckpt_step))
 
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
@@ -711,6 +725,9 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
+        if config.experimental.use_prefix_cache_salt:
+            for eval_env in eval_envs:
+                eval_env.set_cache_salt(str(ckpt_step))
         eval_results = await asyncio.gather(
             *[
                 eval_env.evaluate(

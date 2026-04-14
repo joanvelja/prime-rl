@@ -68,6 +68,7 @@ class Scheduler:
         tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
+        use_prefix_cache_salt: bool = False,
     ):
         self.logger = get_logger()
         if tasks_per_minute is not None:
@@ -86,6 +87,7 @@ class Scheduler:
         self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
         self.lora_name = lora_name
+        self.use_prefix_cache_salt = use_prefix_cache_salt
         self.model_name = self.config.model.name
         self.json_logging = config.log.json_logging
 
@@ -306,6 +308,9 @@ class Scheduler:
             self.model_name = self.lora_name
             self.inference_pool.update_model_name(self.model_name)
 
+        if self.use_prefix_cache_salt:
+            self._update_cache_salt(str(next_ckpt_step))
+
         self.checkpoint_ready.set()
         await self._update_off_policy()
 
@@ -366,6 +371,10 @@ class Scheduler:
                 f"Cancelled {removed} old rollout requests (will refill naturally). "
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
+
+    def _update_cache_salt(self, salt: str) -> None:
+        for env in self.train_envs:
+            env.set_cache_salt(salt)
 
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""

@@ -139,6 +139,10 @@ class Env:
             env_client=self.env_client,
         )
 
+    def set_cache_salt(self, salt: str) -> None:
+        extra_body = self.sampling_args.setdefault("extra_body", {})
+        extra_body["cache_salt"] = salt
+
     def shutdown(self) -> None:
         if self._env_server_process is None:
             return
