@@ -342,7 +342,7 @@ def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
 
     args.tool_call_parser = resolve_tool_call_parser(args.model, args.tool_call_parser)
     args.enable_auto_tool_choice = args.tool_call_parser is not None
-    args.reset_prefix_cache_after_update = config.reset_prefix_cache_after_update
+    args.reset_prefix_cache_after_update = config.experimental.reset_prefix_cache_after_update
     if args.tool_call_parser is not None:
         logger.info(f"Using tool_call_parser='{args.tool_call_parser}' for model '{args.model}'")
 
