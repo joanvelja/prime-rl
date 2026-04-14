@@ -809,6 +809,10 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 ]
 
 
+class OrchestratorExperimentalConfig(BaseConfig):
+    """Experimental features for the orchestrator."""
+
+
 class TeacherModelConfig(BaseConfig):
     """Configures the teacher model for computing teacher logprobs (e.g. for distillation)."""
 
@@ -1028,6 +1032,11 @@ class OrchestratorConfig(BaseConfig):
             description="Whether to use the token-in-token-out (TITO) client for training across all environments. WARNING: Only use this if your environment has a linear history and the chat template has the extension property (i.e. no tokens are ever removed or inserted by the chat template)"
         ),
     ] = True
+
+    experimental: Annotated[
+        OrchestratorExperimentalConfig,
+        Field(description="Experimental features for the orchestrator."),
+    ] = OrchestratorExperimentalConfig()
 
     @model_validator(mode="before")
     @classmethod
