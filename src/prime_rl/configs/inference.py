@@ -309,9 +309,10 @@ class InferenceConfig(BaseConfig):
         bool,
         Field(
             description="Whether to reset the prefix cache after weight updates (update_weights, load_lora_adapter). "
-            "Disabling this avoids the latency of cache invalidation when prefix caching correctness is not a concern.",
+            "Ensures all KV states are recomputed with the new weights at the cost of extra prefill. "
+            "When False, prefer using orchestrator.use_prefix_cache_salt to invalidate stale caches via salt instead.",
         ),
-    ] = True
+    ] = False
 
     gpu_memory_utilization: Annotated[
         float,
