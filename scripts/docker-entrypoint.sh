@@ -8,7 +8,7 @@ ulimit -n 32000 2>/dev/null || echo "Warning: Could not set ulimit (may need --u
 # VERIFIERS_VERSION can be a git tag, branch, or commit hash.
 if [ -n "$VERIFIERS_VERSION" ]; then
     echo "Installing verifiers version: $VERIFIERS_VERSION"
-    uv pip install --reinstall \
+    uv pip install --reinstall-package verifiers \
         "verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@${VERIFIERS_VERSION}"
 fi
 
