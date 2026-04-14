@@ -104,7 +104,7 @@ class ElasticInferencePool:
         self,
         client_config: ClientConfig,
         model_name: str,
-        train_client_type: str = "openai_chat_completions",
+        train_client_type: str = "renderer",
         eval_client_type: str = "openai_chat_completions",
         renderer_name: str = "auto",
     ):
@@ -140,7 +140,7 @@ class ElasticInferencePool:
         cls,
         client_config: ClientConfig,
         model_name: str,
-        train_client_type: str = "openai_chat_completions",
+        train_client_type: str = "renderer",
         eval_client_type: str = "openai_chat_completions",
         renderer_name: str = "auto",
     ) -> ElasticInferencePool:

@@ -62,7 +62,7 @@ class StaticInferencePool:
         self,
         client_config: ClientConfig,
         model_name: str,
-        train_client_type: str = "openai_chat_completions",
+        train_client_type: str = "renderer",
         eval_client_type: str = "openai_chat_completions",
         renderer_name: str = "auto",
     ):
@@ -114,7 +114,7 @@ class StaticInferencePool:
 async def setup_inference_pool(
     client_config: ClientConfig,
     model_name: str,
-    train_client_type: str = "openai_chat_completions",
+    train_client_type: str = "renderer",
     eval_client_type: str = "openai_chat_completions",
     renderer_name: str = "auto",
 ) -> InferencePool:
