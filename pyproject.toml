@@ -120,7 +120,7 @@ override-dependencies = [
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
-verifiers = { path = "/home/ubuntu/verifiers", editable = true }
+verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", branch = "renderers" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "c1c3424" }
