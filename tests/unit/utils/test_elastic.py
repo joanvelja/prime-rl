@@ -428,7 +428,7 @@ def test_elastic_clients_preserve_renderer_model_name_when_model_name_updates():
         }
 
         pool.update_model_name("r8-smoke")
-        clients = pool.clients
+        clients = pool.train_clients
 
         assert clients == [
             vf.ClientConfig(
