@@ -76,7 +76,7 @@ def prepare_sample(training_example: TrainingSample, seq_len: int) -> MicroBatch
         pixel_values=training_example.pixel_values,
         pixel_values_shape=training_example.pixel_values_shape,
         image_grid_thw=training_example.image_grid_thw,
-        loss_type=training_example.loss_type,
+        sft_loss=training_example.sft_loss,
     )
 
 

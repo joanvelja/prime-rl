@@ -26,7 +26,7 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     # mm_token_type_ids: token type ids per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: list[int] | None = None
 
-    loss_type: str | None = None  # Per-sample loss override (e.g. "sft" for hard distill)
+    sft_loss: bool = False  # When True, trainer uses SFT loss instead of RL loss for this sample
 
 
 class TrainingBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
@@ -59,4 +59,4 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     # mm_token_type_ids: token type ids per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: list[int] | None = None
 
-    loss_type: str | None = None  # Per-batch loss override (e.g. "sft" for hard distill)
+    sft_loss: bool = False  # When True, trainer uses SFT loss instead of RL loss for this batch
