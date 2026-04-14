@@ -136,9 +136,6 @@ from prime_rl.inference.patches import (
     monkey_patch_load_lora_adapter,
     monkey_patch_tokenize_params_validation,
 )
-from prime_rl.inference.vllm.serving_chat_with_routed_experts import (
-    OpenAIServingChatWithRoutedExperts,
-)
 
 # NOTE: Fix harmony stop token propagation for GPT-OSS models
 # Upstream issue still open: https://github.com/vllm-project/vllm/issues/22519
@@ -256,23 +253,15 @@ async def custom_init_app_state(
     """
     Modifies init_app_state:
     1. Call the original init_app_state to set up standard state.
-    2. Replace the serving_chat with our routed-experts wrapper so chat responses
-       can still expose routed experts when requested.
+    2. Add /v1/generate endpoint for renderer-based token-level inference.
     """
     await init_app_state(engine_client, state, args, supported_tasks)
-
-    if "generate" in supported_tasks and state.openai_serving_chat is not None:
-        original_chat = state.openai_serving_chat
-        serving_chat = object.__new__(OpenAIServingChatWithRoutedExperts)
-        serving_chat.__dict__.update(original_chat.__dict__)
-        state.openai_serving_chat = serving_chat
-    else:
-        serving_chat = None
 
     # /v1/generate endpoint — tokens + optional images, no chat template
     from prime_rl.inference.vllm.serving_generate import OpenAIServingGenerate
 
-    state.openai_serving_generate = OpenAIServingGenerate(engine_client, chat_handler=serving_chat)
+    chat_handler = state.openai_serving_chat if "generate" in supported_tasks else None
+    state.openai_serving_generate = OpenAIServingGenerate(engine_client, chat_handler=chat_handler)
 
 
 import vllm.entrypoints.openai.api_server
