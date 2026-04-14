@@ -198,6 +198,7 @@ class Scheduler:
         env_name = group.example["env_name"]
         env = self.train_envs.get(env_name)
 
+        cache_salt = str(self.ckpt_step) if self.use_prefix_cache_salt else None
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
             group.rollouts_to_schedule = 0
@@ -207,6 +208,7 @@ class Scheduler:
                     example=group.example,
                     model_name=self.model_name,
                     rollouts_per_example=rollout_count,
+                    cache_salt=cache_salt,
                 )
             )
         else:
@@ -217,6 +219,7 @@ class Scheduler:
                     client=client_config,
                     example=group.example,
                     model_name=self.model_name,
+                    cache_salt=cache_salt,
                 )
             )
         self.inflight_requests[task] = InflightRequest(
@@ -308,9 +311,6 @@ class Scheduler:
             self.model_name = self.lora_name
             self.inference_pool.update_model_name(self.model_name)
 
-        if self.use_prefix_cache_salt:
-            self._update_cache_salt(str(next_ckpt_step))
-
         self.checkpoint_ready.set()
         await self._update_off_policy()
 
@@ -371,10 +371,6 @@ class Scheduler:
                 f"Cancelled {removed} old rollout requests (will refill naturally). "
                 f"Consider increasing max_off_policy_steps to avoid this."
             )
-
-    def _update_cache_salt(self, salt: str) -> None:
-        for env in self.train_envs:
-            env.set_cache_salt(salt)
 
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""

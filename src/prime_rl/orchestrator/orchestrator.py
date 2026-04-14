@@ -313,15 +313,6 @@ async def orchestrate(config: OrchestratorConfig):
     else:
         logger.info("Training from scratch")
 
-    # Set initial cache salt on all envs
-    if config.experimental.use_prefix_cache_salt:
-        salt = str(scheduler.ckpt_step)
-        for env in train_envs:
-            env.set_cache_salt(salt)
-        if eval_envs is not None:
-            for env in eval_envs:
-                env.set_cache_salt(salt)
-
     # Iterate over dataset in batches
     logger.info(f"Starting orchestrator loop (max_steps={config.max_steps or 'infinite'})")
     is_first_step = True
@@ -380,10 +371,6 @@ async def orchestrate(config: OrchestratorConfig):
             env_names = ", ".join(e.name for e in envs_to_eval)
             logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
-            if config.experimental.use_prefix_cache_salt:
-                for eval_env in envs_to_eval:
-                    eval_env.set_cache_salt(str(ckpt_step))
-
             # Pause weight updates and re-scheduling of training rollouts during eval
             # to avoid evaluating across different checkpoints and avoid congestion
             scheduler.checkpoint_ready.clear()
@@ -393,6 +380,7 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
+            eval_cache_salt = str(ckpt_step) if config.experimental.use_prefix_cache_salt else None
             eval_results = await asyncio.gather(
                 *[
                     eval_env.evaluate(
@@ -400,6 +388,7 @@ async def orchestrate(config: OrchestratorConfig):
                         get_client=inference_pool.get_eval_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
+                        cache_salt=eval_cache_salt,
                     )
                     for eval_env in envs_to_eval
                 ]
@@ -725,9 +714,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
-        if config.experimental.use_prefix_cache_salt:
-            for eval_env in eval_envs:
-                eval_env.set_cache_salt(str(ckpt_step))
+        final_cache_salt = str(ckpt_step) if config.experimental.use_prefix_cache_salt else None
         eval_results = await asyncio.gather(
             *[
                 eval_env.evaluate(
@@ -735,6 +722,7 @@ async def orchestrate(config: OrchestratorConfig):
                     get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
+                    cache_salt=final_cache_salt,
                 )
                 for eval_env in eval_envs
             ]
