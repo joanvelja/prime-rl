@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import asynccontextmanager
 
 import verifiers as vf
 
@@ -24,20 +23,10 @@ class _FakeOpenAIClient:
         )
 
 
-@asynccontextmanager
-async def _null_semaphore():
-    yield
-
-
 def test_compute_teacher_logprobs_uses_generate_endpoint(monkeypatch):
     async def _run():
         fake_client = _FakeOpenAIClient()
         monkeypatch.setattr(orchestrator_utils, "setup_openai_client", lambda _: fake_client)
-
-        async def _fake_get_semaphore():
-            return _null_semaphore()
-
-        monkeypatch.setattr(orchestrator_utils, "get_semaphore", _fake_get_semaphore)
 
         sample = TrainingSample(
             prompt_ids=[1],

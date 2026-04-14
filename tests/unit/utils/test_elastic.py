@@ -407,6 +407,10 @@ def test_get_loaded_adapter_handles_step_dash_format():
 def test_elastic_clients_preserve_renderer_model_name_when_model_name_updates():
     with patch("prime_rl.utils.elastic.get_logger"):
         client_config = MagicMock()
+        client_config.elastic.hostname = "test.hostname"
+        client_config.elastic.port = 8000
+        client_config.elastic.sync_interval = 5.0
+        client_config.router_url = None
         client_config.timeout = 1200
         client_config.connect_timeout = 30.0
         client_config.api_key_var = "PRIME_API_KEY"
@@ -414,12 +418,10 @@ def test_elastic_clients_preserve_renderer_model_name_when_model_name_updates():
         client_config.dp_rank_count = 1
 
         pool = ElasticInferencePool(
-            hostname="test.hostname",
             client_config=client_config,
             model_name="Qwen/Qwen3-VL-4B-Instruct",
-            client_type="renderer",
+            train_client_type="renderer",
             renderer_name="qwen3_vl",
-            port=8000,
         )
         pool._servers = {
             "10.0.0.1": MagicMock(status="ready"),
