@@ -12,6 +12,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from wandb.errors import CommError
 
 from prime_rl.configs.shared import WandbConfig, WandbWithExtrasConfig
+from prime_rl.utils.chat_template import deserialize_tool_calls
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
@@ -95,7 +96,7 @@ class WandbMonitor(Monitor):
         if config is not None and isinstance(config, WandbWithExtrasConfig) and config.log_extras:
             if config.log_extras.samples:
                 self.last_log_samples_step = -1
-                self.samples_cols = ["step", "task", "example_id", "messages", "input_ids", "reward"]
+                self.samples_cols = ["step", "env_name", "task", "example_id", "messages", "input_ids", "reward"]
                 self.samples_table = wandb.Table(
                     columns=self.samples_cols,
                     log_mode="INCREMENTAL",
@@ -161,6 +162,7 @@ class WandbMonitor(Monitor):
             messages_text = self.tokenizer.decode(full_ids)
             sample = {
                 "step": step,
+                "env_name": rollout.get("env_name"),
                 "task": rollout.get("task"),
                 "example_id": rollout["example_id"],
                 "messages": messages_text,
@@ -194,7 +196,10 @@ class WandbMonitor(Monitor):
             if not completion:
                 continue
             if isinstance(completion, list):
-                completion = self.tokenizer.apply_chat_template(completion, tokenize=False)
+                try:
+                    completion = self.tokenizer.apply_chat_template(deserialize_tool_calls(completion), tokenize=False)
+                except Exception:
+                    completion = str(completion)
             sample = {
                 "step": step,
                 "env": env_name,

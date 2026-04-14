@@ -71,6 +71,14 @@ class ModelConfig(BaseModelConfig):
         ),
     ] = False
 
+    chat_template: Annotated[
+        str | None,
+        Field(
+            description="Chat template to use. Can be a Jinja2 template string or a path to a template file. "
+            "Passed to vLLM as `--chat-template`. If None, uses the model's default.",
+        ),
+    ] = None
+
     tool_call_parser: Annotated[
         str | None,
         Field(
@@ -111,9 +119,8 @@ All2AllBackend = Literal[
     "allgather_reducescatter",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "flashinfer_all2allv",
-    "naive",
-    "pplx",
+    "flashinfer_nvlink_one_sided",
+    "flashinfer_nvlink_two_sided",
 ]
 
 
@@ -140,6 +147,23 @@ class MultiNodeInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
 
     router_port: Annotated[int, Field(description="Port for the vllm-router.")] = 8000
     backend_port: Annotated[int, Field(description="Port for vLLM backend instances.")] = 8100
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
+
+
+class KVCacheOffloadConfig(BaseModel):
+    """CPU KV cache offloading for disaggregated serving.
+
+    When configured, both prefill and decode nodes use
+    MultiConnector (NixlConnector + OffloadingConnector).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpu_bytes: Annotated[int, Field(ge=0, description="CPU bytes available for KV cache offloading per worker.")] = (
+        1_000_000_000
+    )
 
 
 class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
@@ -177,6 +201,9 @@ class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
     router_port: Annotated[int, Field(description="Port for the vllm-router on each replica.")] = 8000
     prefill_port: Annotated[int, Field(description="Port for prefill vLLM instances.")] = 8100
     decode_port: Annotated[int, Field(description="Port for decode vLLM instances.")] = 8200
+    router_policy: Annotated[
+        str, Field(description="Routing policy for the vllm-router (e.g. 'consistent_hash', 'round_robin').")
+    ] = "consistent_hash"
 
     prefill_env_overrides: Annotated[
         dict[str, str],
@@ -186,6 +213,11 @@ class DisaggregatedInferenceDeploymentConfig(BaseInferenceDeploymentConfig):
         dict[str, str],
         Field(description="Extra environment variables exported only on decode nodes."),
     ] = {}
+
+    kv_cache_offload: Annotated[
+        KVCacheOffloadConfig | None,
+        Field(description="CPU KV cache offload config for prefill nodes. None = disabled (NixlConnector only)."),
+    ] = None
 
     @property
     def num_nodes(self) -> int:
@@ -210,6 +242,10 @@ InferenceDeploymentConfig: TypeAlias = Annotated[
     SingleNodeInferenceDeploymentConfig | MultiNodeInferenceDeploymentConfig | DisaggregatedInferenceDeploymentConfig,
     Field(discriminator="type"),
 ]
+
+
+class InferenceExperimentalConfig(BaseConfig):
+    """Experimental features for inference."""
 
 
 class InferenceConfig(BaseConfig):
@@ -252,6 +288,13 @@ class InferenceConfig(BaseConfig):
         int | None,
         Field(
             description="The maximum LoRA rank to use. Passed to vLLM as `--max-lora-rank`",
+        ),
+    ] = None
+
+    lora_target_modules: Annotated[
+        list[str] | None,
+        Field(
+            description="The target modules for LoRA. Passed to vLLM as `--lora-target-modules`.",
         ),
     ] = None
 
@@ -322,6 +365,13 @@ class InferenceConfig(BaseConfig):
         ),
     ] = False
 
+    enable_dbo: Annotated[
+        bool,
+        Field(
+            description="Enable dual batch overlap (DBO). Passed to vLLM as `--enable-dbo`.",
+        ),
+    ] = False
+
     use_deep_gemm: Annotated[
         bool,
         Field(
@@ -366,6 +416,11 @@ class InferenceConfig(BaseConfig):
     output_dir: Annotated[Path, Field(description="Directory for SLURM logs and generated scripts.")] = Path("outputs")
 
     dry_run: Annotated[bool, Field(description="Only validate and dump resolved configs and exit early.")] = False
+
+    experimental: Annotated[
+        InferenceExperimentalConfig,
+        Field(description="Experimental features for inference."),
+    ] = InferenceExperimentalConfig()
 
     @model_validator(mode="after")
     def validate_multi_node_requires_slurm(self):
@@ -450,6 +505,7 @@ class InferenceConfig(BaseConfig):
             "model.max_model_len": "max_model_len",
             "model.enforce_eager": "enforce_eager",
             "model.trust_remote_code": "trust_remote_code",
+            "model.chat_template": "chat_template",
             "model.tool_call_parser": "tool_call_parser",
             "model.reasoning_parser": "reasoning_parser",
             "model.rope_scaling": "rope_scaling",
@@ -462,12 +518,14 @@ class InferenceConfig(BaseConfig):
             "max_loras": "max_loras",
             "max_cpu_loras": "max_cpu_loras",
             "max_lora_rank": "max_lora_rank",
+            "lora_target_modules": "lora_target_modules",
             "gpu_memory_utilization": "gpu_memory_utilization",
             "api_server_count": "api_server_count",
             "enable_return_routed_experts": "enable_return_routed_experts",
             "enable_expert_parallel": "enable_expert_parallel",
             "all2all_backend": "all2all_backend",
             "enable_eplb": "enable_eplb",
+            "enable_dbo": "enable_dbo",
             "seed": "seed",
         }
 
@@ -478,9 +536,17 @@ class InferenceConfig(BaseConfig):
         # Set `logprobs_mode` to `processed_logprobs` by default
         rsetattr(namespace, "logprobs_mode", "processed_logprobs")
 
+        # Remove chat_template if not set (vLLM doesn't accept None)
+        if namespace.chat_template is None:
+            delattr(namespace, "chat_template")
+
         # Remove reasoning_parser if not set (vLLM doesn't accept None)
         if namespace.reasoning_parser is None:
             delattr(namespace, "reasoning_parser")
+
+        # Remove lora_target_modules if not set (vLLM doesn't accept None)
+        if hasattr(namespace, "lora_target_modules") and namespace.lora_target_modules is None:
+            delattr(namespace, "lora_target_modules")
 
         # Remove rope_scaling if not set (vLLM doesn't accept None)
         if hasattr(namespace, "rope_scaling"):

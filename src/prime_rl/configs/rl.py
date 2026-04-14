@@ -26,6 +26,7 @@ from prime_rl.configs.shared import (
 from prime_rl.configs.trainer import (
     BenchConfig,
     FakeDataLoaderConfig,
+    TokenizerConfig,
     TrainerConfig,
 )
 from prime_rl.configs.trainer import (
@@ -45,15 +46,25 @@ from prime_rl.utils.validation import (
     validate_shared_max_steps,
     validate_shared_model_name,
     validate_shared_output_dir,
+    validate_shared_tokenizer,
     validate_shared_wandb_config,
     validate_shared_weight_broadcast,
 )
 
 
+class RLExperimentalConfig(BaseConfig):
+    """Experimental features for RL training."""
+
+
 class SharedLogConfig(BaseConfig):
     """Configures shared logging."""
 
-    level: Annotated[str | None, Field(description="The log level to use.")] = "info"
+    level: Annotated[
+        str | None,
+        Field(
+            description="The log level to use. When unset, the trainer and orchestrator log levels are used as-is (which themselves default to the PRIME_LOG_LEVEL env var if set, else 'info').",
+        ),
+    ] = None
 
     json_logging: Annotated[
         bool,
@@ -288,6 +299,14 @@ class RLConfig(BaseConfig):
         ),
     ] = None
 
+    tokenizer: Annotated[
+        TokenizerConfig | None,
+        Field(
+            description="Shared tokenizer config. Propagated to trainer, orchestrator, and inference. "
+            "If None, each component uses its own tokenizer config (defaulting to model name).",
+        ),
+    ] = None
+
     max_steps: Annotated[
         int | None,
         Field(
@@ -334,6 +353,11 @@ class RLConfig(BaseConfig):
     slurm: Annotated[SlurmConfig | None, Field(description="SLURM configuration. If None, will run locally.")] = None
 
     dry_run: Annotated[bool, Field(description="Only validate and dump resolved configs and exit early.")] = False
+
+    experimental: Annotated[
+        RLExperimentalConfig,
+        Field(description="Experimental features for RL training."),
+    ] = RLExperimentalConfig()
 
     ### Validate configs (e.g. raise for unsupported (combinations of) configs)
 
@@ -538,6 +562,36 @@ class RLConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
+    def auto_setup_tokenizer(self):
+        """Auto-setup shared tokenizer config for trainer, orchestrator, and inference."""
+        if self.tokenizer is not None:
+            # Shared tokenizer config: propagate to all components, then fill
+            # in name/trust_remote_code from model config where still unset.
+            self.trainer.tokenizer = self.tokenizer.model_copy()
+            self.orchestrator.tokenizer = self.tokenizer.model_copy()
+            for component in (self.trainer, self.orchestrator):
+                if component.tokenizer.name is None:
+                    component.tokenizer.name = component.model.name
+                if component.tokenizer.trust_remote_code is None:
+                    component.tokenizer.trust_remote_code = component.model.trust_remote_code
+        else:
+            # No shared tokenizer: re-derive from (now-correct) model names,
+            # since auto_setup_tokenizer on sub-configs already ran with defaults.
+            for component in (self.trainer, self.orchestrator):
+                component.tokenizer.name = component.model.name
+                component.tokenizer.trust_remote_code = component.model.trust_remote_code
+
+        # Propagate chat_template to inference (vLLM --chat-template)
+        if self.inference is not None:
+            chat_template = self.trainer.tokenizer.chat_template
+            if chat_template is not None and self.inference.model.chat_template is None:
+                self.inference.model.chat_template = chat_template
+
+        validate_shared_tokenizer(self.trainer, self.orchestrator, self.inference)
+
+        return self
+
+    @model_validator(mode="after")
     def auto_setup_max_steps(self):
         """Auto-setup shared max steps for trainer and orchestrator."""
         if self.max_steps is not None:
@@ -719,6 +773,12 @@ class RLConfig(BaseConfig):
                         "Number of inference GPUs must be divisible by the tensor parallel size"
                     )
                     self.inference.parallel.dp = num_infer_gpus // self.inference.parallel.tp
+                # Ensure api_server_count matches DP so all workers are created.
+                # Without this, the NCCL broadcast group expects dp*tp workers
+                # but only api_server_count*tp exist, causing a deadlock.
+                dp = self.inference.parallel.dp
+                if self.inference.api_server_count < dp and not self.inference.enable_lora:
+                    self.inference.api_server_count = dp
 
         elif self.deployment.type == "multi_node":  # multi-node
             self.orchestrator.num_train_workers = self.deployment.num_train_nodes * self.deployment.gpus_per_node
@@ -765,13 +825,34 @@ class RLConfig(BaseConfig):
                 if not self.inference.enable_lora and self.inference.api_server_count == self.inference.parallel.dp:
                     self.inference.api_server_count = inferred_dp_local
 
+            # Auto-infer DP and api_server_count for standard multi-node inference.
+            # Without EP, vLLM only creates api_server_count * tp workers per node,
+            # not gpus_per_node workers. If DP isn't set, the broadcast group expects
+            # more workers than exist, deadlocking NCCL init.
+            if (
+                self.inference is not None
+                and not self.inference.enable_expert_parallel
+                and self.inference.deployment.type != "disaggregated"
+            ):
+                dp_per_node = self.deployment.gpus_per_node // self.inference.parallel.tp
+                if self.inference.parallel.dp == 1 and dp_per_node > 1:
+                    self.inference.parallel.dp = dp_per_node
+                if self.inference.data_parallel_size_local is None and dp_per_node > 1:
+                    self.inference.data_parallel_size_local = dp_per_node
+                if self.inference.api_server_count == 1 and dp_per_node > 1:
+                    self.inference.api_server_count = dp_per_node
+
             if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
-                total_infer_gpus = self.deployment.gpus_per_node * self.deployment.total_infer_nodes
+                # Compute inference_world_size from actual worker count per server:
+                # each api_server runs tp workers that participate in collective_rpc.
+                api_server_count = self.inference.api_server_count if self.inference else 1
+                tp = self.inference.parallel.tp if self.inference else 1
+                total_infer_workers = self.deployment.total_infer_nodes * api_server_count * tp
                 assert self.trainer.weight_broadcast.type == "nccl"
                 self.trainer.weight_broadcast.host = "0.0.0.0"
-                self.trainer.weight_broadcast.inference_world_size = total_infer_gpus
+                self.trainer.weight_broadcast.inference_world_size = total_infer_workers
                 assert self.orchestrator.weight_broadcast.type == "nccl"
-                self.orchestrator.weight_broadcast.inference_world_size = total_infer_gpus
+                self.orchestrator.weight_broadcast.inference_world_size = total_infer_workers
 
         return self
 

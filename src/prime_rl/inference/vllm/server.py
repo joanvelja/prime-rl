@@ -2,8 +2,8 @@ from argparse import Namespace
 from typing import Any
 
 import uvloop
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import init_app_state
@@ -36,6 +36,9 @@ MODEL_TOOL_CALL_PARSER: dict[str, str] = {
     # GLM-5
     "zai-org/GLM-5": "glm47",
     "zai-org/GLM-5-FP8": "glm47",
+    # GLM-5.1
+    "zai-org/GLM-5.1": "glm47",
+    "zai-org/GLM-5.1-FP8": "glm47",
     # MiniMax M2
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
     "MiniMaxAI/MiniMax-M2.1": "minimax_m2",
@@ -236,13 +239,38 @@ async def init_broadcaster(request: Request):
     timeout = data.get("timeout")
     rank_offset = data.get("rank_offset")
     inference_world_size = data.get("inference_world_size")
-    gpus_per_server = data.get("gpus_per_server")
     quantize_in_weight_transfer = data.get("quantize_in_weight_transfer", False)
     await engine_client(request).collective_rpc(
         "init_broadcaster",
-        args=(host, port, rank_offset, inference_world_size, gpus_per_server, timeout, quantize_in_weight_transfer),
+        args=(host, port, rank_offset, inference_world_size, timeout, quantize_in_weight_transfer),
     )
     return {"status": "ok"}
+
+
+@router.post(
+    "/v1/chat/completions/tokens",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def _chat_with_tokens(request: ChatCompletionRequestWithTokens, raw_request: Request):
+    handler = chat_with_tokens(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
+    generator = await handler.create_chat_completion_with_tokens(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
+
+    elif isinstance(generator, ChatCompletionResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 async def custom_init_app_state(
@@ -274,7 +302,9 @@ async def custom_init_app_state(
 
 
 import vllm.entrypoints.openai.api_server
+import vllm.v1.utils
 from vllm.entrypoints.openai.api_server import build_app as _original_build_app
+from vllm.v1.utils import run_api_server_worker_proc as _original_run_api_server_worker_proc
 
 
 def custom_build_app(args: Namespace, supported_tasks: tuple, model_config=None):
@@ -286,16 +316,33 @@ def custom_build_app(args: Namespace, supported_tasks: tuple, model_config=None)
     return app
 
 
+def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
+    """
+    Re-import our module in child processes so monkey patches (custom routes,
+    custom init_app_state) are applied in multi-API-server mode.
+    """
+    import prime_rl.inference.vllm.server  # noqa: F401
+
+    _original_run_api_server_worker_proc(listen_address, sock, args, client_config, **uvicorn_kwargs)
+
+
 vllm.entrypoints.openai.api_server.init_app_state = custom_init_app_state
 vllm.entrypoints.openai.api_server.build_app = custom_build_app
+vllm.v1.utils.run_api_server_worker_proc = custom_run_api_server_worker_proc
 
 
 # Adapted from vllm/entrypoints/cli/serve.py
 # Only difference we do some config translation (i.e. pass populated namespace
 # to `parse_args`) and additional arg validation
 def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
+    import os
+
     from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server
     from vllm.entrypoints.openai.api_server import run_server
+
+    # Signal worker processes to disable LoRA on MoE layers when LoRA targets don't include experts
+    if config.lora_target_modules and not any("expert" in m for m in config.lora_target_modules):
+        os.environ["PRIME_NO_MOE_LORA"] = "1"
 
     namespace = config.to_vllm()
     if vllm_extra:
