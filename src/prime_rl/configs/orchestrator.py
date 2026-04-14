@@ -14,6 +14,7 @@ from prime_rl.configs.shared import (
     TransportConfig,
     WandbWithExtrasConfig,
 )
+from prime_rl.configs.trainer import TokenizerConfig
 from prime_rl.utils.config import BaseConfig
 from prime_rl.utils.logger import get_logger
 
@@ -675,10 +676,16 @@ class DefaultAdvantageConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["default"] = "default"
-    length_shaping_alpha: Annotated[
-        float | None,
-        Field(description="Penalty coefficient for Group Relative Reward Rescaling (GR³). Recommended value: 0.33"),
-    ] = None
+    length_shaping: Annotated[
+        bool,
+        Field(
+            description=(
+                "Enable correctness-gated length shaping. In mixed groups, shorter correct rollouts get "
+                "amplified advantage (up to 2x), longer correct rollouts are unchanged, incorrect untouched. "
+                "In all-correct groups, below-average-length rollouts get advantage in [0, 1], others get 0."
+            )
+        ),
+    ] = False
 
 
 class CustomAdvantageConfig(BaseModel):
@@ -802,6 +809,19 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 ]
 
 
+class OrchestratorExperimentalConfig(BaseConfig):
+    """Experimental features for the orchestrator."""
+
+    use_prefix_cache_salt: Annotated[
+        bool,
+        Field(
+            description="Whether to set a cache_salt on inference requests that changes with each weight update. "
+            "This invalidates prefix-cached KV states from previous policies without resetting the entire cache, "
+            "while preserving cache hits for in-flight off-policy rollouts.",
+        ),
+    ] = True
+
+
 class TeacherModelConfig(BaseConfig):
     """Configures the teacher model for computing teacher logprobs (e.g. for distillation)."""
 
@@ -841,6 +861,9 @@ class OrchestratorConfig(BaseConfig):
 
     # The model configuration
     model: ModelConfig = ModelConfig()
+
+    # The tokenizer configuration
+    tokenizer: TokenizerConfig = TokenizerConfig()
 
     # The optimizer configuration (per-run LR for multi-run training)
     optim: OptimizerConfig = OptimizerConfig()
@@ -886,6 +909,9 @@ class OrchestratorConfig(BaseConfig):
 
     # The prime monitor configuration
     prime_monitor: PrimeMonitorConfig | None = None
+
+    # Whether to collect inference server metrics (requires wandb)
+    collect_inference_metrics: bool = True
 
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
@@ -1019,6 +1045,11 @@ class OrchestratorConfig(BaseConfig):
         ),
     ] = True
 
+    experimental: Annotated[
+        OrchestratorExperimentalConfig,
+        Field(description="Experimental features for the orchestrator."),
+    ] = OrchestratorExperimentalConfig()
+
     @model_validator(mode="before")
     @classmethod
     def _env_to_train(cls, data: Any) -> Any:
@@ -1041,6 +1072,14 @@ class OrchestratorConfig(BaseConfig):
                     )
                     train.setdefault("sampling", data.pop("sampling"))
         return data
+
+    @model_validator(mode="after")
+    def auto_setup_tokenizer(self):
+        if self.tokenizer.name is None:
+            self.tokenizer.name = self.model.name
+        if self.tokenizer.trust_remote_code is None:
+            self.tokenizer.trust_remote_code = self.model.trust_remote_code
+        return self
 
     @model_validator(mode="after")
     def validate_unique_filter_types(self):
@@ -1093,13 +1132,6 @@ class OrchestratorConfig(BaseConfig):
                 assert self.max_inflight_rollouts is not None
                 env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
 
-        return self
-
-    @model_validator(mode="after")
-    def validate_length_shaping_requires_online_difficulty_filtering(self):
-        if isinstance(self.advantage, DefaultAdvantageConfig) and self.advantage.length_shaping_alpha is not None:
-            if not self.buffer.online_difficulty_filtering:
-                raise ValueError("Group Relative Reward (GR³) scaling requires online difficulty filtering")
         return self
 
     @model_validator(mode="after")

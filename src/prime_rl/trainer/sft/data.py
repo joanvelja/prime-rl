@@ -15,6 +15,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from prime_rl.configs.sft import DataConfig, LossMaskConfig, SFTDataConfig
 from prime_rl.trainer.world import get_world
 from prime_rl.utils.chat_template import (
+    IncrementalTokenizationError,
     build_incremental_token_mask,
     deserialize_tool_calls,
     normalize_messages,
@@ -211,14 +212,18 @@ class SFTDataset(StatefulIterableDataset):
         if self.chat_template_kwargs:
             per_example_kwargs = {**self.chat_template_kwargs, **per_example_kwargs}
 
-        input_ids, loss_mask = build_incremental_token_mask(
-            self.tokenizer,
-            messages,
-            role_to_mask=should_mask,
-            tools=tools,
-            chat_template_kwargs=per_example_kwargs,
-            collapse_consecutive_tool_messages=True,
-        )
+        try:
+            input_ids, loss_mask = build_incremental_token_mask(
+                self.tokenizer,
+                messages,
+                role_to_mask=should_mask,
+                tools=tools,
+                chat_template_kwargs=per_example_kwargs,
+                collapse_consecutive_tool_messages=True,
+            )
+        except IncrementalTokenizationError as e:
+            self.logger.warning(f"Skipping example {example.get('__index', '')}: {e}")
+            return None
 
         # If EOS token is not found, manually append it
         if not self.tokenizer.eos_token_id in input_ids:
