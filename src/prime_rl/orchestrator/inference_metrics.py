@@ -44,9 +44,6 @@ _COUNTER_TOTAL_TO_NAME = {f"{name}_total": name for name in COUNTER_METRICS}
 # Gauges where we log both max and mean across engines (to show imbalance)
 _DUAL_AGG_GAUGES = {"vllm:gpu_cache_usage_perc", "vllm:gpu_prefix_cache_hit_rate"}
 
-# Gauges where we sum across engines
-_SUM_GAUGES = GAUGE_METRICS - _DUAL_AGG_GAUGES
-
 
 def parse_prometheus_text(text: str) -> tuple[dict[str, float], dict[str, float], dict[str, tuple[float, float]]]:
     """Parse Prometheus exposition format into (gauges, counters, histograms).
