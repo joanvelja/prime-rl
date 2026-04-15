@@ -10,10 +10,10 @@ import tomli_w
 
 from prime_rl.configs.sft import SFTConfig
 from prime_rl.utils.config import cli
-from prime_rl.utils.logger import get_logger, setup_logger
+from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.pathing import format_log_message, get_config_dir, get_log_dir, validate_output_dir
 from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process, set_proc_title
-from prime_rl.utils.utils import format_time, get_free_port
+from prime_rl.utils.utils import get_free_port
 
 SFT_TOML = "sft.toml"
 SFT_SBATCH = "sft.sbatch"
@@ -197,26 +197,14 @@ def sft(config: SFTConfig):
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     if not config.dry_run:
-        _pre_download_model(config.model.name)
+        from prime_rl.trainer.model import pre_download_model
+
+        pre_download_model(config.model.name)
 
     if config.slurm is not None:
         sft_slurm(config)
     else:
         sft_local(config)
-
-
-def _pre_download_model(model_name: str) -> None:
-    """Pre-download model from HuggingFace Hub so all nodes have cached weights before training."""
-    if Path(model_name).exists():
-        return
-    import time
-
-    from huggingface_hub import snapshot_download
-
-    get_logger().info(f"Pre-downloading model {model_name}")
-    t0 = time.perf_counter()
-    snapshot_download(repo_id=model_name, repo_type="model")
-    get_logger().debug(f"Finished pre-downloading model {model_name} in {format_time(time.perf_counter() - t0)}")
 
 
 def main():

@@ -24,7 +24,6 @@ from prime_rl.utils.pathing import (
 )
 from prime_rl.utils.process import cleanup_processes, cleanup_threads, monitor_process, set_proc_title
 from prime_rl.utils.utils import (
-    format_time,
     get_free_port,
     get_log_dir,
 )
@@ -559,24 +558,14 @@ def rl(config: RLConfig):
             clean_future_steps(config.output_dir, resume_step)
 
     if not config.dry_run:
-        _pre_download_model(config.trainer.model.name)
+        from prime_rl.trainer.model import pre_download_model
+
+        pre_download_model(config.trainer.model.name)
 
     if config.slurm is not None:
         rl_slurm(config)
     else:
         rl_local(config)
-
-
-def _pre_download_model(model_name: str) -> None:
-    """Pre-download model from HuggingFace Hub so all nodes have cached weights before training."""
-    if Path(model_name).exists():
-        return
-    from huggingface_hub import snapshot_download
-
-    get_logger().info(f"Pre-downloading model {model_name}")
-    t0 = time.perf_counter()
-    snapshot_download(repo_id=model_name, repo_type="model")
-    get_logger().debug(f"Finished pre-downloading model {model_name} in {format_time(time.perf_counter() - t0)}")
 
 
 def main():
