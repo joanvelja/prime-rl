@@ -7,7 +7,7 @@ import pandas as pd
 import verifiers as vf
 
 from prime_rl.configs.orchestrator import EvalSamplingConfig
-from prime_rl.orchestrator.vf_utils import evaluate, get_completion_len
+from prime_rl.orchestrator.vf_utils import evaluate, get_completion_len, get_eval_examples
 from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
@@ -103,7 +103,7 @@ async def evaluate_env(
     logger = get_logger()
     logger.info(f"Evaluating {env_name} ({num_examples=}, {rollouts_per_example=})")
     eval_start_time = time.perf_counter()
-    total_inputs = len(env._get_eval_inputs(num_examples, rollouts_per_example))
+    total_inputs = len(get_eval_examples(env, num_examples)) * rollouts_per_example
     outputs = await evaluate(
         env=env,
         model_name=model_name,
