@@ -219,7 +219,7 @@ def get_model(
         f"Loading model config (name={config.name}, attn={config.attn}, trust_remote_code={config.trust_remote_code})"
     )
 
-    is_vlm_training = config.vlm is not None
+    train_as_vlm = config.vlm is not None
 
     if "Qwen3.5" in config.name or "qwen3_5" in config.name.lower():
         _patch_qwen3_5_text_position_ids()
@@ -234,7 +234,14 @@ def get_model(
     model_config.use_cache = False
     is_vlm_arch = is_vlm_architecture(model_config)
 
-    if is_vlm_training:
+    # Some models (e.g. Gemma4) always ship as composite VLM configs even when
+    # training text-only.  Unwrap to the text sub-config so the model loads in
+    # text-only mode with matching weight keys.
+    if is_vlm_arch and not train_as_vlm and hasattr(model_config, "text_config"):
+        model_config = model_config.text_config
+        is_vlm_arch = False
+
+    if train_as_vlm:
         logger.info(f"Detected vision-language model: {config.name}")
         if config.optimization_dtype != "bfloat16" or config.reduce_dtype != "bfloat16":
             raise ValueError(
@@ -351,7 +358,7 @@ def get_model(
         logger.debug(f"Loaded model {config.name} in {time.perf_counter() - load_model_start_time:.2f} seconds")
 
     # For VLM models, optionally freeze the vision encoder
-    if is_vlm_training and config.vlm.freeze_vision_encoder:
+    if train_as_vlm and config.vlm.freeze_vision_encoder:
         freeze_vision_encoder(model, override_attr=config.vlm.vision_encoder_attr)
 
     assert model.lm_head.weight.dtype == dtype, (
@@ -398,8 +405,8 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
 
         dp_mod_ep_mesh = parallel_dims.world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
 
-    is_vlm_training = config.vlm is not None
-    if is_vlm_training:
+    train_as_vlm = config.vlm is not None
+    if train_as_vlm:
         vision_encoder = get_vision_encoder(model, override=config.vlm.vision_encoder_attr)
         if vision_encoder is None:
             raise ValueError(f"VLM model {config.name} has no recognized vision encoder")
@@ -407,7 +414,7 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
         fully_shard(vision_encoder, mesh=hsdp_mesh, **fsdp_config)
         get_logger().info(f"Applied FSDP to vision encoder (frozen={config.vlm.freeze_vision_encoder})")
 
-    language_model = get_language_model(model, override=config.vlm.language_model_attr if is_vlm_training else None)
+    language_model = get_language_model(model, override=config.vlm.language_model_attr if train_as_vlm else None)
     transformer_layers = language_model.layers
 
     for transformer_block in transformer_layers:
@@ -499,6 +506,37 @@ def setup_fsdp(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDim
                 transformer_block.set_modules_to_backward_prefetch([embed_module])
 
 
+def _align_vlm_keys(state_dict: dict[str, Tensor], model_keys: dict[str, None]) -> None:
+    """Align VLM key prefixes between a converted state dict and the model.
+
+    Some models (e.g. Gemma4) always store HF weights with a
+    ``model.language_model.*`` prefix, but are loaded in text-only mode with
+    flat ``model.*`` keys.  This helper strips or adds the prefix so the
+    cached conversion matches what the model expects.
+    """
+    _VLM_PREFIX = "model.language_model."
+    _FLAT_PREFIX = "model."
+    _VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.")
+
+    sd_has_vlm = any(k.startswith(_VLM_PREFIX) for k in state_dict)
+    model_has_vlm = any(k.startswith(_VLM_PREFIX) for k in model_keys)
+
+    if sd_has_vlm and not model_has_vlm:
+        # Flatten: model.language_model.* → model.*
+        for k in list(state_dict):
+            if k.startswith(_VLM_PREFIX):
+                state_dict[_FLAT_PREFIX + k[len(_VLM_PREFIX) :]] = state_dict.pop(k)
+        # Drop vision keys the text-only model doesn't need
+        for k in list(state_dict):
+            if any(k.startswith(p) for p in _VISION_PREFIXES) and k not in model_keys:
+                del state_dict[k]
+    elif model_has_vlm and not sd_has_vlm:
+        # Unflatten: model.* → model.language_model.*
+        for k in list(state_dict):
+            if k.startswith(_FLAT_PREFIX) and not any(k.startswith(p) for p in _VISION_PREFIXES):
+                state_dict[_VLM_PREFIX + k[len(_FLAT_PREFIX) :]] = state_dict.pop(k)
+
+
 def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: ParallelDims):
     device = "cpu" if config.fsdp_cpu_offload else "cuda"
     model.to_empty(device=device)
@@ -536,13 +574,19 @@ def load_dcp_from_hf(model: nn.Module, config: ModelConfig, parallel_dims: Paral
             logger.warning(
                 "Found HF weight format in snapshot state dict and PrimeRL weight format in model state dict. Trying to auto-convert..."
             )
-            snapshot_path = snapshot_path / "prime"
+            # Use separate cache dirs for VLM vs text-only to avoid key-prefix conflicts
+            # (e.g. Gemma4's HF checkpoint always has model.language_model.* keys but
+            # text-only mode expects flat model.* keys).
+            model_is_vlm = any(k.startswith("model.language_model.") for k in model_keys)
+            cache_name = "prime_vlm" if model_is_vlm else "prime"
+            snapshot_path = snapshot_path / cache_name
             if not snapshot_path.exists() and get_world().is_master:
                 logger.debug(
                     f"Converting snapshot state dict to PrimeRL format and saving to {snapshot_path} on master rank. This is a one-time operation."
                 )
                 snapshot_state_dict = load_state_dict(snapshot_path.parent)
                 model.convert_to_prime(snapshot_state_dict)
+                _align_vlm_keys(snapshot_state_dict, model_keys)
                 save_state_dict(snapshot_state_dict, snapshot_path)
                 del snapshot_state_dict
 
@@ -879,9 +923,7 @@ def forward(
     labels: Int[Tensor, "batch seq"] | None = None,
     temperature: Tensor | None = None,
     routed_experts: Int[Tensor, "batch seq layers topk"] | None = None,
-    # Multimodal fields (Qwen3-VL)
-    pixel_values: Float[Tensor, "num_patches patch_dim"] | None = None,
-    image_grid_thw: Int[Tensor, "num_images 3"] | None = None,
+    vlm_images: dict[str, Tensor] | None = None,
     mm_token_type_ids: Int[Tensor, "batch seq"] | None = None,
 ) -> PrimeLmOutput:
     # Build kwargs for model forward
@@ -891,13 +933,14 @@ def forward(
         "temperature": temperature,
     }
 
-    # For multimodal (VLM), don't pass position_ids - let the model compute MRoPE internally
-    # using image_grid_thw. Qwen3-VL only computes proper MRoPE when position_ids is None.
-    if pixel_values is not None:
-        assert image_grid_thw is not None, "pixel_values requires image_grid_thw for MRoPE computation"
-        kwargs["pixel_values"] = pixel_values
-        kwargs["image_grid_thw"] = image_grid_thw
-        kwargs["mm_token_type_ids"] = mm_token_type_ids
+    if vlm_images:
+        kwargs.update(vlm_images)
+        if mm_token_type_ids is not None:
+            kwargs["mm_token_type_ids"] = mm_token_type_ids
+        # Models using MRoPE (Qwen) compute positions from image_grid_thw when
+        # position_ids is absent.  Models without it (Gemma4) need explicit position_ids.
+        if "image_grid_thw" not in vlm_images:
+            kwargs["position_ids"] = position_ids
     else:
         kwargs["position_ids"] = position_ids
 

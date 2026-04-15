@@ -15,11 +15,9 @@ class TrainingSample(msgspec.Struct, array_like=True, gc=False, omit_defaults=Tr
     advantage: float | None = None
     reward: float | None = None
 
-    # Multimodal fields (Qwen3-VL) — pixel_values stored as raw float32 bytes for efficient serialization
-    pixel_values: bytes | None = None
-    pixel_values_shape: list[int] | None = None  # [num_patches, patch_dim]
-    # image_grid_thw: grid dimensions [num_images, 3] where each entry is [temporal, height, width]
-    image_grid_thw: list[list[int]] | None = None
+    # Generic VLM image inputs from processor — maps field name to (bytes, shape, dtype_name).
+    # All processor tensor outputs are stored here (e.g. pixel_values, image_grid_thw).
+    vlm_images: dict[str, tuple[bytes, list[int], str]] | None = None
 
     routed_experts: list[list[list[int]]] | None = None  # [seq_len, layers, topk]
 
@@ -49,10 +47,7 @@ class MicroBatch(msgspec.Struct, array_like=True, gc=False, omit_defaults=True):
     lora_num_tokens: list[int] | None = None
     routed_experts: list[list[list[int]]] | None = None
 
-    # Multimodal fields (Qwen3-VL) — pixel_values stored as raw float32 bytes for efficient serialization
-    pixel_values: bytes | None = None
-    pixel_values_shape: list[int] | None = None  # [num_patches, patch_dim]
-    # image_grid_thw: grid dimensions [num_images, 3] where each entry is [temporal, height, width]
-    image_grid_thw: list[list[int]] | None = None
+    # Generic VLM image inputs — maps field name to (bytes, shape, dtype_name)
+    vlm_images: dict[str, tuple[bytes, list[int], str]] | None = None
     # mm_token_type_ids: token type ids per token [batch seq], int64 (0=text, 1=image, 2=video)
     mm_token_type_ids: list[int] | None = None

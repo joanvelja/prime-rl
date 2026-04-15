@@ -350,12 +350,11 @@ def train(config: TrainerConfig):
                 # we could've gotten routed experts from the inference server, but we didn't enable router replay
                 routed_experts = None
 
-            # Multimodal fields (Qwen3-VL) - only present for VLM training
-            pixel_values = (
-                micro_batch["pixel_values"].to("cuda") if micro_batch.get("pixel_values") is not None else None
-            )
-            image_grid_thw = (
-                micro_batch["image_grid_thw"].to("cuda") if micro_batch.get("image_grid_thw") is not None else None
+            # VLM image inputs — generic dict of processor outputs
+            vlm_images = (
+                {k: v.to("cuda") for k, v in micro_batch["vlm_images"].items()}
+                if micro_batch.get("vlm_images") is not None
+                else None
             )
             mm_token_type_ids = (
                 micro_batch["mm_token_type_ids"].to("cuda")
@@ -366,7 +365,7 @@ def train(config: TrainerConfig):
             labels = shift_tensor_left(input_ids)
 
             # VLM + CP is not supported: MRoPE requires global positions but CP shards the sequence
-            if cp_enabled and pixel_values is not None:
+            if cp_enabled and vlm_images is not None:
                 raise NotImplementedError("Context parallelism is not supported with VLM/multimodal training")
 
             if cp_enabled:
@@ -403,8 +402,7 @@ def train(config: TrainerConfig):
                     forward_position_ids,
                     labels=labels,
                     temperature=temperatures,
-                    pixel_values=pixel_values,
-                    image_grid_thw=image_grid_thw,
+                    vlm_images=vlm_images,
                     mm_token_type_ids=mm_token_type_ids,
                     routed_experts=routed_experts,
                 )
