@@ -55,7 +55,7 @@ def build_log_entry(record) -> dict:
 def json_sink(message) -> None:
     """Sink that outputs flat JSON to stdout for log aggregation (Loki, Grafana, etc.)."""
     log_entry = build_log_entry(message.record)
-    sys.stdout.write(json_module.dumps(log_entry) + "\n")
+    sys.stdout.write(json_module.dumps(log_entry, default=str) + "\n")
     sys.stdout.flush()
 
 
