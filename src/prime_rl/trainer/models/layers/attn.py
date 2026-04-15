@@ -283,6 +283,89 @@ ATTN_IMPL2CLASS = {
 }
 
 
+def _ring_sdpa_attention(
+    self,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    data_params: dict,
+    process_group: "torch.distributed.ProcessGroup",
+    softmax_scale: float | None = None,
+) -> torch.Tensor:
+    """Ring attention using SDPA for head_dim > 256 (e.g. Gemma4 global layers).
+
+    All-gathers full KV across the CP group, then runs SDPA locally on
+    the local Q slice against the gathered KV.  Handles asymmetric Q/K lengths
+    (K is the full gathered range, Q is the local chunk).
+    """
+    import torch.distributed as dist
+
+    local_k_slice = data_params["local_k_slice"]
+    cu_seqlens_q = data_params["cu_seqlens_q"]
+    cu_seqlens_k = data_params["cu_seqlens_k"]
+
+    # All-gather KV across CP ranks
+    world_size = dist.get_world_size(process_group)
+    total_k_len = k.shape[0] * world_size
+    full_k = torch.empty((total_k_len, *k.shape[1:]), dtype=k.dtype, device=k.device)
+    full_v = torch.empty((total_k_len, *v.shape[1:]), dtype=v.dtype, device=v.device)
+    dist.all_gather_into_tensor(full_k, k.contiguous(), group=process_group)
+    dist.all_gather_into_tensor(full_v, v.contiguous(), group=process_group)
+
+    # Slice gathered KV to the range this rank's Q attends to
+    k_sliced = full_k[local_k_slice]
+    v_sliced = full_v[local_k_slice]
+
+    # Reshape for SDPA: [tokens, heads, dim] → [1, heads, tokens, dim]
+    q_4d = q.unsqueeze(0).transpose(1, 2)
+    k_4d = k_sliced.unsqueeze(0).transpose(1, 2)
+    v_4d = v_sliced.unsqueeze(0).transpose(1, 2)
+
+    # GQA: expand KV heads to match Q heads
+    if k_4d.shape[1] != q_4d.shape[1]:
+        n_rep = q_4d.shape[1] // k_4d.shape[1]
+        k_4d = k_4d.repeat_interleave(n_rep, dim=1)
+        v_4d = v_4d.repeat_interleave(n_rep, dim=1)
+
+    scale = softmax_scale if softmax_scale is not None else q.shape[-1] ** -0.5
+
+    # Build rectangular block-diagonal causal mask [total_q, total_k]
+    total_q = q.shape[0]
+    total_k = k_sliced.shape[0]
+    num_seqs = len(cu_seqlens_q) - 1
+
+    if num_seqs > 1:
+        mask = torch.full((total_q, total_k), float("-inf"), device=q.device, dtype=q.dtype)
+        for i in range(num_seqs):
+            q_start, q_end = cu_seqlens_q[i].item(), cu_seqlens_q[i + 1].item()
+            k_start, k_end = cu_seqlens_k[i].item(), cu_seqlens_k[i + 1].item()
+            q_len = q_end - q_start
+            k_len = k_end - k_start
+            # Causal: Q position j can attend to K positions 0..(j + offset)
+            # where offset = k_len - q_len (Q starts at this offset in the full seq)
+            offset = k_len - q_len
+            seq_mask = torch.zeros(q_len, k_len, device=q.device, dtype=q.dtype)
+            seq_mask.masked_fill_(
+                torch.triu(torch.ones(q_len, k_len, device=q.device, dtype=torch.bool), diagonal=offset + 1),
+                float("-inf"),
+            )
+            mask[q_start:q_end, k_start:k_end] = seq_mask
+        out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=mask, scale=scale)
+    else:
+        q_len = total_q
+        k_len = total_k
+        offset = k_len - q_len
+        mask = torch.zeros(q_len, k_len, device=q.device, dtype=q.dtype)
+        mask.masked_fill_(
+            torch.triu(torch.ones(q_len, k_len, device=q.device, dtype=torch.bool), diagonal=offset + 1),
+            float("-inf"),
+        )
+        out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=mask, scale=scale)
+
+    # [1, heads, total_q, dim] → [total_q, heads, dim]
+    return out.transpose(1, 2).squeeze(0)
+
+
 def substitute_ring_attn(
     process_group: torch.distributed.ProcessGroup,
     heads_k_stride: int,
@@ -304,20 +387,33 @@ def substitute_ring_attn(
         if sliding_window is not None:
             window_size = (sliding_window - 1, 0)
 
-        out = ring_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=DATA_PARAMS["cu_seqlens_q"],
-            cu_seqlens_k=DATA_PARAMS["cu_seqlens_k"],
-            max_seqlen_q=DATA_PARAMS["max_seqlen_q"],
-            max_seqlen_k=DATA_PARAMS["max_seqlen_k"],
-            local_k_slice=DATA_PARAMS["local_k_slice"],
-            causal=True,
-            window_size=window_size,
-            group=process_group,
-            heads_k_stride=heads_k_stride,
-        )
+        softmax_scale = getattr(self, "softmax_scale", None)
+
+        # For head_dim > 256 (e.g. Gemma4 global layers), flash_attn doesn't
+        # work so fall back to SDPA with all-gathered KV.  The ring function
+        # already all-gathers KV; we just need to call SDPA on the local Q
+        # slice against the full KV.
+        head_dim = q.shape[-1]
+        if head_dim > 256:
+            return _ring_sdpa_attention(
+                self, q, k, v, DATA_PARAMS, process_group, softmax_scale,
+            )
+
+        kwargs: dict = {
+            "cu_seqlens_q": DATA_PARAMS["cu_seqlens_q"],
+            "cu_seqlens_k": DATA_PARAMS["cu_seqlens_k"],
+            "max_seqlen_q": DATA_PARAMS["max_seqlen_q"],
+            "max_seqlen_k": DATA_PARAMS["max_seqlen_k"],
+            "local_k_slice": DATA_PARAMS["local_k_slice"],
+            "causal": True,
+            "window_size": window_size,
+            "group": process_group,
+            "heads_k_stride": heads_k_stride,
+        }
+        if softmax_scale is not None:
+            kwargs["softmax_scale"] = softmax_scale
+
+        out = ring_func(q, k, v, **kwargs)
         if isinstance(out, tuple):
             out = out[0]
         return out
@@ -331,3 +427,7 @@ def substitute_ring_attn(
     from prime_rl.trainer.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeGatedFlashAttention
 
     Qwen3_5MoeGatedFlashAttention._compute_attention = _ring_compute_attention
+
+    from prime_rl.trainer.models.gemma4.modeling_gemma4 import Gemma4Attention
+
+    Gemma4Attention._compute_attention = _ring_compute_attention

@@ -231,11 +231,18 @@ class Gemma4Attention(nn.Module):
         else:
             self._flash_attn_call = self._flash_attn_func
 
-    def _compute_flash_attention(self, q, k, v, cu_seqlens, max_seqlen):
+        # Gemma4 pre-scales in QKV norms, so attention uses scale=1.0.
+        # Stored on self so substitute_ring_attn can pick it up.
+        self.softmax_scale = 1.0
+
+    def _compute_attention(self, q, k, v, cu_seqlens, max_seqlen):
+        """Attention kernel — FA for head_dim<=256, SDPA for larger."""
+        if self.head_dim > 256:
+            return self._compute_sdpa_attention(q, k, v, cu_seqlens)
         args = [q, k, v, cu_seqlens, cu_seqlens]
         if self._flash_attn_version != 4:
             args.extend([max_seqlen, max_seqlen])
-        kwargs = {"causal": True, "softmax_scale": 1.0}
+        kwargs = {"causal": True, "softmax_scale": self.softmax_scale}
         if self.sliding_window is not None:
             kwargs["window_size"] = (self.sliding_window - 1, 0)
         out = self._flash_attn_call(*args, **kwargs)
@@ -243,26 +250,23 @@ class Gemma4Attention(nn.Module):
             out = out[0]
         return out
 
-    def _compute_sdpa_attention(self, q, k, v, cu_seqlens):
+    @staticmethod
+    def _compute_sdpa_attention(q, k, v, cu_seqlens):
         """SDPA fallback for head_dim > 256 (global attention layers).
 
         Handles packed sequences by building a block-diagonal causal mask from cu_seqlens.
         """
-        # q/k/v: [total_tokens, heads, dim] -> [1, heads, total_tokens, dim]
         q = q.unsqueeze(0).transpose(1, 2)
         k = k.unsqueeze(0).transpose(1, 2)
         v = v.unsqueeze(0).transpose(1, 2)
 
-        # GQA: repeat k/v heads to match q heads
         if k.shape[1] != q.shape[1]:
             n_rep = q.shape[1] // k.shape[1]
             k = k.repeat_interleave(n_rep, dim=1)
             v = v.repeat_interleave(n_rep, dim=1)
 
-        # Build block-diagonal causal mask for packed sequences
         total_len = q.shape[2]
         if cu_seqlens is not None and len(cu_seqlens) > 2:
-            # Multiple packed sequences — need block-diagonal mask
             mask = torch.full((total_len, total_len), float("-inf"), device=q.device, dtype=q.dtype)
             for i in range(len(cu_seqlens) - 1):
                 start, end = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
@@ -277,7 +281,6 @@ class Gemma4Attention(nn.Module):
         else:
             out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=1.0)
 
-        # [1, heads, total_tokens, dim] -> [total_tokens, heads, dim]
         return out.transpose(1, 2).squeeze(0)
 
     def forward(
@@ -306,13 +309,7 @@ class Gemma4Attention(nn.Module):
 
         value_states = self.v_norm(value_states)
 
-        # FlashAttention only supports head_dim <= 256; fall back to SDPA for global layers (head_dim=512)
-        if self.head_dim > 256:
-            attn_output = self._compute_sdpa_attention(query_states[0], key_states[0], value_states[0], cu_seqlens)
-        else:
-            attn_output = self._compute_flash_attention(
-                query_states[0], key_states[0], value_states[0], cu_seqlens, max_seqlen
-            )
+        attn_output = self._compute_attention(query_states[0], key_states[0], value_states[0], cu_seqlens, max_seqlen)
         attn_output = attn_output.contiguous().view(1, attn_output.shape[0], -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, None
