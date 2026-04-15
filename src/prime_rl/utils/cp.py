@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+import torch.distributed.nn as dist_nn
 import torch.nn as nn
 from ring_flash_attn import update_ring_flash_attn_params
 
@@ -35,6 +36,29 @@ def setup_hybrid_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int,
         get_logger().info(f"Configured hybrid CP on {count} DeltaNet modules (fla native state passing)")
 
 
+def setup_sparse_mla_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
+    """Configure GLM-5 sparse MLA modules for context-parallel gather/scatter."""
+
+    count = 0
+    if not hasattr(model, "model"):
+        return
+
+    if not hasattr(model.model, "layers"):
+        return
+
+    for layer in model.model.layers:
+        if not hasattr(layer, "set_context_parallel_attributes"):
+            continue
+
+        layer.set_context_parallel_attributes(cp_group, cp_rank, cp_world_size)
+        count += 1
+
+    if count > 0:
+        from prime_rl.utils.logger import get_logger
+
+        get_logger().info(f"Configured sparse MLA CP on {count} DSA layers")
+
+
 def shard_for_cp(t: torch.Tensor, cp_rank: int, cp_world_size: int) -> torch.Tensor:
     """
     Shard a tensor for context parallelism.
@@ -51,6 +75,18 @@ def shard_for_cp(t: torch.Tensor, cp_rank: int, cp_world_size: int) -> torch.Ten
     chunked_t = torch.chunk(t, cp_world_size, dim=1)
 
     return chunked_t[cp_rank]
+
+
+def gather_for_cp(t: torch.Tensor, cp_group: dist.ProcessGroup) -> torch.Tensor:
+    gathered_t = dist_nn.all_gather(t, group=cp_group)
+
+    return torch.cat(gathered_t, dim=1)
+
+
+def gather_for_cp_wo_grad(t: torch.Tensor, cp_world_size: int, cp_group: dist.ProcessGroup) -> torch.Tensor:
+    empty_like_t = [torch.empty_like(t) for _ in range(cp_world_size)]
+    dist.all_gather(empty_like_t, t, group=cp_group)
+    return torch.cat(empty_like_t, dim=1)
 
 
 def get_padding_logit_from_prev_cp_rank(

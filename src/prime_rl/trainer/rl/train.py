@@ -1,3 +1,5 @@
+import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before import
+
 from contextlib import nullcontext
 import time
 from datetime import timedelta
@@ -10,7 +12,6 @@ from prime_rl.trainer.rl.broadcast import setup_weight_broadcast
 from prime_rl.utils.act_offloading import maybe_activation_offloading
 import torch
 import torch.distributed as dist
-import torch.distributed.nn as dist_nn
 from torch.profiler import profile, ProfilerActivity, record_function
 from prime_rl.trainer.ckpt import setup_ckpt_managers
 from prime_rl.trainer.multi_ckpt import setup_multi_checkpoint_manager
@@ -19,6 +20,8 @@ from prime_rl.trainer.scheduler import setup_scheduler, setup_multi_scheduler
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.trainer.rl.data import DataLoader, FakeDataLoader
 from prime_rl.utils.cp import (
+    gather_for_cp,
+    gather_for_cp_wo_grad,
     setup_cp_params,
     shard_for_cp,
 )
@@ -45,6 +48,7 @@ from prime_rl.trainer.utils import (
     MemoryProfiler,
     Tensors,
     export_benchmark_json,
+    filter_rl_trainer_tensor_stats_for_wandb,
     get_zero_gradient_ratio,
     get_ckpt_disk_metrics,
     setup_torch_distributed,
@@ -58,6 +62,7 @@ from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.metrics_server import HealthServer, MetricsServer, RunStats
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.config import cli
+from prime_rl.utils.process import set_proc_title
 from prime_rl.utils.utils import clean_exit, resolve_latest_ckpt_step, to_col_format
 from ring_flash_attn import substitute_hf_flash_attn
 from torchtitan.distributed.utils import clip_grad_norm_
@@ -104,7 +109,10 @@ def train(config: TrainerConfig):
     setup_torch_distributed(
         timeout=timedelta(seconds=config.dist_timeout_seconds), enable_gloo=config.model.fsdp_cpu_offload
     )
-    torch.set_float32_matmul_precision("high")
+    # Configurable to support ROCm/AMD GPUs where reduced precision
+    # matmul corrupts softmax over large vocabularies. Override via config
+    # (e.g. matmul_precision = "highest") on ROCm.
+    torch.set_float32_matmul_precision(config.matmul_precision)
 
     # Setup multi run manager and offsets (including LoRA validation/scaling hooks if applicable)
     multi_run_manager = setup_multi_run_manager(
@@ -180,9 +188,10 @@ def train(config: TrainerConfig):
         cp_rank = parallel_dims.world_mesh["cp"].get_local_rank()
         substitute_hf_flash_attn(cp_group, heads_k_stride=1)
         substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
-        from prime_rl.utils.cp import setup_hybrid_cp
+        from prime_rl.utils.cp import setup_hybrid_cp, setup_sparse_mla_cp
 
         setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
+        setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
     # Optionally, resume training from a checkpoint
     progress = Progress()
@@ -348,6 +357,11 @@ def train(config: TrainerConfig):
             image_grid_thw = (
                 micro_batch["image_grid_thw"].to("cuda") if micro_batch.get("image_grid_thw") is not None else None
             )
+            mm_token_type_ids = (
+                micro_batch["mm_token_type_ids"].to("cuda")
+                if micro_batch.get("mm_token_type_ids") is not None
+                else None
+            )
 
             labels = shift_tensor_left(input_ids)
 
@@ -391,6 +405,7 @@ def train(config: TrainerConfig):
                     temperature=temperatures,
                     pixel_values=pixel_values,
                     image_grid_thw=image_grid_thw,
+                    mm_token_type_ids=mm_token_type_ids,
                     routed_experts=routed_experts,
                 )
 
@@ -405,12 +420,8 @@ def train(config: TrainerConfig):
             # else: FusedOutputLinear was used - logprobs already computed with per-token temperatures
 
             if cp_enabled:
-                logprobs = dist_nn.all_gather(out["logprobs"], group=cp_group)
-                out["logprobs"] = torch.cat(logprobs, dim=1)
-
-                entropies = [torch.zeros_like(out["entropy"]) for _ in range(cp_size)]
-                dist.all_gather(entropies, out["entropy"], group=cp_group)
-                out["entropy"] = torch.cat(entropies, dim=1)
+                out["logprobs"] = gather_for_cp(out["logprobs"], cp_group)
+                out["entropy"] = gather_for_cp_wo_grad(out["entropy"], cp_size, cp_group)
 
             vocab_size = getattr(model.config, "vocab_size", None) or model.config.text_config.vocab_size
             # This is not really necessary as the first token should be masked out, but we do it anyway to be sure
@@ -440,8 +451,6 @@ def train(config: TrainerConfig):
                 loss.backward()
 
             # Add relevant tensors to tensor dict for logging purposes
-            tensors["trainer_probs"].append(torch.exp(out["logprobs"])[loss_mask].detach().to("cpu"))
-            tensors["inference_probs"].append(torch.exp(inference_logprobs)[loss_mask].detach().to("cpu"))
             tensors["entropy"].append(out["entropy"][loss_mask].detach().to("cpu"))
             tensors["loss"].append(loss.detach().to("cpu").unsqueeze(0))
 
@@ -465,12 +474,14 @@ def train(config: TrainerConfig):
             logger.debug(micro_step_message)
 
         # Optionally, clip the gradients
+        grad_norm: torch.Tensor | None = None
+        if config.optim.max_norm is not None:
+            grad_norm = clip_grad_norm_(
+                model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
+            )
+            if grad_norm.device.type == "cpu":
+                grad_norm = grad_norm.to(torch.device("cuda"))
 
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
-        if grad_norm.device.type == "cpu":
-            grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
 
         # Update the model parameters
@@ -509,7 +520,9 @@ def train(config: TrainerConfig):
         step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {tensor_stats['loss/mean']:.4f} | Entropy: {tensor_stats['entropy/mean']:.4f}"
         if "mismatch_kl/mean" in tensor_stats:
             step_message += f" | Mismatch KL: {tensor_stats['mismatch_kl/mean']:.4f}"
-        step_message += f" | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
+        if grad_norm is not None:
+            step_message += f" | Grad. Norm: {grad_norm:.4f}"
+        step_message += f" | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f} GiB"
         if "max_vio/mean" in tensor_stats:
             step_message += f" | Max Vio: {tensor_stats['max_vio/mean']:.4f}"
         logger.success(step_message)
@@ -527,10 +540,11 @@ def train(config: TrainerConfig):
         # Log optimizer metrics
         optim_metrics = {
             "optim/lr": current_lr,
-            "optim/grad_norm": grad_norm.item(),
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
+        if grad_norm is not None:
+            optim_metrics["optim/grad_norm"] = grad_norm.item()
         monitor.log(optim_metrics, step=progress.step)
 
         # Compute derived metrics
@@ -539,9 +553,8 @@ def train(config: TrainerConfig):
         if mismatch_kl_mean is not None and entropy_mean > 0:
             tensor_stats["kl_ent_ratio/mean"] = mismatch_kl_mean / entropy_mean
 
-        # Log tensor stats
         tensor_stats["step"] = progress.step
-        monitor.log(tensor_stats, step=progress.step)
+        monitor.log(filter_rl_trainer_tensor_stats_for_wandb(tensor_stats), step=progress.step)
 
         # Log time metrics
         time_metrics = {
@@ -566,7 +579,7 @@ def train(config: TrainerConfig):
                 step=progress.step,
                 loss=tensor_stats["loss/mean"],
                 throughput=throughput,
-                grad_norm=grad_norm.item(),
+                grad_norm=grad_norm.item() if grad_norm is not None else None,
                 peak_memory_gib=peak_memory,
                 learning_rate=current_lr,
                 mfu=mfu,
@@ -647,7 +660,7 @@ def train(config: TrainerConfig):
 
 def main():
     """Main entry-point for RL trainer. Run using `uv run trainer`"""
-
+    set_proc_title("Trainer")
     train(cli(TrainerConfig))
 
 

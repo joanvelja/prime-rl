@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from prime_rl.orchestrator.scheduler import InflightRolloutInfo, Scheduler
+from prime_rl.orchestrator.scheduler import InflightRequest, Scheduler
 from prime_rl.utils.async_utils import safe_cancel
 
 
@@ -29,6 +29,7 @@ def make_scheduler() -> Scheduler:
     scheduler.inflight_policy_update_task = None
     scheduler.update_policy_task = None
     scheduler.enable_policy_updates = True
+    scheduler.use_prefix_cache_salt = False
     return scheduler
 
 
@@ -45,8 +46,8 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
         interleaved_task = None
 
         scheduler.inflight_requests = {
-            stale_task: InflightRolloutInfo(off_policy_steps=1, client_config=client, task="test", group_id=1),
-            survivor_task: InflightRolloutInfo(off_policy_steps=0, client_config=client, task="test", group_id=2),
+            stale_task: InflightRequest(off_policy_steps=1, client_config=client, env_name="test", group_id=1),
+            survivor_task: InflightRequest(off_policy_steps=0, client_config=client, env_name="test", group_id=2),
         }
 
         async def drop_group(group_id: int) -> int:
@@ -62,10 +63,10 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
             nonlocal interleaved_task
             if interleaved_task is None:
                 interleaved_task = asyncio.create_task(asyncio.sleep(60))
-                scheduler.inflight_requests[interleaved_task] = InflightRolloutInfo(
+                scheduler.inflight_requests[interleaved_task] = InflightRequest(
                     off_policy_steps=0,
                     client_config=client,
-                    task="test",
+                    env_name="test",
                     group_id=3,
                 )
             return len(tasks_to_remove)

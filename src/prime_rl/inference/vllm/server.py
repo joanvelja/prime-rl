@@ -3,11 +3,10 @@ from http import HTTPStatus
 from typing import Any
 
 import uvloop
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import State
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.cli.serve import run_api_server_worker_proc
 from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -40,6 +39,9 @@ MODEL_TOOL_CALL_PARSER: dict[str, str] = {
     # GLM-5
     "zai-org/GLM-5": "glm47",
     "zai-org/GLM-5-FP8": "glm47",
+    # GLM-5.1
+    "zai-org/GLM-5.1": "glm47",
+    "zai-org/GLM-5.1-FP8": "glm47",
     # MiniMax M2
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
     "MiniMaxAI/MiniMax-M2.1": "minimax_m2",
@@ -134,27 +136,23 @@ def resolve_tool_call_parser(model_name: str, tool_call_parser: str | None) -> s
 logger = get_logger()
 from prime_rl.inference.patches import (
     monkey_patch_harmony_stop_token_propagation,
-    monkey_patch_hermes_tool_parser_thread_safety,
     monkey_patch_load_lora_adapter,
     monkey_patch_tokenize_params_validation,
-    monkey_patch_tokenizer_thread_safety,
 )
 from prime_rl.inference.vllm.serving_chat_with_tokens import (
     ChatCompletionRequestWithTokens,
     OpenAIServingChatWithTokens,
 )
 
-# NOTE: Fix harmony stop token propagation for GPT-OSS models (vLLM 0.17.0 bug)
+# NOTE: Fix harmony stop token propagation for GPT-OSS models
+# Upstream issue still open: https://github.com/vllm-project/vllm/issues/22519
 monkey_patch_harmony_stop_token_propagation()
 # NOTE: Monkeypatch LoadLoRAAdapter to allow loading the same adapter multiple times
+# May be removable if we pass load_inplace=True (supported since vLLM 0.18, PR #31326)
 monkey_patch_load_lora_adapter()
 # NOTE: Monkeypatch TokenizeParams to fix overly conservative validation
+# Still needed in vLLM 0.19 — upstream rejects prompt_len > max_model_len - max_tokens
 monkey_patch_tokenize_params_validation()
-# NOTE: Monkeypatch Hermes tool parser to fix "Already borrowed" RuntimeError under concurrent load
-monkey_patch_hermes_tool_parser_thread_safety()
-# NOTE: Monkeypatch HF tokenizer to fix "Already borrowed" RuntimeError during concurrent chat template processing
-# Can be removed once https://github.com/vllm-project/vllm/pull/36557 is merged and we upgrade vllm
-monkey_patch_tokenizer_thread_safety()
 
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
@@ -200,23 +198,24 @@ async def resume(request: Request):
 async def update_weights(request: Request):
     data = await request.json()
     await engine_client(request).collective_rpc("update_weights_from_path", args=(data.get("weight_dir"),))
-    await engine_client(request).reset_prefix_cache()
+    if request.app.state.reset_prefix_cache_after_update:
+        await engine_client(request).reset_prefix_cache()
     return {"status": "ok"}
 
 
 @router.post("/load_lora_adapter")
 async def load_lora_adapter(lora_request: LoadLoRAAdapterRequest, raw_request: Request):
-    """Load a LoRA adapter and reset the prefix cache.
+    """Load a LoRA adapter, optionally resetting the prefix cache.
 
     Wrapper around vLLM's /v1/load_lora_adapter that also resets the prefix cache
-    to invalidate KV states computed with old weights.
+    to invalidate KV states computed with old weights (unless disabled via config).
     """
     handler = models(raw_request)
     response = await handler.load_lora_adapter(lora_request)
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(), status_code=response.error.code)
-    # Reset prefix cache to invalidate KV states computed with old weights
-    await engine_client(raw_request).reset_prefix_cache()
+    if raw_request.app.state.reset_prefix_cache_after_update:
+        await engine_client(raw_request).reset_prefix_cache()
     return {"status": "ok"}
 
 
@@ -228,11 +227,10 @@ async def init_broadcaster(request: Request):
     timeout = data.get("timeout")
     rank_offset = data.get("rank_offset")
     inference_world_size = data.get("inference_world_size")
-    gpus_per_server = data.get("gpus_per_server")
     quantize_in_weight_transfer = data.get("quantize_in_weight_transfer", False)
     await engine_client(request).collective_rpc(
         "init_broadcaster",
-        args=(host, port, rank_offset, inference_world_size, gpus_per_server, timeout, quantize_in_weight_transfer),
+        args=(host, port, rank_offset, inference_world_size, timeout, quantize_in_weight_transfer),
     )
     return {"status": "ok"}
 
@@ -253,10 +251,7 @@ async def _chat_with_tokens(request: ChatCompletionRequestWithTokens, raw_reques
     handler = chat_with_tokens(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(message="The model does not support Chat Completions API")
-    try:
-        generator = await handler.create_chat_completion_with_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)) from e
+    generator = await handler.create_chat_completion_with_tokens(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(), status_code=generator.error.code)
 
@@ -272,81 +267,67 @@ async def custom_init_app_state(
     args: Namespace,
     supported_tasks: tuple,
 ):
-    """Extend upstream app-state setup with PrimeRL's token-returning chat path."""
-    # Setup the regular app state first (in-place)
+    """
+    Modifies init_app_state:
+    1. Call the original init_app_state to set up standard state.
+    2. Replace the serving_chat with our OpenAIServingChatWithTokens wrapper.
+    """
     await init_app_state(engine_client, state, args, supported_tasks)
-    if "generate" not in supported_tasks:
+
+    state.reset_prefix_cache_after_update = getattr(args, "reset_prefix_cache_after_update", True)
+
+    if "generate" in supported_tasks and state.openai_serving_chat is not None:
+        original_chat = state.openai_serving_chat
+        serving_chat = object.__new__(OpenAIServingChatWithTokens)
+        serving_chat.__dict__.update(original_chat.__dict__)
+        state.openai_serving_chat = serving_chat
+        state.openai_serving_chat_with_tokens = serving_chat
+    else:
         state.openai_serving_chat_with_tokens = None
-        return
-
-    # vLLM 0.18.0 centralizes chat-serving setup in openai_serving_render.
-    # Reuse that state so our custom handler stays aligned with upstream.
-    serving_render = state.openai_serving_render
-    serving_chat = OpenAIServingChatWithTokens(
-        engine_client,
-        state.openai_serving_models,
-        args.response_role,
-        openai_serving_render=serving_render,
-        request_logger=serving_render.request_logger,
-        chat_template=serving_render.chat_template,
-        chat_template_content_format=serving_render.chat_template_content_format,
-        default_chat_template_kwargs=serving_render.default_chat_template_kwargs,
-        trust_request_chat_template=serving_render.trust_request_chat_template,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-        enable_auto_tools=args.enable_auto_tool_choice,
-        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
-        tool_parser=args.tool_call_parser,
-        reasoning_parser=args.structured_outputs_config.reasoning_parser,
-        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        enable_force_include_usage=args.enable_force_include_usage,
-        enable_log_outputs=args.enable_log_outputs,
-        enable_log_deltas=args.enable_log_deltas,
-    )
-    serving_chat.warmup()
-    state.openai_serving_chat = serving_chat
-    state.openai_serving_chat_with_tokens = serving_chat
 
 
-def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
-    """
-    Modifies run_api_server_worker_proc:
-    1. Re-import our module to ensure monkey patches are applied in child processes
-    """
-    # NOTE: This hack ensures that monkey patches are applied in child processes
-    # to make our custom routes work in multi-API-server settings.
-    import prime_rl.inference.vllm.server  # noqa: F401
-
-    run_api_server_worker_proc(listen_address, sock, args, client_config, **uvicorn_kwargs)
-
-
-import vllm.entrypoints.cli.serve
 import vllm.entrypoints.openai.api_server
+import vllm.v1.utils
 from vllm.entrypoints.openai.api_server import build_app as _original_build_app
+from vllm.v1.utils import run_api_server_worker_proc as _original_run_api_server_worker_proc
 
 
-def custom_build_app(args: Namespace, supported_tasks: tuple):
+def custom_build_app(args: Namespace, supported_tasks: tuple, model_config=None):
     """
     Wrap build_app to include our custom router.
     """
-    app = _original_build_app(args, supported_tasks)
+    app = _original_build_app(args, supported_tasks, model_config)
     app.include_router(router)
     return app
 
 
-# Also monkey patch run_api_server_worker_proc for multi-api-server mode
-# This is needed because worker processes spawned by run_multi_api_server
-# re-import modules and would otherwise use the original run_server_worker
+def custom_run_api_server_worker_proc(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
+    """
+    Re-import our module in child processes so monkey patches (custom routes,
+    custom init_app_state) are applied in multi-API-server mode.
+    """
+    import prime_rl.inference.vllm.server  # noqa: F401
+
+    _original_run_api_server_worker_proc(listen_address, sock, args, client_config, **uvicorn_kwargs)
+
+
 vllm.entrypoints.openai.api_server.init_app_state = custom_init_app_state
 vllm.entrypoints.openai.api_server.build_app = custom_build_app
-vllm.entrypoints.cli.serve.run_api_server_worker_proc = custom_run_api_server_worker_proc
+vllm.v1.utils.run_api_server_worker_proc = custom_run_api_server_worker_proc
 
 
 # Adapted from vllm/entrypoints/cli/serve.py
 # Only difference we do some config translation (i.e. pass populated namespace
 # to `parse_args`) and additional arg validation
 def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
+    import os
+
     from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server
     from vllm.entrypoints.openai.api_server import run_server
+
+    # Signal worker processes to disable LoRA on MoE layers when LoRA targets don't include experts
+    if config.lora_target_modules and not any("expert" in m for m in config.lora_target_modules):
+        os.environ["PRIME_NO_MOE_LORA"] = "1"
 
     namespace = config.to_vllm()
     if vllm_extra:
@@ -361,6 +342,7 @@ def server(config: InferenceConfig, vllm_extra: dict[str, Any] | None = None):
 
     args.tool_call_parser = resolve_tool_call_parser(args.model, args.tool_call_parser)
     args.enable_auto_tool_choice = args.tool_call_parser is not None
+    args.reset_prefix_cache_after_update = config.experimental.reset_prefix_cache_after_update
     if args.tool_call_parser is not None:
         logger.info(f"Using tool_call_parser='{args.tool_call_parser}' for model '{args.model}'")
 

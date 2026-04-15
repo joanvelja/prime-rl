@@ -297,20 +297,13 @@ def default_dtype(dtype):
         torch.set_default_dtype(prev)
 
 
-def strip_env_version(env_id: str) -> str:
-    """Strip the @version suffix from an environment ID.
-
-    Environment IDs may include a version (e.g. 'd42me/meow@0.1.5') for installation,
-    but the version must be stripped before loading as a Python module.
-    """
-    return env_id.split("@")[0]
-
-
-def install_env(env_id: str) -> None:
+def install_env(env_id: str, prerelease: bool = False) -> None:
     """Install an environment in subprocess."""
     logger = get_logger()
     logger.info(f"Installing environment {env_id}")
     install_cmd = ["uv", "run", "--no-sync", "prime", "env", "install", env_id]
+    if prerelease:
+        install_cmd.insert(-1, "--prerelease")
     result = subprocess.run(install_cmd, capture_output=True, text=True)
     for line in result.stdout.splitlines():
         if line.strip():

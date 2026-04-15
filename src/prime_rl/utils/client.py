@@ -10,7 +10,7 @@ import httpx
 import verifiers as vf
 from httpx import AsyncClient
 from openai import NotFoundError
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, stop_after_delay, wait_exponential
 
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
@@ -21,7 +21,7 @@ class InferencePool(Protocol):
     """Protocol for inference pools (static or elastic)."""
 
     @property
-    def clients(self) -> list[vf.ClientConfig]:
+    def train_clients(self) -> list[vf.ClientConfig]:
         """Get inference clients."""
         ...
 
@@ -34,8 +34,8 @@ class InferencePool(Protocol):
         """Update the model name."""
         ...
 
-    async def get_next_client(self) -> vf.ClientConfig:
-        """Get next client in round-robin fashion."""
+    async def get_eval_client(self) -> vf.ClientConfig:
+        """Get next eval client in round-robin fashion."""
         ...
 
     async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
@@ -59,18 +59,22 @@ class StaticInferencePool:
     """Static inference pool with fixed client list."""
 
     def __init__(
-        self, clients: list[vf.ClientConfig], admin_clients: list[AsyncClient], skip_model_check: bool = False
+        self,
+        client_config: ClientConfig,
+        model_name: str,
+        train_client_type: str = "openai_chat_completions_token",
+        eval_client_type: str = "openai_chat_completions",
     ):
-        self._clients = clients
-        self._admin_clients = admin_clients
-        self._skip_model_check = skip_model_check
-        self._idx_to_client = {client.client_idx: client for client in clients}
-        self._client_cycle = cycle(clients)
-        self.model_name = None  # unused
+        self._train_clients = setup_clients(client_config, client_type=train_client_type)
+        self._eval_clients = setup_clients(client_config, client_type=eval_client_type)
+        self._admin_clients = setup_admin_clients(client_config)
+        self._skip_model_check = client_config.skip_model_check
+        self._eval_cycle = cycle(self._eval_clients)
+        self.model_name = model_name
 
     @property
-    def clients(self) -> list[vf.ClientConfig]:
-        return self._clients
+    def train_clients(self) -> list[vf.ClientConfig]:
+        return self._train_clients
 
     @property
     def admin_clients(self) -> list[AsyncClient]:
@@ -79,8 +83,12 @@ class StaticInferencePool:
     def update_model_name(self, model_name: str) -> None:
         self.model_name = model_name
 
-    async def get_next_client(self) -> vf.ClientConfig:
-        return next(self._client_cycle)
+    @property
+    def eval_clients(self) -> list[vf.ClientConfig]:
+        return self._eval_clients
+
+    async def get_eval_client(self) -> vf.ClientConfig:
+        return next(self._eval_cycle)
 
     async def wait_for_ready(self, model_name: str, timeout: int = 1800) -> None:
         await check_health(self._admin_clients, timeout=timeout)
@@ -97,15 +105,27 @@ class StaticInferencePool:
 
 
 async def setup_inference_pool(
-    client_config: ClientConfig, model_name: str, client_type: str = "openai_chat_completions"
+    client_config: ClientConfig,
+    model_name: str,
+    train_client_type: str = "openai_chat_completions_token",
+    eval_client_type: str = "openai_chat_completions",
 ) -> InferencePool:
     """Create an inference pool from config (static or elastic)."""
     logger = get_logger()
 
+    if train_client_type == "openai_chat_completions_token":
+        logger.warning(
+            "Token-in-token-out (TITO) client is enabled for training. Only use "
+            "this if your environment has a linear history and the chat "
+            "template has the extension property."
+        )
+
     if client_config.is_elastic:
         from prime_rl.utils.elastic import ElasticInferencePool
 
-        return await ElasticInferencePool.from_config(client_config, model_name=model_name, client_type=client_type)
+        return await ElasticInferencePool.from_config(
+            client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
+        )
 
     logger.info(
         f"Initializing static inference pool (base_url={', '.join(client_config.base_url)}, "
@@ -113,9 +133,7 @@ async def setup_inference_pool(
         f"api_key_var={client_config.api_key_var}, headers={client_config.headers})"
     )
     return StaticInferencePool(
-        clients=setup_clients(client_config, client_type=client_type),
-        admin_clients=setup_admin_clients(client_config),
-        skip_model_check=client_config.skip_model_check,
+        client_config, model_name=model_name, train_client_type=train_client_type, eval_client_type=eval_client_type
     )
 
 
@@ -167,7 +185,7 @@ def setup_admin_clients(client_config: ClientConfig) -> list[AsyncClient]:
         return AsyncClient(
             base_url=base_url,
             headers=headers,
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=1),
             timeout=httpx.Timeout(None),
         )
 
@@ -295,7 +313,23 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 404 (adapter not found) or 500 (server error during loading)
         return exception.response.status_code in (404, 500)
+    # Retry on transport-level failures (timeouts, connection resets, etc.) so
+    # the per-call read timeout below turns a stuck server into a bounded retry
+    # loop instead of propagating as a hard failure on the first hiccup.
+    if isinstance(exception, (httpx.TimeoutException, httpx.TransportError)):
+        return True
     return False
+
+
+# Per-attempt and total bounds for `/load_lora_adapter`. A LoRA load is fast
+# (small adapter file + KV cache reset, single-digit seconds in practice) but
+# the global admin AsyncClient uses `timeout=None`, so a stuck server hangs
+# the orchestrator forever inside `ElasticInferencePool._sync_server_adapter`.
+# `_PER_ATTEMPT` converts a hang into a TimeoutException so tenacity retries;
+# `_TOTAL` is the wall-clock budget across all retries — pick whichever
+# stop condition fires first.
+LORA_LOAD_READ_TIMEOUT_S = 30.0
+LORA_LOAD_TOTAL_TIMEOUT_S = 120.0
 
 
 async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_path: Path) -> None:
@@ -312,8 +346,8 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
 
     @retry(
         retry=retry_if_exception(_is_retryable_lora_error),
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_delay(LORA_LOAD_TOTAL_TIMEOUT_S) | stop_after_attempt(10),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
     async def _load_lora_adapter(admin_client: AsyncClient) -> None:
@@ -321,6 +355,7 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
         response = await admin_client.post(
             "/load_lora_adapter",
             json={"lora_name": lora_name, "lora_path": lora_path_posix},
+            timeout=httpx.Timeout(connect=10.0, read=LORA_LOAD_READ_TIMEOUT_S, write=60.0, pool=10.0),
         )
         response.raise_for_status()
 
@@ -378,7 +413,6 @@ async def init_nccl_broadcast(
                     "port": port,
                     "rank_offset": rank_offset,
                     "inference_world_size": inference_world_size,
-                    "gpus_per_server": gpus_per_server,
                     "timeout": timeout,
                     "quantize_in_weight_transfer": quantize_in_weight_transfer,
                 },

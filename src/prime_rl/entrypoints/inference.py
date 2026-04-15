@@ -8,6 +8,7 @@ from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
 from prime_rl.utils.logger import setup_logger
 from prime_rl.utils.pathing import format_log_message, get_config_dir, get_log_dir
+from prime_rl.utils.process import set_proc_title
 
 INFERENCE_TOML = "inference.toml"
 INFERENCE_SBATCH = "inference.sbatch"
@@ -33,12 +34,14 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
     template = env.get_template(config.slurm.template_path.name)
 
     is_disaggregated = config.deployment.type == "disaggregated"
+    dp_per_node = config.deployment.gpus_per_node // config.parallel.tp
 
     template_vars = dict(
         **config.slurm.template_vars,
         config_path=config_path,
         output_dir=config.output_dir,
         gpus_per_node=config.deployment.gpus_per_node,
+        dp_per_node=dp_per_node,
         num_nodes=getattr(config.deployment, "num_nodes", 1),
         port=config.server.port,
         disaggregated=is_disaggregated,
@@ -55,15 +58,21 @@ def write_slurm_script(config: InferenceConfig, config_path: Path, script_path: 
             prefill_port=config.deployment.prefill_port,
             decode_port=config.deployment.decode_port,
             router_port=config.deployment.router_port,
+            router_policy=config.deployment.router_policy,
             data_parallel_rpc_port=config.data_parallel_rpc_port,
             use_deep_gemm=config.use_deep_gemm,
             prefill_env_overrides=config.deployment.prefill_env_overrides,
             decode_env_overrides=config.deployment.decode_env_overrides,
+            kv_offload=config.deployment.kv_cache_offload is not None,
+            kv_offload_cpu_bytes=int(config.deployment.kv_cache_offload.cpu_bytes)
+            if config.deployment.kv_cache_offload
+            else 0,
         )
     elif is_multi_node:
         template_vars.update(
             router_port=config.deployment.router_port,
             backend_port=config.deployment.backend_port,
+            router_policy=config.deployment.router_policy,
         )
 
     script = template.render(**template_vars)
@@ -137,6 +146,7 @@ def inference(config: InferenceConfig):
 
 
 def main():
+    set_proc_title("Inference")
     inference(cli(InferenceConfig))
 
 

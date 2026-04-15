@@ -1,7 +1,13 @@
 import logging
+import os
 import time
 from pathlib import Path
 from typing import cast
+
+# Disable transformers hub kernel interception by default. The `kernels` package, when installed,
+# causes transformers to auto-replace modules (e.g. mamba-ssm) with hub kernel versions that may
+# have incompatible CUDA requirements. We only enable it explicitly for models that need it (GPT-OSS).
+os.environ.setdefault("USE_HUB_KERNELS", "NO")
 
 import torch
 import torch._dynamo
@@ -236,6 +242,23 @@ def get_model(
                 "VLM models must use optimization_dtype='bfloat16' and reduce_dtype='bfloat16' to match vLLM inference."
             )
 
+    # GPT-OSS only supports FlashAttention via kernels-community/vllm-flash-attn3, which requires Hopper (SM 90).
+    # On other architectures (e.g. Blackwell), users must fall back to eager attention.
+    HOPPER_MAJOR = 9
+    if getattr(model_config, "model_type", "") == "gpt_oss":
+        if config.attn != "eager":
+            major, minor = torch.cuda.get_device_capability()
+            if major != HOPPER_MAJOR:
+                raise ValueError(
+                    f"GPT-OSS requires 'attn = \"eager\"' on non-Hopper GPUs (detected SM {major}{minor}). "
+                    f"The only flash attention kernel supported by GPT-OSS (kernels-community/vllm-flash-attn3) is Hopper-only. "
+                    f'Set [trainer.model] attn = "eager" in your config.'
+                )
+        # Enable hub kernels for GPT-OSS (disabled by default to avoid interfering with other models).
+        import transformers.integrations.hub_kernels as _hub_kernels
+
+        _hub_kernels._kernels_enabled = True
+
     # Fallback Qwen3.5 patch detection from loaded config model_type
     if getattr(model_config, "model_type", "").startswith("qwen3_5_moe"):
         _patch_qwen3_5_text_position_ids()
@@ -260,10 +283,15 @@ def get_model(
             ),
             None,
         )
+        # Some HF configs (e.g. Llama 3.2) set pad_token_id to a list, which
+        # crashes both huggingface_hub's strict setter and transformers'
+        # GenerationConfig.validate(). Unwrap before assigning.
+        if isinstance(pad_token_id, list):
+            pad_token_id = pad_token_id[0]
         model_config.pad_token_id = pad_token_id
 
-    # Some HF configs (e.g. Llama 3.2) set pad_token_id to a list, which crashes
-    # transformers' GenerationConfig.validate() when it does `pad_token_id < 0`.
+    # Handle list pad_token_id that was already set on the config (not from our
+    # fallback above, but directly in the model's config.json).
     if isinstance(getattr(model_config, "pad_token_id", None), list):
         model_config.pad_token_id = model_config.pad_token_id[0]
 
@@ -335,9 +363,17 @@ def get_model(
 
 
 def setup_tokenizer(config: TokenizerConfig) -> PreTrainedTokenizer:
+    logger = get_logger()
     tokenizer = AutoTokenizer.from_pretrained(config.name, trust_remote_code=config.trust_remote_code)
     if config.chat_template is not None:
-        tokenizer.chat_template = config.chat_template
+        path = Path(config.chat_template)
+        if path.is_file():
+            logger.info(f"Loading custom chat template from file: {path}")
+            tokenizer.chat_template = path.read_text()
+            logger.debug(f"Chat template content:\n{tokenizer.chat_template}")
+        else:
+            logger.info("Using inline custom chat template")
+            tokenizer.chat_template = config.chat_template
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
     return tokenizer
@@ -587,6 +623,11 @@ def can_reinit_empty_buffers(model: nn.Module):
     if len(buffer_names) == 1 and buffer_names[0] == "model.rotary_emb.inv_freq":
         return True
 
+    # GPT-OSS (has original_inv_freq alongside inv_freq from dynamic rope scaling)
+    gpt_oss_buffers = {"model.rotary_emb.inv_freq", "model.rotary_emb.original_inv_freq"}
+    if set(buffer_names) == gpt_oss_buffers:
+        return True
+
     # Gemma3 model (has embed_scale and local rotary emb)
     gemma3_buffers = {"model.embed_tokens.embed_scale", "model.rotary_emb.inv_freq", "model.rotary_emb_local.inv_freq"}
     if set(buffer_names) == gemma3_buffers:
@@ -601,8 +642,21 @@ def fix_model_post_empty(model: nn.Module):
     # HF standard transformer model
     if "model.rotary_emb.inv_freq" in buffer_names:
         rotary_emb = model.model.rotary_emb
-        inv_freq, rotary_emb.attention_scaling = rotary_emb.rope_init_fn(rotary_emb.config, rotary_emb.inv_freq.device)
+        if hasattr(rotary_emb, "rope_init_fn"):
+            rope_init_fn = rotary_emb.rope_init_fn
+        else:
+            # GPT-OSS stores rope_init_fn only as a local in __init__; re-derive it
+            from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+            rope_init_fn = (
+                ROPE_INIT_FUNCTIONS[rotary_emb.rope_type]
+                if rotary_emb.rope_type != "default"
+                else rotary_emb.compute_default_rope_parameters
+            )
+        inv_freq, rotary_emb.attention_scaling = rope_init_fn(rotary_emb.config, rotary_emb.inv_freq.device)
         rotary_emb.inv_freq.copy_(inv_freq)
+        if "model.rotary_emb.original_inv_freq" in buffer_names:
+            rotary_emb.original_inv_freq.copy_(inv_freq)
     # Gemma3 local rotary emb
     if "model.rotary_emb_local.inv_freq" in buffer_names:
         rotary_emb_local = model.model.rotary_emb_local
@@ -851,6 +905,7 @@ def forward(
     # Multimodal fields (Qwen3-VL)
     pixel_values: Float[Tensor, "num_patches patch_dim"] | None = None,
     image_grid_thw: Int[Tensor, "num_images 3"] | None = None,
+    mm_token_type_ids: Int[Tensor, "batch seq"] | None = None,
 ) -> PrimeLmOutput:
     # Build kwargs for model forward
     kwargs = {
@@ -865,6 +920,7 @@ def forward(
         assert image_grid_thw is not None, "pixel_values requires image_grid_thw for MRoPE computation"
         kwargs["pixel_values"] = pixel_values
         kwargs["image_grid_thw"] = image_grid_thw
+        kwargs["mm_token_type_ids"] = mm_token_type_ids
     else:
         kwargs["position_ids"] = position_ids
 
