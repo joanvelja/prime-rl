@@ -148,22 +148,18 @@ class Scheduler:
         self.groups.clear()
         self.cancelled_rollouts_count += count
 
-    @staticmethod
-    def _client_identity(c: vf.ClientConfig) -> tuple[str, str | None]:
-        return (c.api_base_url, c.extra_headers.get("X-data-parallel-rank"))
-
     async def _select_least_loaded_client(self) -> vf.ClientConfig:
         """Select the client with the fewest in-flight tasks.
 
-        Uses (api_base_url, dp_rank) as identity rather than client_idx so that
+        Uses api_base_url as identity rather than client_idx so that
         load tracking survives elastic pool refreshes (which reassign indices).
         """
         clients = self.inference_pool.train_clients
         while not clients:
             await asyncio.sleep(1)
             clients = self.inference_pool.train_clients
-        inflight = Counter(self._client_identity(info.client_config) for info in self.inflight_requests.values())
-        return min(clients, key=lambda c: inflight[self._client_identity(c)])
+        inflight = Counter(info.client_config.api_base_url for info in self.inflight_requests.values())
+        return min(clients, key=lambda c: inflight[c.api_base_url])
 
     async def drop_group(self, group_id: int) -> int:
         """Drop a group and cancel any remaining in-flight rollouts for it. Returns the number of cancelled rollouts."""

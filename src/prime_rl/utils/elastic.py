@@ -182,7 +182,6 @@ class ElasticInferencePool:
                 base_url=urls,
                 api_key_var=self.client_config.api_key_var,
                 headers=self.client_config.headers,
-                dp_rank_count=self.client_config.dp_rank_count,
             )
             self._train_clients = setup_clients(url_config, client_type=self.train_client_type) if urls else []
             self._eval_clients = setup_clients(url_config, client_type=self.eval_client_type) if urls else []
