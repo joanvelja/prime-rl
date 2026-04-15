@@ -557,10 +557,24 @@ def rl(config: RLConfig):
             get_logger().info(f"Resuming from step {resume_step}, cleaning future rollouts and broadcasts")
             clean_future_steps(config.output_dir, resume_step)
 
+    if not config.dry_run:
+        _pre_download_model(config.trainer.model.name)
+
     if config.slurm is not None:
         rl_slurm(config)
     else:
         rl_local(config)
+
+
+def _pre_download_model(model_name: str) -> None:
+    """Pre-download model from HuggingFace Hub so all nodes have cached weights before training."""
+    if Path(model_name).exists():
+        return
+    from huggingface_hub import snapshot_download
+
+    get_logger().info(f"Pre-downloading model '{model_name}'")
+    snapshot_download(repo_id=model_name, repo_type="model")
+    get_logger().info(f"Finished pre-downloading model '{model_name}'")
 
 
 def main():
