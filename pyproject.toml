@@ -120,7 +120,11 @@ override-dependencies = [
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
-verifiers = { git = "https://github.com/PrimeIntellect-ai/verifiers.git", rev = "d3c830c" }
+# Sibling editable install. Requires `git clone https://github.com/joanvelja/verifiers.git
+# ../verifiers` (branch feat/debate-env) at a sibling position before `uv sync`. On Darwin
+# the prime-rl venv is empty (linux-only resolver env), so orchestrator unit tests run from
+# the fork's venv — see tests/unit/orchestrator/test_debate_env.py docstring.
+verifiers = { path = "../verifiers", editable = true }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "c1c3424" }

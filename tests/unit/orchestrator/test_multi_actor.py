@@ -1,23 +1,4 @@
 import asyncio
-import sys
-import types as _pytypes
-from pathlib import Path
-
-_REPO = Path(__file__).resolve().parents[3]
-_VROOT = str(_REPO / "forks" / "verifiers")
-
-sys.path.insert(0, _VROOT)
-
-for _pkg, _subdir in [
-    ("prime_rl", str(_REPO / "src" / "prime_rl")),
-    ("prime_rl.orchestrator", str(_REPO / "src" / "prime_rl" / "orchestrator")),
-    ("verifiers", _VROOT + "/verifiers"),
-    ("verifiers.envs", _VROOT + "/verifiers/envs"),
-]:
-    if _pkg not in sys.modules:
-        _mod = _pytypes.ModuleType(_pkg)
-        _mod.__path__ = [_subdir]
-        sys.modules[_pkg] = _mod
 
 from verifiers.envs.multi_actor_kernel import (
     KernelState,

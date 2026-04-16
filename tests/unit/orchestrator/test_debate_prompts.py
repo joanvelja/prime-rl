@@ -2,41 +2,17 @@
 
 NO mocks. Real DebatePrompts, real Jinja rendering, real YAML files.
 
-Run with:
-  cd forks/verifiers && uv run python3 -m pytest \
-    ../../tests/unit/orchestrator/test_debate_prompts.py -v --noconftest
+Run from the fork venv — see test_debate_env.py docstring for setup.
 """
 
 from __future__ import annotations
 
-import sys
+import importlib.resources
 import tempfile
 import textwrap
-import types as _pytypes
 from pathlib import Path
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# Path setup: expose verifiers fork without triggering heavy __init__ chains
-# ---------------------------------------------------------------------------
-
-_REPO = Path(__file__).resolve().parents[3]
-_VROOT = str(_REPO / "forks" / "verifiers")
-
-if _VROOT not in sys.path:
-    sys.path.insert(0, _VROOT)
-
-for _pkg, _subdir in [
-    ("verifiers", str(_REPO / "forks" / "verifiers" / "verifiers")),
-    ("verifiers.envs", str(_REPO / "forks" / "verifiers" / "verifiers" / "envs")),
-    ("verifiers.envs.debate", str(_REPO / "forks" / "verifiers" / "verifiers" / "envs" / "debate")),
-]:
-    if _pkg not in sys.modules:
-        _mod = _pytypes.ModuleType(_pkg)
-        _mod.__path__ = [_subdir]
-        _mod.__package__ = _pkg
-        sys.modules[_pkg] = _mod
 
 from verifiers.envs.debate.prompts import (
     DebatePrompts,
@@ -47,7 +23,11 @@ from verifiers.envs.debate.prompts import (
     _validate,
 )
 
-_PROMPTS_DIR = _REPO / "forks" / "verifiers" / "verifiers" / "envs" / "debate" / "prompts"
+# importlib.resources is namespace-package-safe and survives non-editable
+# (wheel) installs — stdlib-idiomatic way to locate package-shipped data.
+_PROMPTS_DIR = Path(
+    str(importlib.resources.files("verifiers.envs.debate") / "prompts")
+)
 
 
 # ---------------------------------------------------------------------------

@@ -4,404 +4,30 @@ The client is the system boundary -- faking it is correct. Everything
 inside (StaticSchedule, apply_action, DebateRubric, DebatePrompts,
 rollout_to_member_rollouts) must be the real implementation.
 
-Run with:
-  uv run --no-project --with pytest --with pydantic --with jinja2 --with pyyaml \
-    python3 -m pytest tests/unit/orchestrator/test_debate_env.py -v --noconftest
+Run from the fork venv (prime-rl .venv is empty on Darwin per linux-only
+resolver env):
+
+  cd ../verifiers && uv run pytest \\
+    /path/to/prime-rl/tests/unit/orchestrator/test_debate_env.py --noconftest
+
+The fork venv must have prime-rl installed editable (once per rebuild):
+
+  cd ../verifiers && uv pip install -e ../prime-rl --no-deps
+
+`--noconftest` skips prime-rl's root conftest which eagerly imports
+prime_rl.trainer.world (torch/distributed). Orthogonal to this suite.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import sys
-import types as _pytypes
-from pathlib import Path
 from typing import Any
-
-_REPO = Path(__file__).resolve().parents[3]
-_VROOT = str(_REPO / "forks" / "verifiers")
-
-sys.path.insert(0, _VROOT)
-sys.path.insert(0, str(_REPO / "src"))
-
-# ---------------------------------------------------------------------------
-# Module stubs: avoid pulling heavy __init__ chains (httpx, etc.)
-# ---------------------------------------------------------------------------
-
-for _pkg, _subdir in [
-    ("prime_rl", str(_REPO / "src" / "prime_rl")),
-    ("prime_rl.orchestrator", str(_REPO / "src" / "prime_rl" / "orchestrator")),
-]:
-    if _pkg not in sys.modules:
-        _mod = _pytypes.ModuleType(_pkg)
-        _mod.__path__ = [_subdir]
-        sys.modules[_pkg] = _mod
-
-# Stub verifiers package — load types, errors, decorators directly
-if "verifiers" not in sys.modules:
-    _vf = _pytypes.ModuleType("verifiers")
-    _vf.__path__ = [_VROOT + "/verifiers"]
-    sys.modules["verifiers"] = _vf
-
-# Stub verifiers.envs to avoid __init__.py pulling experimental/httpx
-if "verifiers.envs" not in sys.modules:
-    _envs = _pytypes.ModuleType("verifiers.envs")
-    _envs.__path__ = [_VROOT + "/verifiers/envs"]
-    sys.modules["verifiers.envs"] = _envs
-
-
-def _load_module(mod_name: str, file_path: str):
-    """Load a module from a file path, skipping __init__ chains."""
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, file_path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# Load verifiers submodules in dependency order
-_load_module("verifiers.types", _VROOT + "/verifiers/types.py")
-_load_module("verifiers.errors", _VROOT + "/verifiers/errors.py")
-_load_module("verifiers.decorators", _VROOT + "/verifiers/decorators.py")
-
-# Wire attributes onto the verifiers stub that debate_env.py uses via `vf.X`
-_vf_stub = sys.modules["verifiers"]
-_vf_types = sys.modules["verifiers.types"]
-_vf_errors = sys.modules["verifiers.errors"]
-_vf_decorators = sys.modules["verifiers.decorators"]
-
-for _name in dir(_vf_types):
-    if not _name.startswith("_"):
-        setattr(_vf_stub, _name, getattr(_vf_types, _name))
-for _name in dir(_vf_errors):
-    if not _name.startswith("_"):
-        setattr(_vf_stub, _name, getattr(_vf_errors, _name))
-for _name in ["stop", "cleanup", "teardown", "discover_decorated"]:
-    if hasattr(_vf_decorators, _name):
-        setattr(_vf_stub, _name, getattr(_vf_decorators, _name))
-
-# Stub verifiers.parsers.parser — needed by Rubric.__init__
-if "verifiers.parsers" not in sys.modules:
-    _parsers = _pytypes.ModuleType("verifiers.parsers")
-    _parsers.__path__ = [_VROOT + "/verifiers/parsers"]
-    sys.modules["verifiers.parsers"] = _parsers
-_load_module("verifiers.parsers.parser", _VROOT + "/verifiers/parsers/parser.py")
-
-# Stub verifiers.utils package and key submodules BEFORE loading anything that imports them
-if "verifiers.utils" not in sys.modules:
-    _utils_pkg = _pytypes.ModuleType("verifiers.utils")
-    _utils_pkg.__path__ = [_VROOT + "/verifiers/utils"]
-    sys.modules["verifiers.utils"] = _utils_pkg
-
-# async_utils (needs numpy) — stub with just the function rubric.py needs
-if "verifiers.utils.async_utils" not in sys.modules:
-    _async_utils = _pytypes.ModuleType("verifiers.utils.async_utils")
-    sys.modules["verifiers.utils.async_utils"] = _async_utils
-
-    import asyncio as _asyncio
-    import inspect as _inspect
-
-    async def _maybe_await(fn_or_result, *args, **kwargs):
-        result = fn_or_result(*args, **kwargs) if callable(fn_or_result) else fn_or_result
-        if _inspect.isawaitable(result):
-            return await result
-        return result
-
-    _async_utils.maybe_await = _maybe_await
-    _async_utils.maybe_retry = lambda *a, **kw: None
-    _async_utils.maybe_semaphore = lambda *a, **kw: None
-    _async_utils.with_sem = lambda *a, **kw: None
-
-# logging_utils (needs rich) — stub with warning_once
-if "verifiers.utils.logging_utils" not in sys.modules:
-    import logging as _logging
-
-    _log_utils = _pytypes.ModuleType("verifiers.utils.logging_utils")
-    sys.modules["verifiers.utils.logging_utils"] = _log_utils
-    _log_utils.warning_once = lambda logger, msg: logger.warning(msg)
-    _log_utils.log_once = lambda logger, level, msg: logger.log(level, msg)
-
-# Wire Parser onto vf BEFORE loading rubric (rubric.py uses vf.Parser in class def)
-setattr(_vf_stub, "Parser", sys.modules["verifiers.parsers.parser"].Parser)
-
-# Load verifiers.rubrics.rubric — needed by DebateRubric
-if "verifiers.rubrics" not in sys.modules:
-    _rub = _pytypes.ModuleType("verifiers.rubrics")
-    _rub.__path__ = [_VROOT + "/verifiers/rubrics"]
-    sys.modules["verifiers.rubrics"] = _rub
-_load_module("verifiers.rubrics.rubric", _VROOT + "/verifiers/rubrics/rubric.py")
-setattr(_vf_stub, "Rubric", sys.modules["verifiers.rubrics.rubric"].Rubric)
-
-# Stub verifiers.rubrics.judge_rubric with a minimal JudgeRubric that mirrors
-# the production contract: takes a vf.Client-like judge_client and renders a
-# .format()-style judge_prompt on each call. Loading the real module would
-# pull openai_chat_completions_client.py and transitively httpx/openai SDKs
-# (the whole reason this test file stubs verifiers aggressively). DebateRubric
-# composes two JudgeRubric instances so it uses the stub; real tests exercise
-# the stub directly via FakeJudgeClient.
-#
-# INTENTIONAL GAPS vs production JudgeRubric (verifiers/rubrics/judge_rubric.py):
-#   - NO state["judge_response"] cache (production caches verdicts across
-#     repeat calls with the same rendered prompt so a single rollout's
-#     multiple grade/match invocations coalesce; the stub re-calls every
-#     time, which is fine for FakeJudgeClient queue semantics but would
-#     over-count usage against a real backend).
-#   - NO sampling-args normalization (production maps max_tokens →
-#     max_completion_tokens and drops None values; the stub forwards
-#     judge_sampling_args verbatim).
-#   - NO cache-return early path (production returns the cached value
-#     before calling get_response on a cache hit; the stub always calls).
-#   - NO question-extraction fallback when prompt[-1] lacks "content".
-#
-# These gaps are DELIBERATE: the stub exists to exercise DebateRubric's
-# composition against a fake client; JudgeRubric-internal contracts are
-# verified end-to-end in forks/verifiers/tests/test_judge_rubric.py where
-# the real class is importable.
-if "verifiers.rubrics.judge_rubric" not in sys.modules:
-    _jrub = _pytypes.ModuleType("verifiers.rubrics.judge_rubric")
-    sys.modules["verifiers.rubrics.judge_rubric"] = _jrub
-
-    class _StubJudgeRubric:
-        def __init__(
-            self,
-            parser=None,
-            parallelize_scoring: bool = False,
-            judge_client=None,
-            judge_model: str = "gpt-4.1-nano",
-            judge_sampling_args: dict | None = None,
-            judge_prompt: str = "",
-        ) -> None:
-            self.parser = parser
-            self.judge_client = judge_client
-            self.judge_model = judge_model
-            self.judge_sampling_args = judge_sampling_args or {}
-            self.judge_prompt = judge_prompt
-
-        async def judge(self, prompt, completion, answer, state=None):
-            # Mirror production: render {question, answer, response} via
-            # .format, call judge_client.get_response, return content str.
-            question = ""
-            if isinstance(prompt, list) and prompt:
-                last = prompt[-1]
-                if isinstance(last, dict) and "content" in last:
-                    question = str(last["content"])
-            response = ""
-            if isinstance(completion, list) and completion:
-                last = completion[-1]
-                if isinstance(last, dict) and "content" in last:
-                    response = str(last["content"])
-            rendered = self.judge_prompt.format(
-                question=question, answer=answer, response=response
-            )
-            from verifiers.types import UserMessage
-
-            response_obj = await self.judge_client.get_response(
-                prompt=[UserMessage(content=rendered)],
-                model=self.judge_model,
-                sampling_args=self.judge_sampling_args,
-                state=state,
-            )
-            return str(response_obj.message.content or "")
-
-    _jrub.JudgeRubric = _StubJudgeRubric
-
-# Load kernel (no heavy deps)
-_load_module(
-    "verifiers.envs.multi_actor_kernel",
-    _VROOT + "/verifiers/envs/multi_actor_kernel.py",
-)
-
-# Load environment base class — needs clients stub
-if "verifiers.clients" not in sys.modules:
-    _clients = _pytypes.ModuleType("verifiers.clients")
-    _clients.__path__ = [_VROOT + "/verifiers/clients"]
-    sys.modules["verifiers.clients"] = _clients
-
-    # Minimal Client stub — we only need the class for isinstance checks
-    class _ClientBase:
-        pass
-
-    _clients.Client = _ClientBase
-
-    def _resolve_client(x):
-        return x
-
-    _clients.resolve_client = _resolve_client
-
-# Stub verifiers.utils.message_utils with just what debate_env needs
-if "verifiers.utils.message_utils" not in sys.modules:
-    _msg_utils = _pytypes.ModuleType("verifiers.utils.message_utils")
-    sys.modules["verifiers.utils.message_utils"] = _msg_utils
-
-    def _maybe_normalize_messages(value, *, field_name="messages"):
-        """Pass through — messages are already dicts in tests."""
-        return value
-
-    _msg_utils.maybe_normalize_messages = _maybe_normalize_messages
-    _msg_utils.normalize_messages = lambda v, **kw: v
-
-# Stub verifiers.utils.response_utils — load real file (no heavy deps)
-_load_module(
-    "verifiers.utils.response_utils",
-    _VROOT + "/verifiers/utils/response_utils.py",
-)
-
-# Stub verifiers.utils.logging_utils (needs rich)
-if "verifiers.utils.logging_utils" not in sys.modules:
-    import logging as _logging
-
-    _log_utils = _pytypes.ModuleType("verifiers.utils.logging_utils")
-    sys.modules["verifiers.utils.logging_utils"] = _log_utils
-    _log_utils.warning_once = lambda logger, msg: logger.warning(msg)
-    _log_utils.log_once = lambda logger, level, msg: logger.log(level, msg)
-
-# Stub remaining utils needed by environment.py
-_stub_modules = {
-    "verifiers.utils.client_utils": {
-        "resolve_client_config": lambda *a, **kw: None,
-        "resolve_client_configs": lambda *a, **kw: [],
-    },
-    "verifiers.utils.eval_utils": {
-        "filter_inputs": lambda *a, **kw: [],
-    },
-    "verifiers.utils.path_utils": {
-        "is_valid_eval_results_path": lambda *a, **kw: False,
-    },
-    "verifiers.utils.serve_utils": {
-        "get_free_port": lambda: 0,
-    },
-    "verifiers.utils.thread_utils": {
-        "scale_executors": lambda *a, **kw: None,
-    },
-    "verifiers.utils.save_utils": {
-        "state_to_output": lambda *a, **kw: {},
-        "GenerateOutputsBuilder": type("GenerateOutputsBuilder", (), {}),
-        "load_outputs": lambda *a, **kw: [],
-        "make_dataset": lambda *a, **kw: None,
-        "push_results_to_hf_hub": lambda *a, **kw: None,
-        "save_metadata": lambda *a, **kw: None,
-        "save_new_outputs": lambda *a, **kw: None,
-        "save_outputs": lambda *a, **kw: None,
-        "validate_resume_metadata": lambda *a, **kw: None,
-        "ErrorInfo": dict,
-    },
-    "verifiers.utils.error_utils": {},
-    "verifiers.utils.usage_utils": {},
-    "verifiers.utils.async_utils": {
-        "maybe_retry": lambda *a, **kw: None,
-        "maybe_semaphore": lambda *a, **kw: None,
-        "with_sem": lambda *a, **kw: None,
-        "maybe_await": lambda x, *a, **kw: x,
-    },
-    "verifiers.serve": {},
-}
-
-for _u, _attrs in _stub_modules.items():
-    if _u not in sys.modules:
-        _stub = _pytypes.ModuleType(_u)
-        # Set __path__ for packages
-        _stub.__path__ = [_VROOT + "/" + _u.replace(".", "/")]
-        sys.modules[_u] = _stub
-        for _attr_name, _attr_val in _attrs.items():
-            setattr(_stub, _attr_name, _attr_val)
-
-# Add specific classes to stubs
-_eu = sys.modules["verifiers.utils.error_utils"]
-
-
-class _ErrorChain:
-    def __init__(self, e):
-        self.e = e
-
-    def __repr__(self):
-        return repr(self.e)
-
-    def __str__(self):
-        return str(self.e)
-
-
-_eu.ErrorChain = _ErrorChain
-
-_uu = sys.modules["verifiers.utils.usage_utils"]
-
-from types import MappingProxyType as _MappingProxyType
-
-
-class _StateUsageTracker:
-    def __init__(self):
-        self._totals = {"input_tokens": 0.0, "output_tokens": 0.0}
-
-    @property
-    def usage(self):
-        return _MappingProxyType(self._totals)
-
-    def increment(self, input_tokens=0, output_tokens=0, **kw):
-        self._totals["input_tokens"] += float(input_tokens or 0)
-        self._totals["output_tokens"] += float(output_tokens or 0)
-
-    def increment_from_response(self, response):
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return
-        self.increment(
-            getattr(usage, "prompt_tokens", 0),
-            getattr(usage, "completion_tokens", 0),
-        )
-
-    def snapshot(self):
-        return dict(self._totals)
-
-
-_uu.StateUsageTracker = _StateUsageTracker
-
-_serve = sys.modules["verifiers.serve"]
-_serve.ZMQEnvClient = type("ZMQEnvClient", (), {})
-_serve.EnvClient = type("EnvClient", (), {})
-
-# Now load environment.py
-_load_module(
-    "verifiers.envs.environment",
-    _VROOT + "/verifiers/envs/environment.py",
-)
-_Environment = sys.modules["verifiers.envs.environment"].Environment
-setattr(_vf_stub, "Environment", _Environment)
-
-# Stub debate subpackage before loading debate_env (it imports from debate/)
-for _dpkg, _ddir in [
-    ("verifiers.envs.debate", _VROOT + "/verifiers/envs/debate"),
-]:
-    if _dpkg not in sys.modules:
-        _dmod = _pytypes.ModuleType(_dpkg)
-        _dmod.__path__ = [_ddir]
-        _dmod.__package__ = _dpkg
-        sys.modules[_dpkg] = _dmod
-
-# Load debate leaf modules in dependency order
-_load_module("verifiers.envs.debate.think", _VROOT + "/verifiers/envs/debate/think.py")
-_load_module("verifiers.envs.debate.mcq", _VROOT + "/verifiers/envs/debate/mcq.py")
-_load_module("verifiers.envs.debate.fields", _VROOT + "/verifiers/envs/debate/fields.py")
-_load_module("verifiers.envs.debate.parsing", _VROOT + "/verifiers/envs/debate/parsing.py")
-_load_module("verifiers.envs.debate.prompts", _VROOT + "/verifiers/envs/debate/prompts.py")
-
-# Load debate_env and debate_rubric
-_load_module(
-    "verifiers.envs.debate_env",
-    _VROOT + "/verifiers/envs/debate_env.py",
-)
-_load_module(
-    "verifiers.envs.debate_rubric",
-    _VROOT + "/verifiers/envs/debate_rubric.py",
-)
-
-# ---------------------------------------------------------------------------
-# Now import the real things
-# ---------------------------------------------------------------------------
 
 import pytest
 
 import verifiers as vf
+from verifiers.clients import Client as _VFClient
+from verifiers.utils.async_utils import maybe_retry
 from verifiers.envs.debate_env import (
     DebateEnv,
     _consolidate_messages,
@@ -434,16 +60,24 @@ from prime_rl.orchestrator.multi_actor_bridge import rollout_to_member_rollouts
 # ---------------------------------------------------------------------------
 
 
-class FakeClient:
-    """Minimal Client-compatible stub that returns canned responses.
+class FakeClient(_VFClient):
+    """Concrete vf.Client subclass returning canned responses.
 
-    Each call to get_response pops the next response from the queue.
-    The Client interface's only entry point used by Environment is
-    get_response — everything else (setup_client, to_native_prompt, etc.)
-    is internal to real client implementations.
+    Subclasses `verifiers.clients.Client` so `isinstance(x, Client)` passes
+    the Environment's boundary check in `resolve_client`. `get_response` is
+    overridden directly and the native-layer abstract methods raise
+    NotImplementedError — they are never reached because the override
+    bypasses the native conversion path.
     """
 
     def __init__(self, responses: list[Response]) -> None:
+        import logging as _logging_mod
+
+        # Skip vf.Client.__init__ (wants a concrete SDK client or ClientConfig).
+        # Keep shape-compatible fields in case introspection touches them.
+        self.logger = _logging_mod.getLogger(f"{__name__}.FakeClient")
+        self._config = None
+        self._client = None
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
@@ -458,6 +92,27 @@ class FakeClient:
         if not self._responses:
             raise RuntimeError("FakeClient exhausted — more calls than expected")
         return self._responses.pop(0)
+
+    def setup_client(self, config):
+        raise NotImplementedError("FakeClient has no native SDK client")
+
+    async def to_native_tool(self, tool):
+        raise NotImplementedError("FakeClient does not support tool calls")
+
+    async def to_native_prompt(self, messages):
+        raise NotImplementedError("FakeClient bypasses native conversion")
+
+    async def get_native_response(self, *args, **kwargs):
+        raise NotImplementedError("FakeClient overrides get_response directly")
+
+    async def raise_from_native_response(self, response):
+        raise NotImplementedError("FakeClient overrides get_response directly")
+
+    async def from_native_response(self, response):
+        raise NotImplementedError("FakeClient overrides get_response directly")
+
+    async def close(self) -> None:
+        return None
 
 
 def _make_response(content: str, token_ids: list[int] | None = None) -> Response:
@@ -1963,14 +1618,6 @@ def test_m_agreement_different():
     assert state["metrics"]["agreement"] == 0.0
 
 
-from verifiers.clients import Client as _VFClient
-from verifiers.types import (
-    Response as _VFResponse,
-    ResponseMessage as _VFResponseMessage,
-    Usage as _VFUsage,
-)
-
-
 class FakeJudgeClient(_VFClient):
     """Concrete vf.Client subclass that returns canned verdicts.
 
@@ -1989,7 +1636,7 @@ class FakeJudgeClient(_VFClient):
         self,
         verdicts: list[str],
         *,
-        usage: _VFUsage | None = None,
+        usage: Usage | None = None,
         exc_to_raise: Exception | None = None,
     ) -> None:
         import logging as _logging_mod
@@ -2012,7 +1659,7 @@ class FakeJudgeClient(_VFClient):
         sampling_args,
         tools=None,
         **kwargs,
-    ) -> _VFResponse:
+    ) -> Response:
         self.calls.append(
             {"prompt": prompt, "model": model, "sampling_args": sampling_args}
         )
@@ -2023,12 +1670,12 @@ class FakeJudgeClient(_VFClient):
                 "FakeJudgeClient exhausted — more calls than expected"
             )
         content = self._verdicts.pop(0)
-        return _VFResponse(
+        return Response(
             id="fake-judge",
             created=0,
             model=model,
             usage=self._usage,
-            message=_VFResponseMessage(
+            message=ResponseMessage(
                 content=content,
                 finish_reason="stop",
                 is_truncated=False,
@@ -2064,7 +1711,7 @@ class FakeJudgeClient(_VFClient):
 def _open_ended_rubric(
     verdicts: list[str],
     *,
-    usage: _VFUsage | None = None,
+    usage: Usage | None = None,
     exc_to_raise: Exception | None = None,
 ) -> tuple[DebateRubric, FakeJudgeClient]:
     """Build a DebateRubric with a FakeJudgeClient canned with the given
@@ -2723,42 +2370,13 @@ def test_score_group_propagates_programming_bug_attribute_error():
         _run(rubric.score_group([state]))
 
 
-# Verbatim port of verifiers/utils/async_utils.py:162-172 — the contract
-# that maybe_retry uses to discover errors on states. We can't import the
-# real maybe_retry here because the module-level stub at the top of this
-# file replaces it with a lambda (and unwinding that stub would pull the
-# heavy import chain back in, which is exactly what the stub avoids). So
-# we ship a verbatim copy and assert that score_rollout's state["error"]
-# capture survives the contract walk.
-
-
-def _reraise_error_from_state(
-    result: Any,
-    error_types: tuple[type[Exception], ...],
-) -> None:
-    """Verbatim copy of verifiers.utils.async_utils.reraise_error_from_state
-    (lines 162-172, see round-7 brief). Raises a state's stored error if
-    its class is in ``error_types``. This is the EXACT mechanism used by
-    maybe_retry to trigger tenacity retries — if it doesn't find an error
-    here, no retry happens."""
-    if isinstance(result, dict):
-        err = result.get("error")
-        if err and any(isinstance(err, t) for t in error_types):
-            raise err
-    elif isinstance(result, list):
-        for state in result:
-            err = state.get("error")
-            if err and any(isinstance(err, t) for t in error_types):
-                raise err
-
-
 def test_score_rollout_state_error_is_visible_to_reraise_contract():
     """Round 7 Finding 1, contract test: after score_rollout records a
-    retryable vf.InvalidModelResponseError on state['error'], a verbatim
-    copy of maybe_retry.reraise_error_from_state must find and re-raise
-    it. This is the precise machinery that drives tenacity retries — if
-    state['error'] is None (the round-6 bug), this contract walk silently
-    no-ops and no retry ever fires."""
+    retryable vf.InvalidModelResponseError on state['error'], the error
+    must have the shape maybe_retry's nested reraise_error_from_state
+    walks for — an instance of a retryable type on state['error']. If
+    the shape were wrong (state['error'] unset, or a non-matching type),
+    the retry chain would silently no-op and no retry would fire."""
     client = FakeJudgeClient(
         verdicts=[],
         exc_to_raise=vf.InvalidModelResponseError("transient"),
@@ -2767,77 +2385,95 @@ def test_score_rollout_state_error_is_visible_to_reraise_contract():
 
     _run(rubric.score_rollout(state))
 
-    # The exact error_types tuple maybe_retry uses by default.
+    # maybe_retry's default retryable tuple.
     retryable = (vf.InfraError, vf.InvalidModelResponseError)
-    with pytest.raises(vf.InvalidModelResponseError, match="transient"):
-        _reraise_error_from_state([state], retryable)
+    err = state.get("error")
+    assert err is not None, "state['error'] must be set for retry discovery"
+    assert isinstance(err, retryable), (
+        f"state['error'] must be a retryable type; got {type(err).__name__}"
+    )
+    assert str(err) == "transient"
 
 
-def test_score_rollout_retry_loop_end_to_end():
-    """Round 7 Finding 1, end-to-end: drive score_group through a hand-
-    rolled retry loop that mirrors maybe_retry's tenacity wrapper. We
-    cannot use the real maybe_retry from verifiers.utils.async_utils
-    (stubbed at module top), but we CAN replicate its core contract:
-    after each attempt, walk states for retryable errors and re-raise
-    to drive the retry. Confirms that 2 transient failures + 1 success
-    = exactly 3 grader calls."""
+class _FlakeyClient(_VFClient):
+    """Client that raises InvalidModelResponseError on the first `fail_n`
+    calls, then returns 'CORRECT' thereafter. Used for retry-loop tests."""
 
-    class FlakeyClient(_VFClient):
-        def __init__(self, fail_n: int) -> None:
-            import logging as _logging_mod
-            self.logger = _logging_mod.getLogger(
-                f"{__name__}.FlakeyClient"
-            )
-            self._config = None
-            self._client = None
-            self._fail_n = fail_n
-            self.call_count = 0
-            self.calls: list[dict] = []
+    def __init__(self, fail_n: int) -> None:
+        import logging as _logging_mod
 
-        async def get_response(
-            self, prompt, model, sampling_args, tools=None, **kwargs
-        ) -> _VFResponse:
-            self.call_count += 1
-            self.calls.append({"prompt": prompt, "model": model})
-            if self.call_count <= self._fail_n:
-                raise vf.InvalidModelResponseError(
-                    f"transient #{self.call_count}"
-                )
-            return _VFResponse(
-                id="ok",
-                created=0,
-                model=model,
-                usage=None,
-                message=_VFResponseMessage(
-                    content="CORRECT",
-                    finish_reason="stop",
-                    is_truncated=False,
-                    tokens=None,
-                ),
-            )
+        self.logger = _logging_mod.getLogger(f"{__name__}._FlakeyClient")
+        self._config = None
+        self._client = None
+        self._fail_n = fail_n
+        self.call_count = 0
+        self.calls: list[dict] = []
 
-        def setup_client(self, config):
-            raise NotImplementedError
+    async def get_response(
+        self, prompt, model, sampling_args, tools=None, **kwargs
+    ) -> Response:
+        self.call_count += 1
+        self.calls.append({"prompt": prompt, "model": model})
+        if self.call_count <= self._fail_n:
+            raise vf.InvalidModelResponseError(f"transient #{self.call_count}")
+        return Response(
+            id="ok",
+            created=0,
+            model=model,
+            usage=None,
+            message=ResponseMessage(
+                content="CORRECT",
+                finish_reason="stop",
+                is_truncated=False,
+                tokens=None,
+            ),
+        )
 
-        async def to_native_tool(self, tool):
-            raise NotImplementedError
+    def setup_client(self, config):
+        raise NotImplementedError
 
-        async def to_native_prompt(self, messages):
-            raise NotImplementedError
+    async def to_native_tool(self, tool):
+        raise NotImplementedError
 
-        async def get_native_response(self, *args, **kwargs):
-            raise NotImplementedError
+    async def to_native_prompt(self, messages):
+        raise NotImplementedError
 
-        async def raise_from_native_response(self, response):
-            raise NotImplementedError
+    async def get_native_response(self, *args, **kwargs):
+        raise NotImplementedError
 
-        async def from_native_response(self, response):
-            raise NotImplementedError
+    async def raise_from_native_response(self, response):
+        raise NotImplementedError
 
-        async def close(self) -> None:
-            return None
+    async def from_native_response(self, response):
+        raise NotImplementedError
 
-    client = FlakeyClient(fail_n=2)
+    async def close(self) -> None:
+        return None
+
+
+@pytest.fixture
+def _instant_retry_waits(monkeypatch):
+    """Pin tenacity's retry wait to zero so retry-loop tests don't sleep.
+
+    `maybe_retry` hard-codes `tc.wait_exponential_jitter(initial=initial,
+    max=max_wait)` inside its AsyncRetrying constructor. Passing
+    `initial=0.0` still uses jitter (0-1s per retry by default), so the
+    only clean way to kill the wait is to patch `wait_exponential_jitter`
+    itself to return `tc.wait_none()`. Scoped to the test via monkeypatch.
+    """
+    import tenacity as tc
+
+    monkeypatch.setattr(
+        tc, "wait_exponential_jitter", lambda **_: tc.wait_none()
+    )
+
+
+def test_score_rollout_retry_loop_end_to_end(_instant_retry_waits):
+    """Round 7 Finding 1, end-to-end: drive score_group through the REAL
+    `maybe_retry` from verifiers.utils.async_utils. Confirms 2 transient
+    failures + 1 success = exactly 3 grader calls and the final state is
+    clean (no error, reward=1.0, accuracy/A=1.0)."""
+    client = _FlakeyClient(fail_n=2)
     rubric = DebateRubric(
         truth_role="debater_a",
         members=["A", "B", "J"],
@@ -2845,31 +2481,16 @@ def test_score_rollout_retry_loop_end_to_end():
         judge_client=client,
         judge_model="test-model",
     )
-    retryable = (vf.InfraError, vf.InvalidModelResponseError)
 
-    async def run_with_retry(max_retries: int) -> list[State]:
-        last_result: list[State] | None = None
-        for _attempt in range(max_retries + 1):
-            state = _open_ended_state_for_retry()
-            await rubric.score_group([state])
-            last_result = [state]
-            try:
-                _reraise_error_from_state(last_result, retryable)
-            except retryable:  # type: ignore[misc]
-                continue
-            return last_result
-        # Retries exhausted — return the last result (mirrors
-        # return_last_result behaviour).
-        assert last_result is not None
-        return last_result
+    async def attempt() -> list[State]:
+        state = _open_ended_state_for_retry()
+        await rubric.score_group([state])
+        return [state]
 
-    results = _run(run_with_retry(max_retries=3))
+    wrapped = maybe_retry(attempt, max_retries=3)
+    results = _run(wrapped())
 
-    # 2 transient failures + 1 success.
-    # Per failed attempt: G grader call raises → 1 grader call
-    # Per successful attempt: W path skipped (judge picked winner), G
-    # grader call returns CORRECT → 1 grader call
-    # Total: 1 + 1 + 1 = 3 grader calls.
+    # 2 transient failures + 1 success = 3 grader calls.
     assert client.call_count == 3, (
         f"expected 3 grader calls (fail, fail, succeed), got {client.call_count}"
     )
@@ -2878,17 +2499,20 @@ def test_score_rollout_retry_loop_end_to_end():
     assert final.get("error") is None
     metrics = final.get("metrics") or {}
     assert metrics.get("errored_rollout", 0.0) == 0.0
-    # The judge picked debater_a, the truth role → W path → reward=1.0.
+    # Judge picked debater_a, the truth role → W path → reward=1.0.
     assert final["reward"] == 1.0
-    # Plus the G-path grader returned CORRECT for the truth member's answer.
+    # G-path grader returned CORRECT for the truth member's answer.
     assert metrics.get("accuracy/A") == 1.0
 
 
-def test_score_rollout_retry_loop_exhausts_retries_on_permanent_failure():
-    """Round 7 Finding 1: when every attempt fails, the retry loop
-    exhausts and returns the last errored states. The terminal state
-    must carry both state['error'] AND the metrics shape downstream
-    consumers filter on (errored_rollout=1.0, error_phase='scoring')."""
+def test_score_rollout_retry_loop_exhausts_retries_on_permanent_failure(
+    _instant_retry_waits,
+):
+    """Round 7 Finding 1: when every attempt fails, `maybe_retry` exhausts
+    retries and returns the last result via `return_last_result`. The
+    terminal state must carry both state['error'] AND the metrics shape
+    downstream consumers filter on (errored_rollout=1.0,
+    error_phase='scoring')."""
     client = FakeJudgeClient(
         verdicts=[],
         exc_to_raise=vf.InvalidModelResponseError("permanent flake"),
@@ -2900,25 +2524,16 @@ def test_score_rollout_retry_loop_exhausts_retries_on_permanent_failure():
         judge_client=client,
         judge_model="test-model",
     )
-    retryable = (vf.InfraError, vf.InvalidModelResponseError)
 
-    async def run_with_retry(max_retries: int) -> list[State]:
-        last_result: list[State] | None = None
-        for _attempt in range(max_retries + 1):
-            state = _open_ended_state_for_retry()
-            await rubric.score_group([state])
-            last_result = [state]
-            try:
-                _reraise_error_from_state(last_result, retryable)
-            except retryable:  # type: ignore[misc]
-                continue
-            return last_result
-        assert last_result is not None
-        return last_result
+    async def attempt() -> list[State]:
+        state = _open_ended_state_for_retry()
+        await rubric.score_group([state])
+        return [state]
 
-    results = _run(run_with_retry(max_retries=2))
+    wrapped = maybe_retry(attempt, max_retries=2)
+    results = _run(wrapped())
 
-    # max_retries=2 → 3 total attempts → 3 grader calls (each fails immediately)
+    # max_retries=2 → 3 total attempts → 3 grader calls (each fails).
     assert len(client.calls) == 3
     assert len(results) == 1
     final = results[0]
