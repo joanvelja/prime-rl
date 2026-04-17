@@ -11,7 +11,7 @@ output_dir = "outputs/sft-baseline-qwen3-30b-a3b"
 name = "PrimeIntellect/Qwen3-30B-A3B-Base-Fast"
 
 [tokenizer]
-name = "tmp/tokenizers/qwen3-30b-a3b"
+name = "joanvelja/sft-tokenizer-qwen3-30b-a3b"
 
 [wandb]
 name = "qwen3-30b-a3b"

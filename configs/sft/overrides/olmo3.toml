@@ -19,7 +19,7 @@ output_dir = "outputs/sft-baseline-olmo-3-7b"
 name = "allenai/Olmo-3-1025-7B"
 
 [tokenizer]
-name = "tmp/tokenizers/olmo-3-7b"
+name = "joanvelja/sft-tokenizer-olmo-3-7b"
 
 [optim]
 lr = 1e-5                               # see rationale above

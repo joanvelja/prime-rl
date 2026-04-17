@@ -9,7 +9,7 @@ output_dir = "outputs/sft-baseline-rnj-1"
 name = "EssentialAI/rnj-1"
 
 [tokenizer]
-name = "tmp/tokenizers/rnj-1"
+name = "joanvelja/sft-tokenizer-rnj-1"
 
 [wandb]
 name = "rnj-1"

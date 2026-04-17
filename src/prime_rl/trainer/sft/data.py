@@ -58,20 +58,34 @@ _PROFILE_EPSILON = 0.01
 
 
 class SystemPromptSampler:
-    """Loads a pool of tagged system prompts and samples from it using profile-weighted distributions."""
+    """Loads a pool of tagged system prompts and samples from it using profile-weighted distributions.
+
+    `pool_path` accepts either:
+      - A local file path to `system_prompts_final.json` (expects a sibling
+        `system_prompts_expanded.json` for tags); or
+      - A HuggingFace Hub dataset repo ID (e.g. `joanvelja/sft-system-prompts-v1`)
+        containing `system_prompts_final.json` + `system_prompts_expanded.json`.
+
+    A string is treated as a local path if the file exists on disk, otherwise it
+    is treated as an HF repo ID.
+    """
+
+    _FINAL_FILENAME = "system_prompts_final.json"
+    _EXPANDED_FILENAME = "system_prompts_expanded.json"
 
     def __init__(self, pool_path: str):
-        with open(pool_path) as f:
+        final_path, expanded_path = self._resolve_paths(pool_path)
+
+        with open(final_path) as f:
             self.prompts: list[str] = json.load(f)
         if not self.prompts:
             raise ValueError(f"System prompt pool at {pool_path} is empty")
 
         # Try loading the expanded file for tags (covers all prompts, not just seeds).
-        # Fall back to annotated, then to uniform if neither is available.
-        tags_path = pool_path.replace("_final.json", "_expanded.json")
+        # Fall back to uniform tagging if unavailable.
         self.tags_per_prompt: list[list[str]] = []
         try:
-            with open(tags_path) as f:
+            with open(expanded_path) as f:
                 raw = json.load(f)
             # Handle both formats: list-of-dicts or {"prompts": list-of-dicts}
             if isinstance(raw, dict):
@@ -81,6 +95,31 @@ class SystemPromptSampler:
                 self.tags_per_prompt.append(prompt_to_tags.get(prompt, []))
         except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
             self.tags_per_prompt = [[] for _ in self.prompts]
+
+    @classmethod
+    def _resolve_paths(cls, pool_path: str) -> tuple[str, str]:
+        """Return (final_path, expanded_path) as local filesystem paths.
+
+        Downloads from HF Hub if `pool_path` looks like a repo ID.
+        """
+        from pathlib import Path
+
+        p = Path(pool_path)
+        if p.is_file():
+            final_path = str(p)
+            expanded_path = pool_path.replace("_final.json", "_expanded.json")
+            return final_path, expanded_path
+
+        # Treat as HF Hub dataset repo ID (e.g. "joanvelja/sft-system-prompts-v1")
+        from huggingface_hub import hf_hub_download
+
+        final_path = hf_hub_download(
+            repo_id=pool_path, filename=cls._FINAL_FILENAME, repo_type="dataset"
+        )
+        expanded_path = hf_hub_download(
+            repo_id=pool_path, filename=cls._EXPANDED_FILENAME, repo_type="dataset"
+        )
+        return final_path, expanded_path
 
     def sample(self, profile_name: str | None, seed: int) -> str:
         """Sample a system prompt using profile-weighted distribution with deterministic seed."""

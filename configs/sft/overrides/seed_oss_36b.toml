@@ -14,7 +14,7 @@ output_dir = "outputs/sft-baseline-seed-oss-36b"
 name = "ByteDance-Seed/Seed-OSS-36B-Base-woSyn"
 
 [tokenizer]
-name = "tmp/tokenizers/seed-oss-36b-wosyn"
+name = "joanvelja/sft-tokenizer-seed-oss-36b-wosyn"
 
 [optim]
 lr = 3e-6                               # √N interp between Tülu 5e-6@8B and 2e-6@70B

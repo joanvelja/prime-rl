@@ -12,7 +12,7 @@ output_dir = "outputs/sft-baseline-nemotron-h-8b"
 name = "nvidia/Nemotron-H-8B-Base-8K"
 
 [tokenizer]
-name = "tmp/tokenizers/nemotron-h-8b"
+name = "joanvelja/sft-tokenizer-nemotron-h-8b"
 
 [wandb]
 name = "nemotron-h-8b"

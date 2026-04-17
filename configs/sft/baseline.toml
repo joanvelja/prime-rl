@@ -32,7 +32,7 @@ seq_len = 4096
 attn = "flash_attention_2"
 
 [tokenizer]
-name = "tmp/tokenizers/marin" # prepared tokenizer (template + pad_token); relative to repo root
+name = "joanvelja/sft-tokenizer-marin"  # prepared tokenizer (private HF repo; template + pad_token)
 
 [data]
 type = "sft"
@@ -43,7 +43,7 @@ micro_batch_size = 1
 pack_function = "cat"
 stopping_strategy = "first_exhausted"   # §6 weights REQUIRE first_exhausted (all_exhausted ignores probabilities in the final mix — see plan §2 amendment)
 seed = 0
-system_prompt_pool_path = "tmp/system_prompts_final.json"
+system_prompt_pool_path = "joanvelja/sft-system-prompts-v1"  # private HF dataset repo; SystemPromptSampler resolves via hf_hub_download
 
 # 12 HF configs, probabilities proportional to §6 effective views per epoch.
 # Sum = 1.000001 (rounding). With first_exhausted, stream ends at ~843,960 samples

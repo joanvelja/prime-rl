@@ -9,7 +9,7 @@ output_dir = "outputs/sft-baseline-trinity-mini"
 name = "arcee-ai/Trinity-Mini-Base"
 
 [tokenizer]
-name = "tmp/tokenizers/trinity-mini"
+name = "joanvelja/sft-tokenizer-trinity-mini"
 
 [wandb]
 name = "trinity-mini"
