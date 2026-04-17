@@ -330,6 +330,81 @@ def test_simultaneous_slot_rolls_back_on_error():
     assert state["_kernel"].slot_index == 0
 
 
+def test_simultaneous_slot_cancels_peer_on_first_failure():
+    """TaskGroup must cancel the surviving actor when one raises.
+
+    The slow actor sleeps past the fast actor's failure; if it completes
+    anyway, both the error semantics AND the shared usage tracker are
+    compromised (late completion leaks accounting). With TaskGroup the
+    slow actor is cancelled before it can reach the completion line.
+    """
+    slots = (TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)
+    env = EchoEnv(
+        schedule=StaticSchedule(slots),
+        members=["A", "B"],
+        rubric=EchoRubric(),
+        dataset=lambda: None,
+    )
+
+    class CancelProbeClient(FakeClient):
+        def __init__(self):
+            super().__init__([])
+            self.completed: list[str] = []
+
+        async def get_response(self, prompt, model, sampling_args=None, tools=None, **kwargs):
+            if not self.calls:
+                self.calls.append({"prompt": prompt, "model": model})
+                raise VFError("A fails fast")
+            self.calls.append({"prompt": prompt, "model": model})
+            await asyncio.sleep(0.5)
+            self.completed.append("B")  # should never run
+
+    client = CancelProbeClient()
+    state = _run(env.rollout(_rollout_input(), client, "m"))
+    assert state["stop_condition"] == "has_error"
+    assert state["trajectory"] == []
+    assert state["_kernel"].slot_index == 0
+    assert client.completed == [], "peer actor completed after first failure"
+
+
+def test_simultaneous_slot_rolls_back_on_post_commit_hook_failure():
+    """If on_step_committed raises mid-slot, NOTHING is published.
+
+    extract_fields / _build_step / on_step_committed run after the
+    kernel has been folded into a LOCAL buffer. Invariant: raising in
+    any of them leaves state["_kernel"] and state["trajectory"] at
+    their pre-slot snapshots.
+    """
+    slots = (TurnSlot(slot_id=0, actors=("A", "B", "C"), phase="p"),)
+
+    class HookFailEnv(EchoEnv):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.committed_calls = 0
+
+        async def on_step_committed(self, state, utt, fields):
+            self.committed_calls += 1
+            if self.committed_calls == 2:
+                raise VFError("hook boom on actor 2")
+
+    env = HookFailEnv(
+        schedule=StaticSchedule(slots),
+        members=["A", "B", "C"],
+        rubric=EchoRubric(),
+        dataset=lambda: None,
+    )
+    client = FakeClient([
+        _make_response("A says"),
+        _make_response("B says"),
+        _make_response("C says"),
+    ])
+    state = _run(env.rollout(_rollout_input(), client, "m"))
+    assert state["stop_condition"] == "has_error"
+    assert isinstance(state["error"], VFError)
+    assert state["_kernel"].slot_index == 0
+    assert state["trajectory"] == []
+
+
 # ---------------------------------------------------------------------------
 # 5. Monotonic prompt invariant — test-time checker
 # ---------------------------------------------------------------------------
