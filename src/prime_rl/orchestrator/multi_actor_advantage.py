@@ -8,6 +8,7 @@ compute_advantages. Both coexist.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from prime_rl.orchestrator.multi_actor_bridge import MemberRollout
@@ -63,13 +64,13 @@ def compute_rae_advantages(
 
     # Aggregate rewards per key so update order doesn't matter when
     # the same (task, example_id, role_id) appears multiple times in a batch.
-    key_sums: dict[RAEKey, float] = {}
-    key_counts: dict[RAEKey, int] = {}
+    key_sums: dict[RAEKey, float] = defaultdict(float)
+    key_counts: dict[RAEKey, int] = defaultdict(int)
     for key, reward in updates:
-        key_sums[key] = key_sums.get(key, 0.0) + reward
-        key_counts[key] = key_counts.get(key, 0) + 1
+        key_sums[key] += reward
+        key_counts[key] += 1
 
-    for key in key_sums:
-        state.update(key, key_sums[key] / key_counts[key])
+    for key, total in key_sums.items():
+        state.update(key, total / key_counts[key])
 
     return advantages
