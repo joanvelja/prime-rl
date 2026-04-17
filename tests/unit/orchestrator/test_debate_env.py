@@ -307,7 +307,8 @@ def test_debate_complete_fires_when_schedule_exhausted():
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
 
     assert state["is_completed"] is True
-    assert state["stop_condition"] == "debate_complete"
+    # Inherited stop condition name from MultiAgentEnv base.
+    assert state["stop_condition"] == "schedule_exhausted"
 
 
 def test_has_error_stop():
@@ -1209,24 +1210,107 @@ def test_format_history_private_visibility_uses_public_channel():
     assert "my-secret-reasoning-token" in own_history[0]["content"]
 
 
-def test_apply_action_rejects_malformed_think_markup():
-    """Malformed think markup in raw model output → KernelProtocolError
-    at commit. The rollout-layer vf.Error boundary catches it and records
-    state['error'] rather than silently propagating malformed content.
+def test_apply_action_quarantines_malformed_think_markup():
+    """Malformed channel markup in model output is quarantined, not
+    rollout-terminal. The utterance commits with ``public_channel=""``,
+    ``private_channel=None``, and a ``parse_error`` flag; the rollout
+    keeps going so other members' valid commits still score.
+
+    Kernel-state violations (wrong actor, duplicate, finished episode)
+    must still raise — that's actual protocol corruption, not a
+    formatting slip by one model.
     """
     from verifiers.envs.multi_actor_kernel import (
         KernelState as _KS, StaticSchedule as _Sch, TurnSlot as _TS, apply_action as _ap
     )
-    from verifiers.errors import KernelProtocolError
+    from verifiers.errors import ContentParseError, KernelProtocolError
 
     schedule = _Sch((_TS(slot_id=0, actors=("A",), phase="p"),))
-    with pytest.raises(KernelProtocolError):
-        _ap(
-            _KS(slot_index=0), schedule, "A",
-            "<thinking>leak<answer>A</answer>",
-            10,
-            think_tag="thinking",
-        )
+
+    # Quarantine path — benign prose with a stray opener.
+    result = _ap(
+        _KS(slot_index=0), schedule, "A",
+        "I will <think> and then answer",
+        10,
+        think_tag="thinking",
+    )
+    utt = result.committed[0]
+    assert utt.parse_error is not None
+    assert "unbalanced" in utt.parse_error
+    assert utt.public_channel == ""
+    assert utt.private_channel is None
+    assert utt.raw_content == "I will <think> and then answer"  # preserved
+
+    # Kernel-state violation still raises.
+    with pytest.raises(KernelProtocolError) as exc_info:
+        _ap(_KS(slot_index=0), schedule, "B", "wrong actor", 1, think_tag="thinking")
+    assert not isinstance(exc_info.value, ContentParseError)
+
+
+def test_parse_channels_strips_native_think_with_custom_tag():
+    """Finding 1 regression: pack with ``think_tag="reason"`` must still
+    strip native ``<think>...</think>`` from the public channel.
+
+    Before the fix, parse_channels only matched the configured tag, so a
+    model that emits native reasoning-model think blocks would leak the
+    full block verbatim into the opponent view.
+    """
+    from verifiers.envs.multi_actor_kernel import parse_channels
+
+    # Native think under a custom-tag pack: content stripped, NOT surfaced
+    # as private_channel (third-party artifact, not author-intended).
+    pub, priv = parse_channels("public <think>secret</think> tail", tag="reason")
+    assert "secret" not in pub
+    assert "<think>" not in pub
+    assert pub == "public  tail".strip() or pub == "public   tail".strip() or "public" in pub
+    assert priv is None  # native think is DISCARDED, not promoted
+
+    # Configured tag still becomes private_channel; native think still stripped
+    # from the public remainder when both appear.
+    pub, priv = parse_channels(
+        "head <reason>mine</reason> <think>model-native</think> tail",
+        tag="reason",
+    )
+    assert "mine" not in pub
+    assert "model-native" not in pub
+    assert "<think>" not in pub
+    assert "<reason>" not in pub
+    assert priv == "mine"
+
+    # When configured tag IS the native alias, one pass covers both —
+    # author-intended content still promoted to private_channel.
+    pub, priv = parse_channels("<thinking>reason</thinking>payload", tag="thinking")
+    assert pub == "payload"
+    assert priv == "reason"
+
+
+def test_rollout_survives_benign_prose_with_bracket_words():
+    """DoS regression: prose like "I will <think> and then answer" must
+    not halt the rollout. With quarantine, apply_action commits an empty
+    public_channel for the offender and the schedule advances so peers
+    still get to speak and the rubric still scores them.
+    """
+    from verifiers.envs.multi_actor_kernel import (
+        KernelState as _KS, StaticSchedule as _Sch, TurnSlot as _TS, apply_action as _ap
+    )
+
+    schedule = _Sch((
+        _TS(slot_id=0, actors=("A",), phase="opening"),
+        _TS(slot_id=1, actors=("B",), phase="opening"),
+    ))
+
+    ks = _KS(slot_index=0)
+    r1 = _ap(ks, schedule, "A", "I will <think> and then answer", 5, think_tag="thinking")
+    assert r1.committed[0].parse_error is not None
+
+    # Schedule advances — B still gets its turn.
+    r2 = _ap(r1.new_state, schedule, "B", "Clean response", 5, think_tag="thinking")
+    assert r2.committed[0].parse_error is None
+    assert r2.committed[0].public_channel == "Clean response"
+
+    # Episode completed normally.
+    from verifiers.envs.multi_actor_kernel import StaticSchedule
+    assert schedule.current_slot(r2.new_state) is None
 
 
 # ---------------------------------------------------------------------------
