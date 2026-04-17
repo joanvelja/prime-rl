@@ -211,6 +211,7 @@ def _make_env(
     env = DebateEnv(
         schedule=StaticSchedule(schedule_slots),
         prompts=prompts,
+        members=members,
         role_for_actor=role_for_actor,
         actor_overrides=actor_overrides,
         rubric=rubric,
@@ -728,6 +729,39 @@ def test_kernel_rejects_wrong_actor():
     ks = KernelState(slot_index=0)
     with pytest.raises(ValueError, match="not scheduled"):
         apply_action(ks, schedule, "B", "wrong actor", 5)
+
+
+def test_debate_env_requires_members():
+    """DebateEnv needs explicit `members` list — replaces fragile _count_actors."""
+    schedule = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("A",), phase="p"),
+        TurnSlot(slot_id=1, actors=("B",), phase="p"),
+    ))
+    rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
+    with pytest.raises(ValueError, match="non-empty members"):
+        DebateEnv(
+            schedule=schedule,
+            prompts=DEBATE_PROMPTS,
+            members=[],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+    with pytest.raises(ValueError, match="duplicates"):
+        DebateEnv(
+            schedule=schedule,
+            prompts=DEBATE_PROMPTS,
+            members=["A", "A"],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+    env = DebateEnv(
+        schedule=schedule,
+        prompts=DEBATE_PROMPTS,
+        members=["A", "B"],
+        rubric=rubric,
+        dataset=lambda: None,
+    )
+    assert env.members == ["A", "B"]
 
 
 # ---------------------------------------------------------------------------
