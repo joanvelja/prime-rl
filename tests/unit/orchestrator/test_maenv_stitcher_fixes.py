@@ -228,6 +228,48 @@ async def _past_instruction_positional(slot_ids: tuple[int, int, int, int]):
     return past_user_texts
 
 
+async def _render_own_ctx(schedule: StaticSchedule, commits: list[Utterance], current_slot_idx: int):
+    env = _make_env(schedule)
+    msgs = await env.build_prompt(
+        _state(commits), "A", env.schedule._slots[current_slot_idx]
+    )
+    return msgs, env._member_round_count("A")
+
+
+def test_num_rounds_is_per_member_under_simultaneous_schedule():
+    # [AB propose, AB critique]: 2 slots, each with both actors.
+    # Global arithmetic: num_slots=2, num_actors=2, num_rounds = 2//2 = 1  → WRONG.
+    # Per-member: A participates in 2 slots → num_rounds = 2. Correct.
+    schedule = StaticSchedule(
+        slots=(
+            TurnSlot(slot_id=0, actors=("A", "B"), phase="propose"),
+            TurnSlot(slot_id=1, actors=("A", "B"), phase="critique"),
+        )
+    )
+    _, num_rounds = asyncio.run(_render_own_ctx(schedule, [], 0))
+    assert num_rounds == 2, (
+        f"simultaneous schedule [AB, AB]: expected 2 rounds per member, "
+        f"got {num_rounds}"
+    )
+
+
+def test_num_rounds_is_per_member_under_asymmetric_schedule():
+    # A participates in 3 slots, B in 2. Global arithmetic would give
+    # 5//2 = 2 for both. Per-member: A=3, B=2.
+    schedule = StaticSchedule(
+        slots=(
+            TurnSlot(slot_id=0, actors=("A",), phase="propose"),
+            TurnSlot(slot_id=1, actors=("B",), phase="propose"),
+            TurnSlot(slot_id=2, actors=("A",), phase="critique"),
+            TurnSlot(slot_id=3, actors=("B",), phase="critique"),
+            TurnSlot(slot_id=4, actors=("A",), phase="closing"),
+        )
+    )
+    env = _make_env(schedule)
+    assert env._member_round_count("A") == 3
+    assert env._member_round_count("B") == 2
+
+
 def test_sparse_slot_ids_do_not_corrupt_past_round_label():
     # Contiguous slot_ids (0..3): baseline
     contiguous = asyncio.run(_past_instruction_positional((0, 1, 2, 3)))
@@ -280,6 +322,88 @@ def test_validate_rejects_phase_in_question():
         "fields": {},
     }
     with pytest.raises(ValueError, match="question.debater_a.*per-turn variable"):
+        _validate(pack)
+
+
+def test_validate_rejects_is_first_round_in_system():
+    # Bypass case gatekeeper flagged: is_first_round is in build_context
+    # (prompts.py:245) but was missing from the original _PER_TURN_VARS list.
+    pack = {
+        "version": 2,
+        "system": {
+            "debater_a": "{% if is_first_round %}First turn.{% endif %} You are debater_a.",
+            "debater_b": "You are debater_b.",
+            "judge": "You are the judge.",
+        },
+        "question": {
+            "debater_a": "{{ task_prompt }}",
+            "debater_b": "{{ task_prompt }}",
+        },
+        "user": {"debater_a": {"propose": "go"}, "debater_b": {"propose": "go"}},
+        "fields": {},
+    }
+    with pytest.raises(ValueError, match="system.debater_a.*per-turn variable"):
+        _validate(pack)
+
+
+def test_validate_rejects_statement_tag_bypass():
+    # {% if round_index > 0 %}X{% endif %} evades the old regex which only
+    # matched {{ ... }} expression tags. AST-based check catches it.
+    pack = {
+        "version": 2,
+        "system": {
+            "debater_a": "{% if round_index > 0 %}Round N.{% endif %} You are debater_a.",
+            "debater_b": "You are debater_b.",
+            "judge": "You are the judge.",
+        },
+        "question": {
+            "debater_a": "{{ task_prompt }}",
+            "debater_b": "{{ task_prompt }}",
+        },
+        "user": {"debater_a": {"propose": "go"}, "debater_b": {"propose": "go"}},
+        "fields": {},
+    }
+    with pytest.raises(ValueError, match="system.debater_a.*per-turn variable"):
+        _validate(pack)
+
+
+def test_validate_rejects_index_access_bypass():
+    # {{ data[round_index] }} — indirect index access evaded old regex.
+    pack = {
+        "version": 2,
+        "system": {
+            "debater_a": "Hint: {{ hints[round_index] }}. You are debater_a.",
+            "debater_b": "You are debater_b.",
+            "judge": "You are the judge.",
+        },
+        "question": {
+            "debater_a": "{{ task_prompt }}",
+            "debater_b": "{{ task_prompt }}",
+        },
+        "user": {"debater_a": {"propose": "go"}, "debater_b": {"propose": "go"}},
+        "fields": {},
+    }
+    with pytest.raises(ValueError, match="system.debater_a.*per-turn variable"):
+        _validate(pack)
+
+
+def test_validate_rejects_set_directive_bypass():
+    # {% set r = round_index %} — evaded regex, AST catches it.
+    pack = {
+        "version": 2,
+        "system": {
+            "debater_a": "{% set r = round_index %}Welcome.",
+            "debater_b": "You are debater_b.",
+            "judge": "You are the judge.",
+        },
+        "question": {
+            "debater_a": "{{ task_prompt }}",
+            "debater_b": "{{ task_prompt }}",
+        },
+        "user": {"debater_a": {"propose": "go"}, "debater_b": {"propose": "go"}},
+        "fields": {},
+    }
+    with pytest.raises(ValueError, match="system.debater_a.*per-turn variable"):
         _validate(pack)
 
 
