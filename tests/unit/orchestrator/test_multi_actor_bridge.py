@@ -132,10 +132,18 @@ def test_multiple_episodes_flatten_correctly():
     ]
 
 
-def test_non_int_example_id_raises():
+def test_string_example_id_passes_through():
+    """EpisodeResult.base_example_id is int | str — bridge must not coerce."""
     episode = _make_episode()
     episode.base_example_id = "string-id"
-    with pytest.raises(TypeError, match="base_example_id must be int"):
+    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
+    assert all(r["example_id"] == "string-id" for r in rollouts)
+
+
+def test_none_example_id_raises():
+    episode = _make_episode()
+    episode.base_example_id = None
+    with pytest.raises(TypeError, match="must not be None"):
         episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
 
 

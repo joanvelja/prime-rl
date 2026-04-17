@@ -21,7 +21,7 @@ class MemberRollout(TypedDict):
     """
 
     # Training-path fields (read by pretokenize → interleave → TrainingSample)
-    example_id: int
+    example_id: int | str
     task: str
     trajectory: list[TrajectoryStep]
     sampling_args: dict[str, Any]
@@ -61,19 +61,17 @@ def episodes_to_member_rollouts(
     return rollouts
 
 
-def _validated_example_id(episode: EpisodeResult) -> int:
-    """Enforce int example_id — buffer and dataset normalization both assert it."""
+def _validated_example_id(episode: EpisodeResult) -> int | str:
+    """Pass through base_example_id; EpisodeResult allows int | str."""
     raw = episode.base_example_id
-    if not isinstance(raw, int):
-        raise TypeError(
-            f"base_example_id must be int, got {type(raw).__name__}: {raw!r}"
-        )
+    if raw is None:
+        raise TypeError("base_example_id must not be None")
     return raw
 
 
 def _member_to_rollout(
     member: MemberResult,
-    example_id: int,
+    example_id: int | str,
     episode_id: str,
     env_name: str,
     temperature: float,
