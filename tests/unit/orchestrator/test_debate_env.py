@@ -43,6 +43,7 @@ from verifiers.envs.multi_actor_kernel import (
     TurnSlot,
     apply_action,
 )
+from verifiers.errors import Error as VFError, KernelProtocolError
 from verifiers.types import (
     Response,
     ResponseMessage,
@@ -712,20 +713,21 @@ def test_kernel_transcript_contains_response_content():
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
 
     kernel: KernelState = state["_kernel"]
-    assert kernel.transcript[0].content == "Alpha argument here"
-    assert kernel.transcript[1].content == "Beta counterpoint"
+    assert kernel.transcript[0].raw_content == "Alpha argument here"
+    assert kernel.transcript[1].raw_content == "Beta counterpoint"
+    assert kernel.transcript[0].public_channel == "Alpha argument here"
+    assert kernel.transcript[1].public_channel == "Beta counterpoint"
+    assert kernel.transcript[0].private_channel is None
+    assert kernel.transcript[1].private_channel is None
     assert kernel.transcript[0].phase == "opening"
     assert kernel.transcript[1].phase == "opening"
 
 
 def test_kernel_rejects_wrong_actor():
-    """Real kernel raises KernelProtocolError if wrong actor submits for a slot.
-
-    KernelProtocolError is a subclass of vf.Error, so the rollout-layer
-    vf.Error boundary catches it distinctly from generic Python errors.
+    """apply_action raises KernelProtocolError (a vf.Error subclass) when
+    a non-scheduled actor submits. The rollout-layer vf.Error boundary
+    catches it distinctly from generic Python errors.
     """
-    from verifiers.errors import Error as VFError, KernelProtocolError
-
     schedule = StaticSchedule((
         TurnSlot(slot_id=0, actors=("A",), phase="opening"),
     ))
@@ -741,8 +743,6 @@ def test_kernel_rejects_wrong_actor():
 
 
 def test_kernel_rejects_finished_episode_with_protocol_error():
-    from verifiers.errors import KernelProtocolError
-
     schedule = StaticSchedule((
         TurnSlot(slot_id=0, actors=("A",), phase="opening"),
     ))
@@ -752,8 +752,6 @@ def test_kernel_rejects_finished_episode_with_protocol_error():
 
 
 def test_kernel_rejects_duplicate_submission_with_protocol_error():
-    from verifiers.errors import KernelProtocolError
-
     schedule = StaticSchedule((
         TurnSlot(slot_id=0, actors=("A", "B"), phase="sim"),
     ))
@@ -762,12 +760,16 @@ def test_kernel_rejects_duplicate_submission_with_protocol_error():
         apply_action(r1.new_state, schedule, "A", "again", 1)
 
 
-def test_debate_env_requires_members():
-    """DebateEnv needs explicit `members` list — replaces fragile _count_actors."""
-    schedule = StaticSchedule((
+def _two_actor_schedule() -> StaticSchedule:
+    return StaticSchedule((
         TurnSlot(slot_id=0, actors=("A",), phase="p"),
         TurnSlot(slot_id=1, actors=("B",), phase="p"),
     ))
+
+
+def test_debate_env_requires_members():
+    """DebateEnv needs explicit `members` list — replaces fragile _count_actors."""
+    schedule = _two_actor_schedule()
     rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
     with pytest.raises(ValueError, match="non-empty members"):
         DebateEnv(
@@ -787,6 +789,91 @@ def test_debate_env_requires_members():
         )
     env = DebateEnv(
         schedule=schedule,
+        prompts=DEBATE_PROMPTS,
+        members=["A", "B"],
+        rubric=rubric,
+        dataset=lambda: None,
+    )
+    assert env.members == ["A", "B"]
+
+
+def test_debate_env_members_must_match_rubric_members():
+    """Cross-check 1: silent drift between env.members and rubric.members
+    would desync round_index (env) from reward attribution (rubric).
+    """
+    schedule = _two_actor_schedule()
+    rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
+
+    # Different set of members entirely.
+    with pytest.raises(ValueError, match="members != rubric.members"):
+        DebateEnv(
+            schedule=schedule,
+            prompts=DEBATE_PROMPTS,
+            members=["X", "Y"],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+
+    # Same set, different order — still a failure (order matters for
+    # any downstream index-based attribution).
+    schedule_reversed = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("B",), phase="p"),
+        TurnSlot(slot_id=1, actors=("A",), phase="p"),
+    ))
+    with pytest.raises(ValueError, match="members != rubric.members"):
+        DebateEnv(
+            schedule=schedule_reversed,
+            prompts=DEBATE_PROMPTS,
+            members=["B", "A"],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+
+
+def test_debate_env_members_must_match_static_schedule_actors():
+    """Cross-check 2: StaticSchedule's unique slot actors must equal members."""
+    rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
+
+    # Member declared but never appears in schedule.
+    schedule_missing_b = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("A",), phase="p"),
+    ))
+    with pytest.raises(ValueError, match="unique actors in StaticSchedule"):
+        DebateEnv(
+            schedule=schedule_missing_b,
+            prompts=DEBATE_PROMPTS,
+            members=["A", "B"],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+
+    # Actor appears in schedule but not declared as member.
+    schedule_with_c = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("A",), phase="p"),
+        TurnSlot(slot_id=1, actors=("B",), phase="p"),
+        TurnSlot(slot_id=2, actors=("C",), phase="p"),
+    ))
+    with pytest.raises(ValueError, match="unique actors in StaticSchedule"):
+        DebateEnv(
+            schedule=schedule_with_c,
+            prompts=DEBATE_PROMPTS,
+            members=["A", "B"],
+            rubric=rubric,
+            dataset=lambda: None,
+        )
+
+
+def test_debate_env_skips_schedule_cross_check_for_dynamic_program():
+    """Dynamic SlotProgram implementations are exempt from cross-check 2
+    (actor set may be data-dependent).
+    """
+    class DynamicProgram:
+        def current_slot(self, state):
+            return None
+
+    rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
+    env = DebateEnv(
+        schedule=DynamicProgram(),
         prompts=DEBATE_PROMPTS,
         members=["A", "B"],
         rubric=rubric,
@@ -837,7 +924,9 @@ def test_format_history_strips_thinking_for_opponents_private():
             Utterance(
                 member_id="A",
                 slot_id=0,
-                content="<thinking>my secret reasoning</thinking>The answer is 4.",
+                raw_content="<thinking>my secret reasoning</thinking>The answer is 4.",
+                public_channel="The answer is 4.",
+                private_channel="my secret reasoning",
                 phase="opening",
                 token_count=10,
             ),
@@ -864,7 +953,9 @@ def test_format_history_preserves_own_thinking():
             Utterance(
                 member_id="A",
                 slot_id=0,
-                content="<thinking>my reasoning</thinking>The answer is 4.",
+                raw_content="<thinking>my reasoning</thinking>The answer is 4.",
+                public_channel="The answer is 4.",
+                private_channel="my reasoning",
                 phase="opening",
                 token_count=10,
             ),
@@ -890,7 +981,9 @@ def test_format_history_open_visibility_preserves_for_all():
             Utterance(
                 member_id="A",
                 slot_id=0,
-                content="<thinking>visible reasoning</thinking>Answer.",
+                raw_content="<thinking>visible reasoning</thinking>Answer.",
+                public_channel="Answer.",
+                private_channel="visible reasoning",
                 phase="opening",
                 token_count=10,
             ),
@@ -951,12 +1044,16 @@ def test_format_history_attributes_both_debaters_distinctly():
         transcript=(
             Utterance(
                 member_id="A", slot_id=0,
-                content="Prover opens: answer is 4.",
+                raw_content="Prover opens: answer is 4.",
+                public_channel="Prover opens: answer is 4.",
+                private_channel=None,
                 phase="opening", token_count=5,
             ),
             Utterance(
                 member_id="B", slot_id=1,
-                content="Verifier challenges: show the work.",
+                raw_content="Verifier challenges: show the work.",
+                public_channel="Verifier challenges: show the work.",
+                private_channel=None,
                 phase="opening", token_count=5,
             ),
         ),
@@ -1000,7 +1097,9 @@ def test_format_history_fallback_prefixes_role_id_when_no_template():
         transcript=(
             Utterance(
                 member_id="A", slot_id=0,
-                content="Prover says foo.",
+                raw_content="Prover says foo.",
+                public_channel="Prover says foo.",
+                private_channel=None,
                 phase="opening", token_count=3,
             ),
         ),
@@ -1014,69 +1113,68 @@ def test_format_history_fallback_prefixes_role_id_when_no_template():
     assert history[0]["content"] == "[prover] Prover says foo."
 
 
-def test_redact_vs_strip_think_contracts_split_on_unclosed():
-    """Direct contract test for the two think-handling functions.
+def test_parse_channels_contract():
+    """parse_channels is the single think-handling primitive.
 
-    ``strip_think`` is PARSING-SAFE: unclosed openers are preserved so
-    downstream field extractors see raw malformed output and can fail
-    loud. ``redact_think`` is PRIVACY-SAFE: unclosed openers are
-    aggressively stripped from the opener to EOF so a malformed emitter
-    cannot leak private reasoning to an opponent view.
-
-    Regression guard for Codex Finding A (round-3 post-G6 privacy leak):
-    a model that emits ``<thinking>secret<answer>A</answer>`` without
-    closing the think tag must have its answer still extractable by the
-    parser (strip_think) but must NOT leak ``secret`` to the opponent
-    (redact_think).
+    Happy path: 0 or 1 closed block. Malformed markup (unclosed, stray
+    closer, multiple blocks, nested) is a KernelProtocolError. Replaces
+    the legacy strip_think/redact_think pair — under the channel-split
+    architecture, unclosed openers are no longer silently tolerated.
     """
-    from verifiers.envs.debate.think import redact_think, strip_think
+    from verifiers.envs.multi_actor_kernel import parse_channels
+    from verifiers.errors import KernelProtocolError
 
-    content = "<thinking>secret reasoning<answer>A</answer> and more"
+    # Happy path: one closed block.
+    pub, priv = parse_channels("<thinking>reason</thinking>payload", tag="thinking")
+    assert pub == "payload"
+    assert priv == "reason"
 
-    # Parsing path preserves the entire string including the unclosed opener
-    # — that's G6 Option B by design so extract_fields can still find the
-    # <answer> tag via closed-tag regex or fail loud.
-    parse_cleaned, parse_thoughts = strip_think(content, tag="thinking")
-    assert "secret reasoning" in parse_cleaned
-    assert "<answer>A</answer>" in parse_cleaned
-    assert parse_thoughts is None  # no *closed* think tags
+    # No block → passthrough (stripped).
+    assert parse_channels("  hello  ", tag="thinking") == ("hello", None)
 
-    # Privacy path aggressively strips from the unclosed <thinking> to EOF.
-    # The answer is sacrificed in the privacy path — that is intentional.
-    redact_cleaned, redact_thoughts = redact_think(content, tag="thinking")
-    assert "secret reasoning" not in redact_cleaned
-    assert "<thinking>" not in redact_cleaned
-    assert redact_cleaned == ""
-    assert redact_thoughts is not None
-    assert "secret reasoning" in redact_thoughts
+    # Empty body → private None.
+    assert parse_channels("<thinking>   </thinking>x", tag="thinking") == ("x", None)
 
-    # Closed tags: both functions behave identically.
-    closed = "<thinking>reason</thinking>payload"
-    assert strip_think(closed, tag="thinking") == ("payload", "reason")
-    assert redact_think(closed, tag="thinking") == ("payload", "reason")
+    # think/thinking aliasing — either name matches both.
+    assert parse_channels("<think>r</think>x", tag="thinking") == ("x", "r")
+    assert parse_channels("<thinking>r</thinking>x", tag="think") == ("x", "r")
+
+    # Unclosed opener → protocol error.
+    with pytest.raises(KernelProtocolError, match="unbalanced"):
+        parse_channels("<thinking>leak<answer>A</answer>", tag="thinking")
+
+    # Stray closer → protocol error.
+    with pytest.raises(KernelProtocolError, match="unbalanced"):
+        parse_channels("payload</thinking>", tag="thinking")
+
+    # Multiple blocks → protocol error.
+    with pytest.raises(KernelProtocolError, match="multiple"):
+        parse_channels(
+            "<thinking>a</thinking>mid<thinking>b</thinking>",
+            tag="thinking",
+        )
+
+    # Nested tags → protocol error.
+    with pytest.raises(KernelProtocolError, match="nested"):
+        parse_channels(
+            "<thinking>outer<thinking>inner</thinking></thinking>",
+            tag="thinking",
+        )
 
 
-def test_format_history_redacts_unclosed_think_leak_for_opponent():
-    """Integration regression guard for Codex Finding A.
+def test_format_history_private_visibility_uses_public_channel():
+    """Integration: private visibility → opponent view reads public_channel
+    (think stripped at commit). Author's own view reads raw_content.
 
-    A debater emits an unclosed ``<thinking>`` followed by an answer.
-    The author's own view preserves the raw content. The opponent view
-    goes through ``redact_think`` and must NOT contain the secret
-    reasoning, even though ``strip_think`` (which was used before this
-    fix) would have preserved it verbatim.
+    Replaces the legacy redact_think integration test. Under the channel
+    architecture the private channel is simply not rendered to opponents
+    with private/disabled visibility, so leakage is structurally
+    impossible — no aggressive EOF-strip heuristic required.
     """
-    from verifiers.envs.debate.think import strip_think
     from verifiers.envs.multi_actor_kernel import Utterance
 
     prompts = _make_think_prompts({"prover": "private", "verifier": "private"})
     env, _ = _make_env([], prompts=prompts)
-
-    leak_content = "<thinking>my-secret-reasoning-token<answer>A</answer> more"
-
-    # Sanity: strip_think alone would leak. If this ever flips, the test
-    # is no longer guarding the right boundary.
-    strip_cleaned, _ = strip_think(leak_content, tag="thinking")
-    assert "my-secret-reasoning-token" in strip_cleaned
 
     ks = KernelState(
         slot_index=1,
@@ -1084,27 +1182,46 @@ def test_format_history_redacts_unclosed_think_leak_for_opponent():
             Utterance(
                 member_id="A",
                 slot_id=0,
-                content=leak_content,
+                raw_content="<thinking>my-secret-reasoning-token</thinking>Answer: A",
+                public_channel="Answer: A",
+                private_channel="my-secret-reasoning-token",
                 phase="opening",
                 token_count=10,
             ),
         ),
     )
 
-    # Opponent view (B) must go through redact_think → no leak.
     opp_history = env._format_history(ks, "B")
     assert len(opp_history) == 1
     opp_content = opp_history[0]["content"]
-    assert "my-secret-reasoning-token" not in opp_content, (
-        f"privacy leak: opponent view contains secret reasoning: {opp_content!r}"
-    )
+    assert "my-secret-reasoning-token" not in opp_content
     assert "<thinking>" not in opp_content
+    assert "Answer: A" in opp_content
 
-    # Author's own view (A) is still unredacted — own content flows through
-    # the `utt.member_id == actor` branch, bypassing any think handling.
+    # Author's own view gets raw_content — think intact for KV-cache coherence.
     own_history = env._format_history(ks, "A")
     assert len(own_history) == 1
     assert "my-secret-reasoning-token" in own_history[0]["content"]
+
+
+def test_apply_action_rejects_malformed_think_markup():
+    """Malformed think markup in raw model output → KernelProtocolError
+    at commit. The rollout-layer vf.Error boundary catches it and records
+    state['error'] rather than silently propagating malformed content.
+    """
+    from verifiers.envs.multi_actor_kernel import (
+        KernelState as _KS, StaticSchedule as _Sch, TurnSlot as _TS, apply_action as _ap
+    )
+    from verifiers.errors import KernelProtocolError
+
+    schedule = _Sch((_TS(slot_id=0, actors=("A",), phase="p"),))
+    with pytest.raises(KernelProtocolError):
+        _ap(
+            _KS(slot_index=0), schedule, "A",
+            "<thinking>leak<answer>A</answer>",
+            10,
+            think_tag="thinking",
+        )
 
 
 # ---------------------------------------------------------------------------
