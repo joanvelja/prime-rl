@@ -13,15 +13,9 @@ F3. DebatePrompts._validate rejects per-turn variables in system and
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from types import MappingProxyType
 
 import pytest
-
-sys.path.insert(0, str(Path("/Users/joanvelja/Documents/Github/ext/verifiers")))
-
-import yaml
 
 from verifiers.clients.openai_chat_completions_token_client import _is_valid_env_tail
 from verifiers.envs.debate.prompts import DebatePrompts, _validate, resolve_prompts
@@ -120,7 +114,10 @@ def test_fold_leaves_tool_messages_untouched():
 
 
 def test_fold_skips_multimodal_content_lists():
-    # Don't blindly concatenate when content is a list of parts.
+    # Don't blindly concatenate when content is a list of parts — we'd
+    # lose the image part structure. The downstream stitcher will see
+    # [user, user], fall back to MITO, and the model still gets valid
+    # input via the chat template. Slow-path, but correct.
     msgs = [
         {
             "role": "user",
@@ -129,9 +126,10 @@ def test_fold_skips_multimodal_content_lists():
         {"role": "user", "content": "describe it"},
     ]
     folded = fold_consecutive_user_messages(msgs)
-    # Either left separate, or dicts-as-is — but NOT concatenated into a
-    # single string that drops the image part.
-    assert len(folded) == 2
+    assert folded == msgs  # exact byte-for-byte pass-through
+    # image part must still be present + structurally intact
+    assert folded[0]["content"] == [{"type": "image_url", "image_url": {"url": "x"}}]
+    assert folded[1] == {"role": "user", "content": "describe it"}
 
 
 def test_fold_preserves_other_fields_on_merged_user():
