@@ -14,7 +14,6 @@ from typing import Any, TypedDict
 from verifiers.types import EpisodeResult, MemberResult, TrajectoryStep
 
 _LOGGER = logging.getLogger(__name__)
-_FLAT_METRICS_WARNED = False
 
 
 class MemberRollout(TypedDict):
@@ -110,48 +109,30 @@ def _member_to_rollout(
     )
 
 
-def _resolve_reward_schema(
+def _resolve_member_rewards(
     members: list[str],
     member_rewards: dict[str, float] | None,
-    metrics: dict[str, Any],
-) -> dict[str, float | None]:
-    """Decide the reward schema once per rollout, return all rewards.
+) -> dict[str, float]:
+    """Return per-member reward, requiring full structured coverage.
 
-    Atomic decision — no per-member schema mixing. Either the rollout
-    uses the structured MultiAgentRubric contract
-    (``state["member_rewards"]``) for ALL members, or it uses the legacy
-    flat ``metrics["reward/{mid}"]`` for ALL members. Mixing the two on
-    one rollout is a schema violation (e.g. half-migrated rubric) and
-    would silently corrupt reward signal.
-
-    Raises ``ValueError`` on partial structured coverage. Returns
-    per-member ``None`` only when BOTH schemas are absent for a member
-    (legacy "missing reward" behavior preserved).
+    MultiAgentRubric contract requires ``state["member_rewards"]`` covers
+    every member. Absence or partial coverage is a schema violation and
+    raises — refusing to silently synthesize signal.
     """
-    global _FLAT_METRICS_WARNED
-    if member_rewards is not None:
-        missing = [m for m in members if m not in member_rewards]
-        if missing:
-            raise ValueError(
-                "state['member_rewards'] is present but does not cover all "
-                f"members: missing {missing}. Partial structured coverage is "
-                "a schema violation — the rubric must write member_rewards "
-                "for every member or none. Refusing to silently merge "
-                "structured + flat schemas on the same rollout."
-            )
-        return {m: member_rewards[m] for m in members}
-    # Legacy flat path: all members come from metrics["reward/{mid}"].
-    if not _FLAT_METRICS_WARNED and any(
-        f"reward/{m}" in metrics for m in members
-    ):
-        _LOGGER.warning(
-            "Bridge read per-member rewards from legacy flat metrics "
-            "keys 'reward/{mid}'. Upgrade the rubric to MultiAgentRubric "
-            "and populate state['member_rewards'] — flat fallback will "
-            "be removed."
+    if member_rewards is None:
+        raise ValueError(
+            "state['member_rewards'] is missing. The rubric must be a "
+            "MultiAgentRubric that writes per-member rewards; flat "
+            "metrics fallback has been removed."
         )
-        _FLAT_METRICS_WARNED = True
-    return {m: metrics.get(f"reward/{m}") for m in members}
+    missing = [m for m in members if m not in member_rewards]
+    if missing:
+        raise ValueError(
+            "state['member_rewards'] does not cover all members: "
+            f"missing {missing}. The rubric must write a reward for "
+            "every member — partial coverage is a schema violation."
+        )
+    return {m: member_rewards[m] for m in members}
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +169,6 @@ def rollout_to_member_rollouts(
     temperature = sampling_args["temperature"]
     example_id = output["example_id"]
     episode_id = output.get("trajectory_id", "")
-    metrics = output.get("metrics", {})
     member_rewards = output.get("member_rewards")
 
     # Group steps by member_id, preserving temporal order
@@ -206,10 +186,8 @@ def rollout_to_member_rollouts(
         if mid not in member_role:
             member_role[mid] = extras.get("role_id", "")
 
-    # Atomic schema decision: compute all rewards in one pass, fail loud
-    # on partial structured coverage. No per-member schema mixing.
     members_present = list(member_steps.keys())
-    resolved = _resolve_reward_schema(members_present, member_rewards, metrics)
+    resolved = _resolve_member_rewards(members_present, member_rewards)
 
     rollouts: list[MemberRollout] = []
     for mid, steps in member_steps.items():

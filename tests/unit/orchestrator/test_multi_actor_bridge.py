@@ -355,7 +355,7 @@ def _make_rollout_output(
     example_id: int = 42,
     temperature: float = 0.7,
     trajectory_id: str = "debate-0",
-    metrics: dict | None = None,
+    member_rewards: dict | None = None,
 ) -> dict:
     """Minimal RolloutOutput dict as DebateEnv would produce."""
     if steps is None:
@@ -365,14 +365,14 @@ def _make_rollout_output(
             _make_tagged_step("A", "prover", "rebuttal"),
             _make_tagged_step("B", "verifier", "rebuttal"),
         ]
-    if metrics is None:
-        metrics = {"reward/A": 1.0, "reward/B": 0.0}
+    if member_rewards is None:
+        member_rewards = {"A": 1.0, "B": 0.0}
     return {
         "trajectory": steps,
         "sampling_args": {"temperature": temperature},
         "example_id": example_id,
         "trajectory_id": trajectory_id,
-        "metrics": metrics,
+        "member_rewards": member_rewards,
     }
 
 
@@ -414,11 +414,12 @@ def test_rollout_bridge_per_member_rewards():
     assert by_member["B"]["reward"] == 0.0
 
 
-def test_rollout_bridge_missing_reward_is_none():
-    output = _make_rollout_output(metrics={})
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    for r in rollouts:
-        assert r["reward"] is None
+def test_rollout_bridge_missing_member_rewards_raises():
+    """Absence of member_rewards is a schema violation, not a silent None."""
+    output = _make_rollout_output()
+    del output["member_rewards"]
+    with pytest.raises(ValueError, match="member_rewards.*missing"):
+        rollout_to_member_rollouts(output, ENV_NAME)
 
 
 def test_rollout_bridge_empty_trajectory():
@@ -481,56 +482,15 @@ def test_rollout_bridge_task_is_env_name():
 
 
 # ---------------------------------------------------------------------------
-# Tests — MultiAgentRubric structured dual-read (bridge prefers structured,
-# falls back to flat ``reward/{mid}``)
+# Tests — MultiAgentRubric member_rewards schema (required, full coverage)
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_prefers_member_rewards_over_flat_metrics():
-    """When both present, structured member_rewards wins."""
-    output = _make_rollout_output(
-        metrics={"reward/A": 9.9, "reward/B": 9.9},  # should be ignored
-    )
-    output["member_rewards"] = {"A": 1.0, "B": 0.0}
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    by_member = {r["member_id"]: r for r in rollouts}
-    assert by_member["A"]["reward"] == 1.0
-    assert by_member["B"]["reward"] == 0.0
-
-
-def test_bridge_falls_back_to_flat_metrics():
-    """No structured key → fall back to metrics['reward/{mid}']."""
-    output = _make_rollout_output(metrics={"reward/A": 0.25, "reward/B": 0.75})
-    # No member_rewards on output → legacy path
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    by_member = {r["member_id"]: r for r in rollouts}
-    assert by_member["A"]["reward"] == 0.25
-    assert by_member["B"]["reward"] == 0.75
-
-
-def test_bridge_partial_structured_rewards_raises():
-    """Atomic schema decision: partial structured coverage is a violation.
-
-    If member_rewards is present it MUST cover every member. A half-migrated
-    rubric that writes structured for A and relies on flat for B would
-    silently merge the two schemas on one rollout — fail loud instead.
-    """
-    output = _make_rollout_output(metrics={"reward/A": 0.4, "reward/B": 0.6})
-    output["member_rewards"] = {"A": 1.0}  # B missing — schema violation
+def test_bridge_partial_member_rewards_raises():
+    """Partial coverage is a schema violation: must cover every member."""
+    output = _make_rollout_output(member_rewards={"A": 1.0})  # B missing
     with pytest.raises(ValueError, match="member_rewards.*missing.*B"):
         rollout_to_member_rollouts(output, ENV_NAME)
-
-
-def test_bridge_flat_missing_member_is_none():
-    """Legacy flat path: missing flat key for a member -> reward=None.
-
-    This preserves the pre-migration 'missing reward' semantic; only the
-    structured path is strict about full coverage."""
-    output = _make_rollout_output(metrics={"reward/A": 0.4})  # B missing
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    by_member = {r["member_id"]: r for r in rollouts}
-    assert by_member["A"]["reward"] == 0.4
-    assert by_member["B"]["reward"] is None
 
 
 # ---------------------------------------------------------------------------

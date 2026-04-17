@@ -550,13 +550,15 @@ def test_full_pipeline_rollout_to_member_rollouts():
     assert state["metrics"]["reward/A"] == 1.0
     assert state["metrics"]["reward/B"] == 0.0
 
-    # Build a RolloutOutput-like dict from state
+    # Judge was injected post-rollout; rubric didn't score it. Extend
+    # member_rewards to match trajectory members before bridging.
+    member_rewards = {**state["member_rewards"], "J": 0.0}
     output = {
         "trajectory": state["trajectory"],
         "sampling_args": {"temperature": 0.7},
         "example_id": state["example_id"],
         "trajectory_id": state["trajectory_id"],
-        "metrics": state["metrics"],
+        "member_rewards": member_rewards,
     }
 
     rollouts = rollout_to_member_rollouts(output, "debate_test")
