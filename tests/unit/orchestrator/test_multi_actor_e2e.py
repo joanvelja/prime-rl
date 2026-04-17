@@ -172,7 +172,7 @@ def test_e2e_bridge_then_rae_across_batches():
 def test_e2e_rae_on_known_baselines():
     """RAE with pre-set baselines produces exact expected values."""
     state = RAEState(
-        baselines={(1, "prover"): 0.5, (1, "verifier"): 0.3},
+        baselines={(ENV_NAME, 1, "prover"): 0.5, (ENV_NAME, 1, "verifier"): 0.3},
         momentum=0.9,
     )
     episodes = [_make_two_actor_episode(base_example_id=1, episode_id="ep-0")]

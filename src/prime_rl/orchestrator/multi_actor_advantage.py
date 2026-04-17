@@ -13,18 +13,24 @@ from dataclasses import dataclass, field
 from prime_rl.orchestrator.multi_actor_bridge import MemberRollout
 
 
+RAEKey = tuple[str, int, str]
+"""(task, example_id, role_id). ``task`` is the env name (MemberRollout['task']),
+which partitions the baseline store across environments — otherwise two envs
+with overlapping example_ids would contaminate each other's baselines."""
+
+
 @dataclass
 class RAEState:
-    """Persistent EMA baselines keyed by (example_id, role_id).
+    """Persistent EMA baselines keyed by (task, example_id, role_id).
 
     Cold start: missing keys default to 0.0 baseline, so the first
-    advantage for a new (example, role) pair equals the raw reward.
+    advantage for a new (task, example, role) tuple equals the raw reward.
     """
 
-    baselines: dict[tuple[int, str], float] = field(default_factory=dict)
+    baselines: dict[RAEKey, float] = field(default_factory=dict)
     momentum: float = 0.9
 
-    def update(self, key: tuple[int, str], reward: float) -> None:
+    def update(self, key: RAEKey, reward: float) -> None:
         prev = self.baselines.get(key, 0.0)
         self.baselines[key] = self.momentum * prev + (1 - self.momentum) * reward
 
@@ -35,13 +41,13 @@ def compute_rae_advantages(
 ) -> list[float]:
     """Compute per-member advantages and update EMA baselines.
 
-    A_i = R_i - b[(example_id_i, role_id_i)]
+    A_i = R_i - b[(task_i, example_id_i, role_id_i)]
 
     Baselines are read BEFORE the batch, then updated AFTER all advantages
     are computed. This prevents within-batch ordering effects.
     """
     advantages: list[float] = []
-    updates: list[tuple[tuple[int, str], float]] = []
+    updates: list[tuple[RAEKey, float]] = []
 
     for mr in member_rollouts:
         reward = mr["reward"]
@@ -50,15 +56,15 @@ def compute_rae_advantages(
                 f"MemberRollout has reward=None "
                 f"(episode={mr['episode_id']}, member={mr['member_id']})"
             )
-        key = (mr["example_id"], mr["role_id"])
+        key: RAEKey = (mr["task"], mr["example_id"], mr["role_id"])
         baseline = state.baselines.get(key, 0.0)
         advantages.append(reward - baseline)
         updates.append((key, reward))
 
     # Aggregate rewards per key so update order doesn't matter when
-    # the same (example_id, role_id) appears multiple times in a batch.
-    key_sums: dict[tuple[int, str], float] = {}
-    key_counts: dict[tuple[int, str], int] = {}
+    # the same (task, example_id, role_id) appears multiple times in a batch.
+    key_sums: dict[RAEKey, float] = {}
+    key_counts: dict[RAEKey, int] = {}
     for key, reward in updates:
         key_sums[key] = key_sums.get(key, 0.0) + reward
         key_counts[key] = key_counts.get(key, 0) + 1
