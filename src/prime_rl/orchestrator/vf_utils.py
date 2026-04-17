@@ -237,14 +237,19 @@ async def evaluate(
           Instead, we use our generate() wrapper which round-robins clients.
 
     """
-    inputs = get_eval_examples(env, num_examples)
+    inputs = env._get_eval_inputs(num_examples, rollouts_per_example)
     return await generate(
         env=env,
         clients=clients,
         get_client=get_client,
         model_name=model_name,
         examples=inputs,
-        rollouts_per_example=rollouts_per_example,
+        # _get_eval_inputs() already flattens K rollouts per example into
+        # separate inputs. Passing k=1 here keeps each rollout as its own
+        # run_group call so one flaky rollout can't drop the whole K-group
+        # of its example (run_group uses asyncio.gather without
+        # return_exceptions and retries the whole group on any raise).
+        rollouts_per_example=1,
         sampling_args=sampling_args,
         max_retries=max_retries,
         state_columns=state_columns,

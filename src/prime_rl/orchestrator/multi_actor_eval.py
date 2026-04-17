@@ -76,7 +76,13 @@ def evaluate_multi_actor_episodes(
     episode_rows: list[dict[str, Any]] = []
     for r in results:
         outcome = r.outcome or {}
-        total_turns = outcome.get("total_turns", len(r.members[0].trajectory) if r.members else 0)
+        # Fallback sums across all members — each member's trajectory is
+        # only the steps that member authored. ``members[0]`` alone
+        # under-reports by ≈N on an N-actor schedule.
+        total_turns = outcome.get(
+            "total_turns",
+            sum(len(m.trajectory) for m in r.members),
+        )
         episode_rows.append({
             "base_example_id": r.base_example_id,
             "episode_id": r.episode_id,
@@ -94,7 +100,7 @@ def evaluate_multi_actor_episodes(
                 "episode_id": r.episode_id,
                 "member_id": m.member_id,
                 "role_id": m.role_id,
-                "reward": m.reward if m.reward is not None else 0.0,
+                "reward": m.reward,
                 "completion_len": _member_completion_len(m),
                 "is_truncated": _member_is_truncated(m),
             })
@@ -120,7 +126,9 @@ def evaluate_multi_actor_episodes(
     # Per-role metrics
     for role_id, role_group in member_df.groupby("role_id"):
         role_prefix = f"{prefix}/role/{role_id}"
-        metrics[f"{role_prefix}/reward/mean"] = float(role_group["reward"].mean())
+        reward_series = role_group["reward"].dropna()
+        if not reward_series.empty:
+            metrics[f"{role_prefix}/reward/mean"] = float(reward_series.mean())
         metrics[f"{role_prefix}/completion_len/mean"] = float(role_group["completion_len"].mean())
         metrics[f"{role_prefix}/is_truncated/mean"] = float(role_group["is_truncated"].mean())
 
