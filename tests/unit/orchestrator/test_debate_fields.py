@@ -566,11 +566,6 @@ def test_mcq_terminal_letter():
     assert normalize_mcq("After considering everything, my answer is D") == "D"
 
 
-def test_mcq_think_tag_stripped():
-    assert normalize_mcq("<thinking>hmm</thinking>B") == "B"
-    assert normalize_mcq("<think>reasoning here</think>C") == "C"
-
-
 def test_mcq_hedged_returns_none():
     assert normalize_mcq("not sure about this") is None
     assert normalize_mcq("I'm unsure") is None

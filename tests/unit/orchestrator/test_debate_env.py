@@ -1037,6 +1037,11 @@ def test_format_history_attributes_both_debaters_distinctly():
         prompts=labeled,
         role_for_actor={"A": "prover", "B": "verifier", "J": "judge"},
         members=["A", "B", "J"],
+        schedule_slots=(
+            TurnSlot(slot_id=0, actors=("A",), phase="opening"),
+            TurnSlot(slot_id=1, actors=("B",), phase="opening"),
+            TurnSlot(slot_id=2, actors=("J",), phase="final"),
+        ),
     )
 
     ks = KernelState(
