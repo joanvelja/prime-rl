@@ -3037,3 +3037,112 @@ def test_wrap_opponent_respects_viewer_role():
         "template render context."
     )
     assert "debater_b: my argument" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: DebateEnv inherits from MultiAgentEnv. Two structural tests:
+#   1. build_prompt is monotonic across slots for each member.
+#   2. End-to-end rollout on a real selfplay pack (no prompt/field mocks).
+# ---------------------------------------------------------------------------
+
+
+def test_debate_env_build_prompt_monotonic_across_slots():
+    """For each member, build_prompt at slot_{N+1} must structurally extend
+    build_prompt at slot_N: older messages byte-equal, new tail appended.
+    This is the prefix-cache contract on which lineage-scoped KV reuse
+    depends; a violation silently turns an O(T) episode into O(T²).
+    """
+    responses = [
+        _make_response(f"turn-{i}") for i in range(4)
+    ]
+    env, client = _make_env(responses)
+    state = _run(env.rollout(_rollout_input(), client, "test-model"))
+
+    per_member: dict[str, list[list[dict]]] = {"A": [], "B": []}
+    for step in state["trajectory"]:
+        mid = step["extras"]["member_id"]
+        per_member[mid].append(list(step["prompt"]))
+
+    for mid, seq in per_member.items():
+        for prev, curr in zip(seq, seq[1:]):
+            assert len(curr) >= len(prev), (
+                f"{mid}: subsequent prompt shorter than prior "
+                f"({len(curr)} < {len(prev)})"
+            )
+            for i, (p, c) in enumerate(zip(prev, curr)):
+                assert p == c, (
+                    f"{mid}: message {i} diverged between slots\n"
+                    f"  prev: {p!r}\n"
+                    f"  curr: {c!r}"
+                )
+
+
+def test_debate_env_end_to_end_real_types_rollout():
+    """End-to-end rollout on the production selfplay prompt pack. No mocks
+    on core types (DebatePrompts, FieldSpec, classify_enum, DebateRubric).
+    Only the client is faked -- it is the one legitimate system boundary.
+
+    Verifies:
+      * Trajectory tags survive through extras.
+      * DebateRubric scoring returns a concrete reward + per-member metrics.
+      * state['completion'] is populated.
+    """
+    selfplay = resolve_prompts("selfplay")
+    slots = (
+        TurnSlot(slot_id=0, actors=("A", "B"), phase="propose"),
+        TurnSlot(slot_id=1, actors=("J",), phase="final"),
+    )
+    members = ["A", "B", "J"]
+    role_for_actor = {"A": "debater_a", "B": "debater_b", "J": "judge"}
+    rubric = DebateRubric(
+        truth_role="debater_a",
+        members=members,
+        prompts=selfplay,
+        judge_client=None,
+        judge_model="fake-model",
+    )
+    env = DebateEnv(
+        schedule=StaticSchedule(slots),
+        prompts=selfplay,
+        members=members,
+        role_for_actor=role_for_actor,
+        rubric=rubric,
+        dataset=lambda: None,
+    )
+    client = FakeClient([
+        _make_response("<answer>C</answer>"),
+        _make_response("<answer>B</answer>"),
+        _make_response("<decision>debater_a</decision>"),
+    ])
+
+    state = _run(env.rollout(
+        RolloutInput(
+            prompt=[{"role": "user", "content": "What is 2+2?\n\nA) 1\nB) 3\nC) 4\nD) 5"}],
+            example_id=7,
+            task="mcq_debate",
+            answer="C",
+        ),
+        client,
+        "test-model",
+    ))
+
+    trajectory = state["trajectory"]
+    assert len(trajectory) == 3
+    member_ids = [s["extras"]["member_id"] for s in trajectory]
+    assert set(member_ids) == {"A", "B", "J"}
+    for step in trajectory:
+        assert "member_id" in step["extras"]
+        assert "role_id" in step["extras"]
+        assert "phase" in step["extras"]
+
+    # Rubric scores normally (selfplay pack MCQ path via classify_enum,
+    # no LLM grader needed).
+    _run(rubric.score_rollout(state))
+    assert state["reward"] == 1.0
+    assert state["metrics"]["reward/A"] == 1.0
+    assert state["metrics"]["reward/B"] == 0.0
+    assert state["metrics"]["accuracy/A"] == 1.0
+
+    # Completion populated.
+    assert state["completion"]
+    assert len(state["completion"]) == 3
