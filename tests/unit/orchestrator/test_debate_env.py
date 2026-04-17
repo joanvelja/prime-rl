@@ -1260,9 +1260,11 @@ def test_parse_channels_strips_native_think_with_custom_tag():
     # Native think under a custom-tag pack: content stripped, NOT surfaced
     # as private_channel (third-party artifact, not author-intended).
     pub, priv = parse_channels("public <think>secret</think> tail", tag="reason")
-    assert "secret" not in pub
-    assert "<think>" not in pub
-    assert pub == "public  tail".strip() or pub == "public   tail".strip() or "public" in pub
+    # parse_channels excises the block at byte boundaries (no internal
+    # whitespace normalization) and strips only leading/trailing whitespace
+    # of the final public channel. Input "public <block> tail" → residual
+    # "public  tail" (two spaces where the block sat), unchanged by outer strip().
+    assert pub == "public  tail"
     assert priv is None  # native think is DISCARDED, not promoted
 
     # Configured tag still becomes private_channel; native think still stripped
