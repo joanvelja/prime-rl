@@ -30,7 +30,6 @@ from verifiers.clients import Client as _VFClient
 from verifiers.utils.async_utils import maybe_retry
 from verifiers.envs.debate_env import (
     DebateEnv,
-    _consolidate_messages,
     _validate_judge_templates,
     load_environment,
 )
@@ -322,22 +321,22 @@ def test_has_error_stop():
 
 
 def test_debate_complete_false_when_slots_remain():
-    """debate_complete should return False when schedule still has slots."""
+    """schedule_exhausted should return False when schedule still has slots."""
     env, _ = _make_env([])
     state = State()
     state["_kernel"] = KernelState(slot_index=0)
     state["is_completed"] = False
-    result = _run(env.debate_complete(state))
+    result = _run(env.schedule_exhausted(state))
     assert result is False
 
 
 def test_debate_complete_true_when_all_slots_done():
-    """debate_complete should return True when slot_index exceeds schedule."""
+    """schedule_exhausted should return True when slot_index exceeds schedule."""
     env, _ = _make_env([])
     state = State()
     state["_kernel"] = KernelState(slot_index=len(TWO_TURN_SLOTS))
     state["is_completed"] = False
-    result = _run(env.debate_complete(state))
+    result = _run(env.schedule_exhausted(state))
     assert result is True
 
 
@@ -349,8 +348,8 @@ def test_debate_complete_true_when_all_slots_done():
 def test_resolve_actor_defaults_to_none_none():
     """Self-play mode: no overrides -> (None, None) for all actors."""
     env, _ = _make_env([])
-    assert env._resolve_actor("A") == (None, None)
-    assert env._resolve_actor("B") == (None, None)
+    assert env.resolve_actor("A") == (None, None)
+    assert env.resolve_actor("B") == (None, None)
 
 
 def test_resolve_actor_with_overrides():
@@ -360,8 +359,8 @@ def test_resolve_actor_with_overrides():
         [],
         actor_overrides={"B": (opp_client, "opponent-model")},
     )
-    assert env._resolve_actor("A") == (None, None)
-    client_b, model_b = env._resolve_actor("B")
+    assert env.resolve_actor("A") == (None, None)
+    client_b, model_b = env.resolve_actor("B")
     assert client_b is opp_client
     assert model_b == "opponent-model"
 
@@ -658,36 +657,6 @@ def test_kernel_state_advances_through_slots():
     assert kernel.transcript[1].member_id == "B"
     assert kernel.transcript[2].member_id == "A"
     assert kernel.transcript[3].member_id == "B"
-
-
-# ---------------------------------------------------------------------------
-# 10. Consolidate messages helper
-# ---------------------------------------------------------------------------
-
-
-def test_consolidate_merges_contiguous_user_messages():
-    msgs = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "q1"},
-        {"role": "user", "content": "q2"},
-        {"role": "assistant", "content": "a1"},
-    ]
-    result = _consolidate_messages(msgs)
-    assert len(result) == 3
-    assert result[0]["role"] == "system"
-    assert result[1]["role"] == "user"
-    assert "q1" in result[1]["content"]
-    assert "q2" in result[1]["content"]
-    assert result[2]["role"] == "assistant"
-
-
-def test_consolidate_does_not_merge_system_messages():
-    msgs = [
-        {"role": "system", "content": "sys1"},
-        {"role": "system", "content": "sys2"},
-    ]
-    result = _consolidate_messages(msgs)
-    assert len(result) == 2
 
 
 # ---------------------------------------------------------------------------
