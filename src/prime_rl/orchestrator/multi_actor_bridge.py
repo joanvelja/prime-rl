@@ -110,32 +110,48 @@ def _member_to_rollout(
     )
 
 
-def _resolve_member_reward(
-    member_id: str,
+def _resolve_reward_schema(
+    members: list[str],
     member_rewards: dict[str, float] | None,
     metrics: dict[str, Any],
-) -> float | None:
-    """Dual-read per-member reward.
+) -> dict[str, float | None]:
+    """Decide the reward schema once per rollout, return all rewards.
 
-    Prefers the structured ``state["member_rewards"][mid]`` contract
-    (MultiAgentRubric). Falls back to the legacy flat key
-    ``metrics["reward/{mid}"]`` with a one-time deprecation log per
-    process. Returns ``None`` when neither is present.
+    Atomic decision — no per-member schema mixing. Either the rollout
+    uses the structured MultiAgentRubric contract
+    (``state["member_rewards"]``) for ALL members, or it uses the legacy
+    flat ``metrics["reward/{mid}"]`` for ALL members. Mixing the two on
+    one rollout is a schema violation (e.g. half-migrated rubric) and
+    would silently corrupt reward signal.
+
+    Raises ``ValueError`` on partial structured coverage. Returns
+    per-member ``None`` only when BOTH schemas are absent for a member
+    (legacy "missing reward" behavior preserved).
     """
     global _FLAT_METRICS_WARNED
-    if member_rewards is not None and member_id in member_rewards:
-        return member_rewards[member_id]
-    fallback = metrics.get(f"reward/{member_id}")
-    if fallback is not None and not _FLAT_METRICS_WARNED:
+    if member_rewards is not None:
+        missing = [m for m in members if m not in member_rewards]
+        if missing:
+            raise ValueError(
+                "state['member_rewards'] is present but does not cover all "
+                f"members: missing {missing}. Partial structured coverage is "
+                "a schema violation — the rubric must write member_rewards "
+                "for every member or none. Refusing to silently merge "
+                "structured + flat schemas on the same rollout."
+            )
+        return {m: member_rewards[m] for m in members}
+    # Legacy flat path: all members come from metrics["reward/{mid}"].
+    if not _FLAT_METRICS_WARNED and any(
+        f"reward/{m}" in metrics for m in members
+    ):
         _LOGGER.warning(
-            "Bridge read per-member reward from legacy flat metrics "
-            "key 'reward/%s'. Upgrade the rubric to MultiAgentRubric "
+            "Bridge read per-member rewards from legacy flat metrics "
+            "keys 'reward/{mid}'. Upgrade the rubric to MultiAgentRubric "
             "and populate state['member_rewards'] — flat fallback will "
-            "be removed.",
-            member_id,
+            "be removed."
         )
         _FLAT_METRICS_WARNED = True
-    return fallback
+    return {m: metrics.get(f"reward/{m}") for m in members}
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +206,14 @@ def rollout_to_member_rollouts(
         if mid not in member_role:
             member_role[mid] = extras.get("role_id", "")
 
+    # Atomic schema decision: compute all rewards in one pass, fail loud
+    # on partial structured coverage. No per-member schema mixing.
+    members_present = list(member_steps.keys())
+    resolved = _resolve_reward_schema(members_present, member_rewards, metrics)
+
     rollouts: list[MemberRollout] = []
     for mid, steps in member_steps.items():
-        reward = _resolve_member_reward(mid, member_rewards, metrics)
+        reward = resolved[mid]
         rollouts.append(MemberRollout(
             example_id=example_id,
             task=env_name,

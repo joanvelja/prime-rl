@@ -445,8 +445,21 @@ class Scheduler:
                     if group_id is not None:
                         await self.drop_group(group_id)
                     continue
-                except Exception as e:
-                    self.logger.warning(f"Rollout failed: {e}")
+                except (vf.InfraError, vf.InvalidModelResponseError) as e:
+                    # Narrow retryable-transient catch: only drop groups on
+                    # the same error classes that verifiers.utils.async_utils
+                    # .maybe_retry considers retryable (InfraError includes
+                    # TunnelError/SandboxError/BrowserSandboxError;
+                    # InvalidModelResponseError includes EmptyModelResponseError).
+                    # Everything else — programming bugs (AttributeError,
+                    # KeyError), dataset corruption, OverlongPromptError,
+                    # KernelProtocolError, ContentParseError, ToolError —
+                    # propagates loud. Hiding those converts real bugs and
+                    # schema violations into silent sample loss.
+                    self.logger.warning(
+                        f"Retryable rollout error in group {group_id}: {e!r}; "
+                        "dropping group"
+                    )
                     if group_id is not None:
                         await self.drop_group(group_id)
                     continue

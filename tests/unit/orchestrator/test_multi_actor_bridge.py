@@ -508,14 +508,29 @@ def test_bridge_falls_back_to_flat_metrics():
     assert by_member["B"]["reward"] == 0.75
 
 
-def test_bridge_structured_missing_member_falls_back():
-    """If member_rewards is present but missing this member, fall back."""
+def test_bridge_partial_structured_rewards_raises():
+    """Atomic schema decision: partial structured coverage is a violation.
+
+    If member_rewards is present it MUST cover every member. A half-migrated
+    rubric that writes structured for A and relies on flat for B would
+    silently merge the two schemas on one rollout — fail loud instead.
+    """
     output = _make_rollout_output(metrics={"reward/A": 0.4, "reward/B": 0.6})
-    output["member_rewards"] = {"A": 1.0}  # B missing
+    output["member_rewards"] = {"A": 1.0}  # B missing — schema violation
+    with pytest.raises(ValueError, match="member_rewards.*missing.*B"):
+        rollout_to_member_rollouts(output, ENV_NAME)
+
+
+def test_bridge_flat_missing_member_is_none():
+    """Legacy flat path: missing flat key for a member -> reward=None.
+
+    This preserves the pre-migration 'missing reward' semantic; only the
+    structured path is strict about full coverage."""
+    output = _make_rollout_output(metrics={"reward/A": 0.4})  # B missing
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     by_member = {r["member_id"]: r for r in rollouts}
-    assert by_member["A"]["reward"] == 1.0
-    assert by_member["B"]["reward"] == 0.6
+    assert by_member["A"]["reward"] == 0.4
+    assert by_member["B"]["reward"] is None
 
 
 # ---------------------------------------------------------------------------
