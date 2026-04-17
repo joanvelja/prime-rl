@@ -719,16 +719,47 @@ def test_kernel_transcript_contains_response_content():
 
 
 def test_kernel_rejects_wrong_actor():
-    """Real kernel raises ValueError if wrong actor submits for a slot.
+    """Real kernel raises KernelProtocolError if wrong actor submits for a slot.
 
-    This test would pass silently with a mocked kernel that accepts anything.
+    KernelProtocolError is a subclass of vf.Error, so the rollout-layer
+    vf.Error boundary catches it distinctly from generic Python errors.
     """
+    from verifiers.errors import Error as VFError, KernelProtocolError
+
     schedule = StaticSchedule((
         TurnSlot(slot_id=0, actors=("A",), phase="opening"),
     ))
     ks = KernelState(slot_index=0)
-    with pytest.raises(ValueError, match="not scheduled"):
+    with pytest.raises(KernelProtocolError, match="not scheduled"):
         apply_action(ks, schedule, "B", "wrong actor", 5)
+    # vf.Error boundary must still catch it.
+    with pytest.raises(VFError):
+        apply_action(ks, schedule, "B", "wrong actor", 5)
+    # But it must NOT be a ValueError anymore — score_group needs the
+    # distinct Error branch.
+    assert not issubclass(KernelProtocolError, ValueError)
+
+
+def test_kernel_rejects_finished_episode_with_protocol_error():
+    from verifiers.errors import KernelProtocolError
+
+    schedule = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
+    ))
+    r1 = apply_action(KernelState(slot_index=0), schedule, "A", "done", 1)
+    with pytest.raises(KernelProtocolError, match="No active slot"):
+        apply_action(r1.new_state, schedule, "A", "late", 1)
+
+
+def test_kernel_rejects_duplicate_submission_with_protocol_error():
+    from verifiers.errors import KernelProtocolError
+
+    schedule = StaticSchedule((
+        TurnSlot(slot_id=0, actors=("A", "B"), phase="sim"),
+    ))
+    r1 = apply_action(KernelState(slot_index=0), schedule, "A", "first", 1)
+    with pytest.raises(KernelProtocolError, match="already submitted"):
+        apply_action(r1.new_state, schedule, "A", "again", 1)
 
 
 def test_debate_env_requires_members():
