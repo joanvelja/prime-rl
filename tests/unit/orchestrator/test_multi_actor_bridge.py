@@ -225,7 +225,7 @@ def test_rae_baselines_update_after_batch():
     compute_rae_advantages(rollouts, state)
 
     # EMA: 0.9 * 0.0 + 0.1 * 1.0 = 0.1
-    assert state.baselines[(1, "prover")] == pytest.approx(0.1)
+    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.1)
 
 
 def test_rae_second_batch_uses_updated_baseline():
@@ -242,7 +242,7 @@ def test_rae_second_batch_uses_updated_baseline():
     assert advs2 == [pytest.approx(0.9)]  # 1.0 - 0.1
 
     # Baseline after two updates: 0.9 * 0.1 + 0.1 * 1.0 = 0.19
-    assert state.baselines[(1, "prover")] == pytest.approx(0.19)
+    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.19)
 
 
 def test_rae_degenerate_group_always_positive():
@@ -253,7 +253,7 @@ def test_rae_degenerate_group_always_positive():
         advs = compute_rae_advantages([_make_rollout(reward=1.0)], state)
     # After 20 updates, baseline converges toward 1.0 but never reaches it
     assert advs[0] > 0
-    assert state.baselines[(1, "prover")] < 1.0
+    assert state.baselines[(ENV_NAME, 1, "prover")] < 1.0
 
 
 def test_rae_per_role_baselines_are_independent():
@@ -264,8 +264,8 @@ def test_rae_per_role_baselines_are_independent():
     ]
     compute_rae_advantages(rollouts, state)
 
-    assert state.baselines[(1, "prover")] == pytest.approx(0.5)
-    assert state.baselines[(1, "verifier")] == pytest.approx(0.0)
+    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
+    assert state.baselines[(ENV_NAME, 1, "verifier")] == pytest.approx(0.0)
 
 
 def test_rae_per_example_baselines_are_independent():
@@ -276,15 +276,15 @@ def test_rae_per_example_baselines_are_independent():
     ]
     compute_rae_advantages(rollouts, state)
 
-    assert state.baselines[(1, "prover")] == pytest.approx(0.5)
-    assert state.baselines[(2, "prover")] == pytest.approx(0.0)
+    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
+    assert state.baselines[(ENV_NAME, 2, "prover")] == pytest.approx(0.0)
 
 
 def test_rae_within_batch_ordering_invariant():
     """All advantages in a batch use the SAME pre-batch baselines.
     Order within the batch must not matter."""
-    state_fwd = RAEState(baselines={(1, "prover"): 0.5}, momentum=0.9)
-    state_rev = RAEState(baselines={(1, "prover"): 0.5}, momentum=0.9)
+    state_fwd = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
+    state_rev = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
 
     r1 = _make_rollout(reward=1.0, episode_id="ep-0")
     r2 = _make_rollout(reward=0.0, episode_id="ep-1")
@@ -296,8 +296,8 @@ def test_rae_within_batch_ordering_invariant():
     assert advs_rev == [pytest.approx(-0.5), pytest.approx(0.5)]
 
     # Both states should have same final baseline
-    assert state_fwd.baselines[(1, "prover")] == pytest.approx(
-        state_rev.baselines[(1, "prover")]
+    assert state_fwd.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(
+        state_rev.baselines[(ENV_NAME, 1, "prover")]
     )
 
 
@@ -309,10 +309,10 @@ def test_rae_none_reward_raises():
 
 
 def test_rae_empty_batch():
-    state = RAEState(baselines={(1, "prover"): 0.5})
+    state = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5})
     advs = compute_rae_advantages([], state)
     assert advs == []
-    assert state.baselines[(1, "prover")] == 0.5
+    assert state.baselines[(ENV_NAME, 1, "prover")] == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -478,3 +478,65 @@ def test_rollout_bridge_task_is_env_name():
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     for r in rollouts:
         assert r["task"] == ENV_NAME
+
+
+# ---------------------------------------------------------------------------
+# Tests — MultiAgentRubric structured dual-read (bridge prefers structured,
+# falls back to flat ``reward/{mid}``)
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_prefers_member_rewards_over_flat_metrics():
+    """When both present, structured member_rewards wins."""
+    output = _make_rollout_output(
+        metrics={"reward/A": 9.9, "reward/B": 9.9},  # should be ignored
+    )
+    output["member_rewards"] = {"A": 1.0, "B": 0.0}
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    by_member = {r["member_id"]: r for r in rollouts}
+    assert by_member["A"]["reward"] == 1.0
+    assert by_member["B"]["reward"] == 0.0
+
+
+def test_bridge_falls_back_to_flat_metrics():
+    """No structured key → fall back to metrics['reward/{mid}']."""
+    output = _make_rollout_output(metrics={"reward/A": 0.25, "reward/B": 0.75})
+    # No member_rewards on output → legacy path
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    by_member = {r["member_id"]: r for r in rollouts}
+    assert by_member["A"]["reward"] == 0.25
+    assert by_member["B"]["reward"] == 0.75
+
+
+def test_bridge_structured_missing_member_falls_back():
+    """If member_rewards is present but missing this member, fall back."""
+    output = _make_rollout_output(metrics={"reward/A": 0.4, "reward/B": 0.6})
+    output["member_rewards"] = {"A": 1.0}  # B missing
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    by_member = {r["member_id"]: r for r in rollouts}
+    assert by_member["A"]["reward"] == 1.0
+    assert by_member["B"]["reward"] == 0.6
+
+
+# ---------------------------------------------------------------------------
+# Tests — RAE key extended to (task, example_id, role_id)
+# ---------------------------------------------------------------------------
+
+
+def test_rae_task_key_partitions_baselines():
+    """Same (example_id, role_id) under different tasks must not share baselines."""
+    state = RAEState(baselines={}, momentum=0.5)
+    r_task_a = _make_rollout(example_id=1, role_id="prover", reward=1.0)
+    r_task_a["task"] = "env_a"
+    r_task_b = _make_rollout(example_id=1, role_id="prover", reward=0.0)
+    r_task_b["task"] = "env_b"
+    compute_rae_advantages([r_task_a, r_task_b], state)
+    assert state.baselines[("env_a", 1, "prover")] == pytest.approx(0.5)
+    assert state.baselines[("env_b", 1, "prover")] == pytest.approx(0.0)
+
+
+def test_rae_key_is_three_tuple():
+    """Baseline key is (task, example_id, role_id)."""
+    state = RAEState(baselines={}, momentum=0.9)
+    compute_rae_advantages([_make_rollout(reward=1.0)], state)
+    assert (ENV_NAME, 1, "prover") in state.baselines
