@@ -1,0 +1,17 @@
+# Override for Qwen3-30B-A3B — MoE with 3B active / 30B total.
+# LR kept at baseline 5e-6: for MoE, scaling by active params (3B) suggests
+# ≈ 5e-6 × √(8/3) ≈ 8e-6, but we stick with 5e-6 for conservatism and
+# cross-model comparability. Revisit if smoke shows underfitting.
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/qwen3_30b_a3b.toml
+
+output_dir = "outputs/sft-baseline-qwen3-30b-a3b"
+
+[model]
+name = "PrimeIntellect/Qwen3-30B-A3B-Base-Fast"
+
+[tokenizer]
+name = "tmp/tokenizers/qwen3-30b-a3b"
+
+[wandb]
+name = "qwen3-30b-a3b"

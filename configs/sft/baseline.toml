@@ -1,0 +1,111 @@
+# Rung 3 — SFT baseline for the 7-model sweep.
+#
+# Decision record: docs/plans/sft_instruct_dolci_mix.md
+# Dataset:       joanvelja/dolci-debate-sft-v1 (12 configs, 1.16M rows)
+# Hparams:       Tülu-3-derived (5e-6 LR, linear WSD, 3% warmup, 4096 seq_len, batch 128, 2 epochs)
+#                with β₂=0.95 ported from OLMo-core (see note below)
+# System prompts: tmp/system_prompts_final.json (711 quality-directing prompts, profile-weighted)
+#
+# Default base: marin-8b (Llama arch, custom impl, fastest). Override per base at launch:
+#   uv run sft @ configs/sft/baseline.toml \
+#       --model.name PrimeIntellect/Qwen3-30B-A3B-Base-Fast \
+#       --tokenizer.name tmp/tokenizers/qwen3-30b-a3b \
+#       --wandb.name qwen3-30b-a3b
+#
+# Per-base overrides available:
+#   configs/sft/overrides/olmo3.toml     — OLMo-core-flavored hparams for Olmo-3-7B
+#   configs/sft/overrides/seed_oss_36b.toml — √N-scaled-down LR for 36B dense
+#
+# Port from OLMo-core (src/scripts/train/sft/Olmo-3-7B-SFT.py:355):
+#   β₂ = 0.95 for SFT — backed by Cerebras Power Lines (arxiv:2505.13738),
+#   Surge Phenomenon (arxiv:2405.14578), Harvard CBS (arxiv:2410.21676).
+#   Tülu 3's 0.999 is the HF default, not a validated choice.
+
+max_steps = 13188             # ceil(2 * sum(effective) / batch_size) = ceil(2 * 843960 / 128)
+loss_impl = "liger_fused"     # ~40% memory saving on lm_head projection
+output_dir = "outputs/sft-baseline-marin"
+
+[model]
+name = "marin-community/marin-8b-base"
+impl = "auto"                 # prime-rl auto-selects custom (Llama) for marin
+seq_len = 4096
+attn = "flash_attention_2"
+
+[tokenizer]
+name = "tmp/tokenizers/marin" # prepared tokenizer (template + pad_token); relative to repo root
+
+[data]
+type = "sft"
+name = "joanvelja/dolci-debate-sft-v1"
+seq_len = 4096
+batch_size = 128
+micro_batch_size = 1
+pack_function = "cat"
+stopping_strategy = "first_exhausted"   # §6 weights REQUIRE first_exhausted (all_exhausted ignores probabilities in the final mix — see plan §2 amendment)
+seed = 0
+system_prompt_pool_path = "tmp/system_prompts_final.json"
+
+# 12 HF configs, probabilities proportional to §6 effective views per epoch.
+# Sum = 1.000001 (rounding). With first_exhausted, stream ends at ~843,960 samples
+# per epoch, with each subset contributing ≈ effective[i] rows.
+subsets = [
+    "wildchat",
+    "tulu-3-persona-math",
+    "dolci-precise-if",
+    "dolci-openthoughts-sci",
+    "evol-codealpaca",
+    "dolci-python-algo",
+    "flan",
+    "tulu-3-persona-algebra",
+    "openmathinstruct-2",
+    "openassistant",
+    "tablegpt",
+    "sciriff",
+]
+probabilities = [
+    0.358319,   # wildchat             raw=302406  w=1.00  eff=302406
+    0.177684,   # tulu-3-persona-math  raw=149958  w=1.00  eff=149958
+    0.162132,   # dolci-precise-if     raw=136833  w=1.00  eff=136833
+    0.117622,   # dolci-openthoughts-sci raw=99268 w=1.00  eff=99268
+    0.044487,   # evol-codealpaca      raw=107270  w=0.35  eff=37545
+    0.044160,   # dolci-python-algo    raw=186345  w=0.20  eff=37269
+    0.037315,   # flan                 raw=89981   w=0.35  eff=31493
+    0.023696,   # tulu-3-persona-algebra raw=19999 w=1.00  eff=19999
+    0.014811,   # openmathinstruct-2   raw=50000   w=0.25  eff=12500
+    0.008451,   # openassistant        raw=7132    w=1.00  eff=7132
+    0.005924,   # tablegpt             raw=5000    w=1.00  eff=5000
+    0.005400,   # sciriff              raw=4557    w=1.00  eff=4557
+]
+
+[data.loss_mask]
+assistant = true              # only assistant tokens contribute to loss (default; listed for explicitness)
+
+[optim]
+type = "adamw"
+lr = 5e-6                     # Tülu 3's verified LR (v3.9 YAML: "best LR so far") for 8B dense
+weight_decay = 0.0            # Tülu 3 / OLMo-core SFT (both set 0 for SFT despite 0.1 in pretraining)
+betas1 = 0.9
+betas2 = 0.95                 # ported from OLMo-core (they use (0.9, 0.95) for SFT; HF default 0.999 is untuned)
+max_norm = 1.0
+
+[scheduler]
+type = "linear"               # prime-rl's WSD scheduler: warmup → (optional constant) → linear decay
+warmup_steps = 396            # 3% of max_steps (Tülu 3 convention: warmup_ratio=0.03)
+decay_steps = 12792           # max_steps - warmup_steps — no constant plateau; pure warmup → decay
+min_lr = 0.0
+
+[ckpt]
+interval = 500                # save training state every 500 steps
+
+[ckpt.weights]
+save_sharded = true
+save_format = "safetensors"
+
+[deployment]
+type = "single_node"
+gpus_per_node = 8
+num_gpus = 8                  # 1 node × 8 GPUs → effective batch 128 via grad_accum 16
+
+[wandb]
+project = "prime-rl-sft-baseline"
+name = "marin"                # override per base via CLI: --wandb.name <slug>

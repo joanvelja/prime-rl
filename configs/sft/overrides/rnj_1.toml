@@ -1,0 +1,15 @@
+# Override for EssentialAI/rnj-1 — 8B dense, Gemma3Text arch, Muon-pretrained.
+# rnj-1 ships chat_template on base; our template was copied verbatim at Rung 2.
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/rnj_1.toml
+
+output_dir = "outputs/sft-baseline-rnj-1"
+
+[model]
+name = "EssentialAI/rnj-1"
+
+[tokenizer]
+name = "tmp/tokenizers/rnj-1"
+
+[wandb]
+name = "rnj-1"
