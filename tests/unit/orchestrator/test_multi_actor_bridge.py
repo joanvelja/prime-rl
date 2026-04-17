@@ -132,18 +132,26 @@ def test_multiple_episodes_flatten_correctly():
     ]
 
 
-def test_string_example_id_passes_through():
-    """EpisodeResult.base_example_id is int | str — bridge must not coerce."""
+def test_str_example_id_rejected_until_dataset_and_buffer_support_it():
+    """Bridge fails loud on str id.
+
+    EpisodeResult.base_example_id is typed int | str upstream, but
+    environment._ensure_example_id coerces dataset rows to int and
+    buffer.Buffer keys its example store by int. Widening the bridge
+    alone would push the failure non-locally into buffer-insert with a
+    confusing stack trace. Reject here until all three layers are
+    widened together.
+    """
     episode = _make_episode()
     episode.base_example_id = "string-id"
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    assert all(r["example_id"] == "string-id" for r in rollouts)
+    with pytest.raises(TypeError, match="base_example_id must be int"):
+        episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
 
 
 def test_none_example_id_raises():
     episode = _make_episode()
     episode.base_example_id = None
-    with pytest.raises(TypeError, match="must not be None"):
+    with pytest.raises(TypeError, match="must be int"):
         episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
 
 
