@@ -7,10 +7,14 @@ Two entry points:
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from typing import Any, TypedDict
 
 from verifiers.types import EpisodeResult, MemberResult, TrajectoryStep
+
+_LOGGER = logging.getLogger(__name__)
+_FLAT_METRICS_WARNED = False
 
 
 class MemberRollout(TypedDict):
@@ -106,6 +110,34 @@ def _member_to_rollout(
     )
 
 
+def _resolve_member_reward(
+    member_id: str,
+    member_rewards: dict[str, float] | None,
+    metrics: dict[str, Any],
+) -> float | None:
+    """Dual-read per-member reward.
+
+    Prefers the structured ``state["member_rewards"][mid]`` contract
+    (MultiAgentRubric). Falls back to the legacy flat key
+    ``metrics["reward/{mid}"]`` with a one-time deprecation log per
+    process. Returns ``None`` when neither is present.
+    """
+    global _FLAT_METRICS_WARNED
+    if member_rewards is not None and member_id in member_rewards:
+        return member_rewards[member_id]
+    fallback = metrics.get(f"reward/{member_id}")
+    if fallback is not None and not _FLAT_METRICS_WARNED:
+        _LOGGER.warning(
+            "Bridge read per-member reward from legacy flat metrics "
+            "key 'reward/%s'. Upgrade the rubric to MultiAgentRubric "
+            "and populate state['member_rewards'] — flat fallback will "
+            "be removed.",
+            member_id,
+        )
+        _FLAT_METRICS_WARNED = True
+    return fallback
+
+
 # ---------------------------------------------------------------------------
 # RolloutOutput bridge (DebateEnv — tagged merged trajectory)
 # ---------------------------------------------------------------------------
@@ -141,6 +173,7 @@ def rollout_to_member_rollouts(
     example_id = output["example_id"]
     episode_id = output.get("trajectory_id", "")
     metrics = output.get("metrics", {})
+    member_rewards = output.get("member_rewards")
 
     # Group steps by member_id, preserving temporal order
     member_steps: dict[str, list[TrajectoryStep]] = defaultdict(list)
@@ -159,7 +192,7 @@ def rollout_to_member_rollouts(
 
     rollouts: list[MemberRollout] = []
     for mid, steps in member_steps.items():
-        reward = metrics.get(f"reward/{mid}")
+        reward = _resolve_member_reward(mid, member_rewards, metrics)
         rollouts.append(MemberRollout(
             example_id=example_id,
             task=env_name,
