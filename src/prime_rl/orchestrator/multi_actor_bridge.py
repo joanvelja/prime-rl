@@ -23,15 +23,11 @@ class MemberRollout(TypedDict):
     Everything else is for logging/metadata.
     """
 
-    # Training-path fields (read by pretokenize → interleave → TrainingSample)
-    # NOTE: int-only. EpisodeResult.base_example_id upstream is int | str,
-    # but both the dataset normalization in
-    # verifiers.envs.environment::Environment._ensure_example_id and the
-    # int-keyed example store in prime_rl.orchestrator.buffer.Buffer
-    # require int. Widening here would silently break non-locally on the
-    # first str id. Full int | str propagation is tracked as a follow-up
-    # task (dataset + buffer + bridge together).
-    example_id: int
+    # Training-path fields (read by pretokenize → interleave → TrainingSample).
+    # example_id mirrors EpisodeResult.base_example_id; dataset normalization
+    # (verifiers.envs.environment._ensure_example_id) and the buffer example
+    # store (prime_rl.orchestrator.buffer.Buffer) both accept int | str.
+    example_id: int | str
     task: str
     trajectory: list[TrajectoryStep]
     sampling_args: dict[str, Any]
@@ -71,19 +67,12 @@ def episodes_to_member_rollouts(
     return rollouts
 
 
-def _validated_example_id(episode: EpisodeResult) -> int:
-    """Enforce int example_id — dataset normalization and buffer both require int.
-
-    EpisodeResult.base_example_id is typed int | str upstream, but
-    downstream keying in the buffer uses int. Until the dataset/buffer
-    layers are widened, the bridge is the right place to fail loud on
-    a str id rather than let it propagate and blow up at buffer-insert
-    time with a confusing stack trace.
-    """
+def _validated_example_id(episode: EpisodeResult) -> int | str:
+    """Accept int or str example_id. Anything else raises."""
     raw = episode.base_example_id
-    if not isinstance(raw, int):
+    if not isinstance(raw, (int, str)):
         raise TypeError(
-            f"base_example_id must be int (buffer keys by int), got "
+            f"base_example_id must be int or str, got "
             f"{type(raw).__name__}: {raw!r}"
         )
     return raw
@@ -91,7 +80,7 @@ def _validated_example_id(episode: EpisodeResult) -> int:
 
 def _member_to_rollout(
     member: MemberResult,
-    example_id: int,
+    example_id: int | str,
     episode_id: str,
     env_name: str,
     temperature: float,

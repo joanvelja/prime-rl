@@ -39,12 +39,14 @@ class Buffer:
         assert "prompt" in self.dataset.column_names, "The dataset must contain a `prompt` column."
         assert "task" in self.dataset.column_names, "The dataset must contain a `task` column."
         assert len(self.dataset) > 0, "The dataset must contain at least one example."
-        assert isinstance(self.dataset["example_id"][0], int), "The `example_id` column must be of type int."
+        assert isinstance(self.dataset["example_id"][0], (int, str)), (
+            "The `example_id` column must be of type int or str."
+        )
         assert len(set(self.dataset["example_id"])) == len(self.dataset), "The `example_id` column must be unique."
         assert set(self.dataset["task"]) == set(self.env_names), "The `task` column must contain all environment names."
 
         # Initialize example buffer (env_name -> (example_id -> example))
-        self.example_buffer: dict[str, dict[int, dict]] = defaultdict(dict)
+        self.example_buffer: dict[str, dict[int | str, dict]] = defaultdict(dict)
         for example in map(partial(cast, dict), self.dataset):
             self.example_buffer[example["task"]][example["example_id"]] = example
         assert len(self.example_buffer) == len(self.env_names)
