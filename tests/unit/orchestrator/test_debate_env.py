@@ -43,7 +43,7 @@ from verifiers.envs.debate_env import (
     load_environment,
 )
 from verifiers.envs.debate_rubric import DebateRubric
-from verifiers.envs.multi_actor_kernel import (
+from verifiers.envs.multi_agent_kernel import (
     KernelState,
     StaticSchedule,
     TurnSlot,
@@ -212,10 +212,10 @@ def _make_response(content: str, token_ids: list[int] | None = None) -> Response
 
 
 TWO_TURN_SLOTS = (
-    TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-    TurnSlot(slot_id=1, actors=("B",), phase="opening"),
-    TurnSlot(slot_id=2, actors=("A",), phase="rebuttal"),
-    TurnSlot(slot_id=3, actors=("B",), phase="rebuttal"),
+    TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+    TurnSlot(slot_id=1, agents=("B",), phase="opening"),
+    TurnSlot(slot_id=2, agents=("A",), phase="rebuttal"),
+    TurnSlot(slot_id=3, agents=("B",), phase="rebuttal"),
 )
 
 import jinja2
@@ -251,29 +251,29 @@ DEBATE_PROMPTS = DebatePrompts(
     source_ref="test",
 )
 
-ROLE_FOR_ACTOR = {"A": "prover", "B": "verifier"}
+ROLE_FOR_AGENT = {"A": "prover", "B": "verifier"}
 
 
 def _make_env(
     responses: list[Response],
     schedule_slots: tuple[TurnSlot, ...] = TWO_TURN_SLOTS,
     prompts: DebatePrompts = DEBATE_PROMPTS,
-    role_for_actor: dict[str, str] | None = None,
+    role_for_agent: dict[str, str] | None = None,
     truth_role: str = "prover",
     members: list[str] | None = None,
-    actor_overrides: dict | None = None,
+    agent_overrides: dict | None = None,
 ) -> tuple[DebateEnv, FakeClient]:
     members = members or ["A", "B"]
-    if role_for_actor is None:
-        role_for_actor = ROLE_FOR_ACTOR
+    if role_for_agent is None:
+        role_for_agent = ROLE_FOR_AGENT
     rubric = DebateRubric(truth_role=truth_role, members=members, prompts=prompts)
     client = FakeClient(responses)
     env = DebateEnv(
         schedule=StaticSchedule(schedule_slots),
         prompts=prompts,
         members=members,
-        role_for_actor=role_for_actor,
-        actor_overrides=actor_overrides,
+        role_for_agent=role_for_agent,
+        agent_overrides=agent_overrides,
         rubric=rubric,
         dataset=lambda: None,
     )
@@ -401,26 +401,26 @@ def test_debate_complete_true_when_all_slots_done():
 
 
 # ---------------------------------------------------------------------------
-# 3. Actor resolver
+# 3. Agent resolver
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_actor_defaults_to_none_none():
-    """Self-play mode: no overrides -> (None, None) for all actors."""
+def test_resolve_agent_defaults_to_none_none():
+    """Self-play mode: no overrides -> (None, None) for all agents."""
     env, _ = _make_env([])
-    assert env.resolve_actor("A") == (None, None)
-    assert env.resolve_actor("B") == (None, None)
+    assert env.resolve_agent("A") == (None, None)
+    assert env.resolve_agent("B") == (None, None)
 
 
-def test_resolve_actor_with_overrides():
+def test_resolve_agent_with_overrides():
     """Mode 3: fixed opponent gets a separate client/model."""
     opp_client = FakeClient([])
     env, _ = _make_env(
         [],
-        actor_overrides={"B": (opp_client, "opponent-model")},
+        agent_overrides={"B": (opp_client, "opponent-model")},
     )
-    assert env.resolve_actor("A") == (None, None)
-    client_b, model_b = env.resolve_actor("B")
+    assert env.resolve_agent("A") == (None, None)
+    client_b, model_b = env.resolve_agent("B")
     assert client_b is opp_client
     assert model_b == "opponent-model"
 
@@ -551,10 +551,10 @@ def test_render_completion_excludes_per_turn_prompts():
 # ---------------------------------------------------------------------------
 
 
-def test_simultaneous_slot_produces_responses_for_all_actors():
-    """Simultaneous slot with both actors -> 2 steps added at once."""
+def test_simultaneous_slot_produces_responses_for_all_agents():
+    """Simultaneous slot with both agents -> 2 steps added at once."""
     sim_slots = (
-        TurnSlot(slot_id=0, actors=("A", "B"), phase="simultaneous"),
+        TurnSlot(slot_id=0, agents=("A", "B"), phase="simultaneous"),
     )
     responses = [
         _make_response("A simultaneous"),
@@ -682,7 +682,7 @@ def test_prompt_includes_system_and_question():
 
 
 def test_prompt_includes_opponent_utterances_in_rebuttal():
-    """By rebuttal phase, actor should see opponent's previous utterance."""
+    """By rebuttal phase, agent should see opponent's previous utterance."""
     responses = [
         _make_response("A opens with argument"),
         _make_response("B opens with counter"),
@@ -747,8 +747,8 @@ def test_kernel_transcript_contains_response_content():
         _make_response("Beta counterpoint"),
     ]
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-        TurnSlot(slot_id=1, actors=("B",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+        TurnSlot(slot_id=1, agents=("B",), phase="opening"),
     )
     env, client = _make_env(responses, schedule_slots=slots)
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
@@ -764,20 +764,20 @@ def test_kernel_transcript_contains_response_content():
     assert kernel.transcript[1].phase == "opening"
 
 
-def test_kernel_rejects_wrong_actor():
+def test_kernel_rejects_wrong_agent():
     """apply_action raises KernelProtocolError (a vf.Error subclass) when
-    a non-scheduled actor submits. The rollout-layer vf.Error boundary
+    a non-scheduled agent submits. The rollout-layer vf.Error boundary
     catches it distinctly from generic Python errors.
     """
     schedule = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
     ))
     ks = KernelState(slot_index=0)
     with pytest.raises(KernelProtocolError, match="not scheduled"):
-        apply_action(ks, schedule, "B", "wrong actor", 5)
+        apply_action(ks, schedule, "B", "wrong agent", 5)
     # vf.Error boundary must still catch it.
     with pytest.raises(VFError):
-        apply_action(ks, schedule, "B", "wrong actor", 5)
+        apply_action(ks, schedule, "B", "wrong agent", 5)
     # But it must NOT be a ValueError anymore — score_group needs the
     # distinct Error branch.
     assert not issubclass(KernelProtocolError, ValueError)
@@ -785,7 +785,7 @@ def test_kernel_rejects_wrong_actor():
 
 def test_kernel_rejects_finished_episode_with_protocol_error():
     schedule = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
     ))
     r1 = apply_action(KernelState(slot_index=0), schedule, "A", "done", 1)
     with pytest.raises(KernelProtocolError, match="No active slot"):
@@ -794,23 +794,23 @@ def test_kernel_rejects_finished_episode_with_protocol_error():
 
 def test_kernel_rejects_duplicate_submission_with_protocol_error():
     schedule = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A", "B"), phase="sim"),
+        TurnSlot(slot_id=0, agents=("A", "B"), phase="sim"),
     ))
     r1 = apply_action(KernelState(slot_index=0), schedule, "A", "first", 1)
     with pytest.raises(KernelProtocolError, match="already submitted"):
         apply_action(r1.new_state, schedule, "A", "again", 1)
 
 
-def _two_actor_schedule() -> StaticSchedule:
+def _two_agent_schedule() -> StaticSchedule:
     return StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A",), phase="p"),
-        TurnSlot(slot_id=1, actors=("B",), phase="p"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p"),
+        TurnSlot(slot_id=1, agents=("B",), phase="p"),
     ))
 
 
 def test_debate_env_requires_members():
-    """DebateEnv needs explicit `members` list — replaces fragile _count_actors."""
-    schedule = _two_actor_schedule()
+    """DebateEnv needs explicit `members` list — replaces fragile _count_agents."""
+    schedule = _two_agent_schedule()
     rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
     with pytest.raises(ValueError, match="non-empty members"):
         DebateEnv(
@@ -842,7 +842,7 @@ def test_debate_env_members_must_match_rubric_members():
     """Cross-check 1: silent drift between env.members and rubric.members
     would desync round_index (env) from reward attribution (rubric).
     """
-    schedule = _two_actor_schedule()
+    schedule = _two_agent_schedule()
     rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
 
     # Different set of members entirely.
@@ -858,8 +858,8 @@ def test_debate_env_members_must_match_rubric_members():
     # Same set, different order — still a failure (order matters for
     # any downstream index-based attribution).
     schedule_reversed = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("B",), phase="p"),
-        TurnSlot(slot_id=1, actors=("A",), phase="p"),
+        TurnSlot(slot_id=0, agents=("B",), phase="p"),
+        TurnSlot(slot_id=1, agents=("A",), phase="p"),
     ))
     with pytest.raises(ValueError, match="members != rubric.members"):
         DebateEnv(
@@ -871,15 +871,15 @@ def test_debate_env_members_must_match_rubric_members():
         )
 
 
-def test_debate_env_members_must_match_static_schedule_actors():
-    """Cross-check 2: StaticSchedule's unique slot actors must equal members."""
+def test_debate_env_members_must_match_static_schedule_agents():
+    """Cross-check 2: StaticSchedule's unique slot agents must equal members."""
     rubric = DebateRubric(truth_role="prover", members=["A", "B"], prompts=DEBATE_PROMPTS)
 
     # Member declared but never appears in schedule.
     schedule_missing_b = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A",), phase="p"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p"),
     ))
-    with pytest.raises(ValueError, match="unique actors in StaticSchedule"):
+    with pytest.raises(ValueError, match="unique agents in StaticSchedule"):
         DebateEnv(
             schedule=schedule_missing_b,
             prompts=DEBATE_PROMPTS,
@@ -890,11 +890,11 @@ def test_debate_env_members_must_match_static_schedule_actors():
 
     # Actor appears in schedule but not declared as member.
     schedule_with_c = StaticSchedule((
-        TurnSlot(slot_id=0, actors=("A",), phase="p"),
-        TurnSlot(slot_id=1, actors=("B",), phase="p"),
-        TurnSlot(slot_id=2, actors=("C",), phase="p"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p"),
+        TurnSlot(slot_id=1, agents=("B",), phase="p"),
+        TurnSlot(slot_id=2, agents=("C",), phase="p"),
     ))
-    with pytest.raises(ValueError, match="unique actors in StaticSchedule"):
+    with pytest.raises(ValueError, match="unique agents in StaticSchedule"):
         DebateEnv(
             schedule=schedule_with_c,
             prompts=DEBATE_PROMPTS,
@@ -906,7 +906,7 @@ def test_debate_env_members_must_match_static_schedule_actors():
 
 def test_debate_env_skips_schedule_cross_check_for_dynamic_program():
     """Dynamic SlotProgram implementations are exempt from cross-check 2
-    (actor set may be data-dependent).
+    (agent set may be data-dependent).
     """
     class DynamicProgram:
         def current_slot(self, state):
@@ -957,7 +957,7 @@ def test_format_history_strips_thinking_for_opponents_private():
 
     # Simulate a kernel state with one utterance containing thinking
     ks = KernelState(slot_index=1)
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     ks = KernelState(
         slot_index=1,
@@ -986,7 +986,7 @@ def test_format_history_preserves_own_thinking():
     prompts = _make_think_prompts({"prover": "private"})
     env, _ = _make_env([], prompts=prompts)
 
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     ks = KernelState(
         slot_index=1,
@@ -1014,7 +1014,7 @@ def test_format_history_open_visibility_preserves_for_all():
     prompts = _make_think_prompts({"prover": "open", "verifier": "open"})
     env, _ = _make_env([], prompts=prompts)
 
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     ks = KernelState(
         slot_index=1,
@@ -1043,9 +1043,9 @@ def test_format_history_attributes_both_debaters_distinctly():
 
     Wires a wrap template that uses {{ role_id | upper }} (matching the
     production packs), renders a 2-speaker transcript from a third-party
-    viewpoint (actor "J" / role "judge"), and asserts that BOTH roles
+    viewpoint (agent "J" / role "judge"), and asserts that BOTH roles
     appear as distinct labels in the rendered history."""
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     labeled = DebatePrompts(
         system={
@@ -1076,12 +1076,12 @@ def test_format_history_attributes_both_debaters_distinctly():
     env, _ = _make_env(
         [],
         prompts=labeled,
-        role_for_actor={"A": "prover", "B": "verifier", "J": "judge"},
+        role_for_agent={"A": "prover", "B": "verifier", "J": "judge"},
         members=["A", "B", "J"],
         schedule_slots=(
-            TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-            TurnSlot(slot_id=1, actors=("B",), phase="opening"),
-            TurnSlot(slot_id=2, actors=("J",), phase="final"),
+            TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+            TurnSlot(slot_id=1, agents=("B",), phase="opening"),
+            TurnSlot(slot_id=2, agents=("J",), phase="final"),
         ),
     )
 
@@ -1132,7 +1132,7 @@ def test_format_history_fallback_prefixes_role_id_when_no_template():
     """F1 fallback: a pack with no opponent_wrap template still attributes
     the speaker via a [role_id] prefix. Bare passthrough (the pre-fix
     behavior) would leave judges and peer debaters guessing from order."""
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     # DEBATE_PROMPTS is the fixture used across most env tests — it has
     # opponent_wrap=None, so this exercises the fallback branch.
@@ -1167,7 +1167,7 @@ def test_parse_channels_contract():
     the legacy strip_think/redact_think pair — under the channel-split
     architecture, unclosed openers are no longer silently tolerated.
     """
-    from verifiers.envs.multi_actor_kernel import parse_channels
+    from verifiers.envs.multi_agent_kernel import parse_channels
     from verifiers.errors import KernelProtocolError
 
     # Happy path: one closed block.
@@ -1217,7 +1217,7 @@ def test_format_history_private_visibility_uses_public_channel():
     with private/disabled visibility, so leakage is structurally
     impossible — no aggressive EOF-strip heuristic required.
     """
-    from verifiers.envs.multi_actor_kernel import Utterance
+    from verifiers.envs.multi_agent_kernel import Utterance
 
     prompts = _make_think_prompts({"prover": "private", "verifier": "private"})
     env, _ = _make_env([], prompts=prompts)
@@ -1256,17 +1256,17 @@ def test_apply_action_quarantines_malformed_think_markup():
     ``private_channel=None``, and a ``parse_error`` flag; the rollout
     keeps going so other members' valid commits still score.
 
-    Kernel-state violations (wrong actor, duplicate, finished episode)
+    Kernel-state violations (wrong agent, duplicate, finished episode)
     must still raise — that's actual protocol corruption, not a
     formatting slip by one model.
     """
-    from verifiers.envs.multi_actor_kernel import KernelState as _KS
-    from verifiers.envs.multi_actor_kernel import StaticSchedule as _Sch
-    from verifiers.envs.multi_actor_kernel import TurnSlot as _TS
-    from verifiers.envs.multi_actor_kernel import apply_action as _ap
+    from verifiers.envs.multi_agent_kernel import KernelState as _KS
+    from verifiers.envs.multi_agent_kernel import StaticSchedule as _Sch
+    from verifiers.envs.multi_agent_kernel import TurnSlot as _TS
+    from verifiers.envs.multi_agent_kernel import apply_action as _ap
     from verifiers.errors import ContentParseError, KernelProtocolError
 
-    schedule = _Sch((_TS(slot_id=0, actors=("A",), phase="p"),))
+    schedule = _Sch((_TS(slot_id=0, agents=("A",), phase="p"),))
 
     # Quarantine path — benign prose with a stray opener.
     result = _ap(
@@ -1284,7 +1284,7 @@ def test_apply_action_quarantines_malformed_think_markup():
 
     # Kernel-state violation still raises.
     with pytest.raises(KernelProtocolError) as exc_info:
-        _ap(_KS(slot_index=0), schedule, "B", "wrong actor", 1, think_tag="thinking")
+        _ap(_KS(slot_index=0), schedule, "B", "wrong agent", 1, think_tag="thinking")
     assert not isinstance(exc_info.value, ContentParseError)
 
 
@@ -1296,7 +1296,7 @@ def test_parse_channels_strips_native_think_with_custom_tag():
     model that emits native reasoning-model think blocks would leak the
     full block verbatim into the opponent view.
     """
-    from verifiers.envs.multi_actor_kernel import parse_channels
+    from verifiers.envs.multi_agent_kernel import parse_channels
 
     # Native think under a custom-tag pack: content stripped, NOT surfaced
     # as private_channel (third-party artifact, not author-intended).
@@ -1333,14 +1333,14 @@ def test_rollout_survives_benign_prose_with_bracket_words():
     public_channel for the offender and the schedule advances so peers
     still get to speak and the rubric still scores them.
     """
-    from verifiers.envs.multi_actor_kernel import KernelState as _KS
-    from verifiers.envs.multi_actor_kernel import StaticSchedule as _Sch
-    from verifiers.envs.multi_actor_kernel import TurnSlot as _TS
-    from verifiers.envs.multi_actor_kernel import apply_action as _ap
+    from verifiers.envs.multi_agent_kernel import KernelState as _KS
+    from verifiers.envs.multi_agent_kernel import StaticSchedule as _Sch
+    from verifiers.envs.multi_agent_kernel import TurnSlot as _TS
+    from verifiers.envs.multi_agent_kernel import apply_action as _ap
 
     schedule = _Sch((
-        _TS(slot_id=0, actors=("A",), phase="opening"),
-        _TS(slot_id=1, actors=("B",), phase="opening"),
+        _TS(slot_id=0, agents=("A",), phase="opening"),
+        _TS(slot_id=1, agents=("B",), phase="opening"),
     ))
 
     ks = _KS(slot_index=0)
@@ -1401,8 +1401,8 @@ def test_extract_fields_populates_extras():
         _make_response("B disagrees"),
     ]
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-        TurnSlot(slot_id=1, actors=("B",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+        TurnSlot(slot_id=1, agents=("B",), phase="opening"),
     )
     env, client = _make_env(responses, schedule_slots=slots, prompts=prompts)
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
@@ -1434,8 +1434,8 @@ def test_extract_fields_duplicate_tag_is_per_step_failure():
         _make_response("B opens"),
     ]
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-        TurnSlot(slot_id=1, actors=("B",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+        TurnSlot(slot_id=1, agents=("B",), phase="opening"),
     )
     env, client = _make_env(responses, schedule_slots=slots, prompts=prompts)
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
@@ -1443,7 +1443,7 @@ def test_extract_fields_duplicate_tag_is_per_step_failure():
     # No terminal error — a per-step parse failure must not kill the rollout.
     assert state.get("error") is None
 
-    # Both actors' steps must be in the trajectory — the failed step is still
+    # Both agents' steps must be in the trajectory — the failed step is still
     # appended so the rubric sees it as the LATEST step for member A.
     trajectory = state["trajectory"]
     assert len(trajectory) == 2
@@ -1476,8 +1476,8 @@ def test_extract_fields_strips_thinking_before_parsing():
         _make_response("B says"),
     ]
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="opening"),
-        TurnSlot(slot_id=1, actors=("B",), phase="opening"),
+        TurnSlot(slot_id=0, agents=("A",), phase="opening"),
+        TurnSlot(slot_id=1, agents=("B",), phase="opening"),
     )
     env, client = _make_env(responses, schedule_slots=slots, prompts=prompts_with_think)
     state = _run(env.rollout(_rollout_input(), client, "test-model"))
@@ -1489,7 +1489,7 @@ def test_extract_fields_strips_thinking_before_parsing():
 def test_round_index_is_round_not_slot():
     """round_index should count debate rounds, not raw slot indices.
 
-    A 2-round debate with 2 actors has 4 slots but only 2 rounds.
+    A 2-round debate with 2 agents has 4 slots but only 2 rounds.
     Slots 0,1 -> round 0; slots 2,3 -> round 1.
 
     round_index is rendered via the USER (instruction) block, not system —
@@ -2311,8 +2311,8 @@ def test_flip_empty_trajectory_emits_zero_commits():
 
 
 _SCHEDULE_SLOTS = [
-    {"slot_id": 0, "actors": ["A", "B"], "phase": "propose"},
-    {"slot_id": 1, "actors": ["J"], "phase": "final"},
+    {"slot_id": 0, "agents": ["A", "B"], "phase": "propose"},
+    {"slot_id": 1, "agents": ["J"], "phase": "final"},
 ]
 
 
@@ -2384,7 +2384,7 @@ def test_load_environment_raises_when_open_ended_pack_has_no_judge_client():
             members=["A", "B", "J"],
             truth_role="debater_a",
             prompts=_open_ended_prompts(),
-            role_for_actor={"A": "debater_a", "B": "debater_b", "J": "judge"},
+            role_for_agent={"A": "debater_a", "B": "debater_b", "J": "judge"},
             eval_dataset=lambda: None,
         )
 
@@ -2399,7 +2399,7 @@ def test_load_environment_accepts_selfplay_pack_without_judge_client():
         members=["A", "B", "J"],
         truth_role="debater_a",
         prompts_ref="selfplay",
-        role_for_actor={"A": "debater_a", "B": "debater_b", "J": "judge"},
+        role_for_agent={"A": "debater_a", "B": "debater_b", "J": "judge"},
         eval_dataset=lambda: None,
     )
     assert env.rubric.judge_client is None
@@ -2413,7 +2413,7 @@ def test_load_environment_ok_when_pack_has_no_judge_templates():
         members=["A", "B", "J"],
         truth_role="debater_a",
         prompts=_judgeless_prompts(),
-        role_for_actor={"A": "debater_a", "B": "debater_b", "J": "judge"},
+        role_for_agent={"A": "debater_a", "B": "debater_b", "J": "judge"},
         eval_dataset=lambda: None,
     )
     assert env.rubric.judge_client is None
@@ -2429,7 +2429,7 @@ def test_load_environment_ok_when_judge_client_provided():
         members=["A", "B", "J"],
         truth_role="debater_a",
         prompts_ref="selfplay",
-        role_for_actor={"A": "debater_a", "B": "debater_b", "J": "judge"},
+        role_for_agent={"A": "debater_a", "B": "debater_b", "J": "judge"},
         judge_client=client,
         judge_model="fake-model",
         eval_dataset=lambda: None,
@@ -3124,11 +3124,11 @@ def test_debate_env_end_to_end_real_types_rollout():
     """
     selfplay = resolve_prompts("selfplay")
     slots = (
-        TurnSlot(slot_id=0, actors=("A", "B"), phase="propose"),
-        TurnSlot(slot_id=1, actors=("J",), phase="final"),
+        TurnSlot(slot_id=0, agents=("A", "B"), phase="propose"),
+        TurnSlot(slot_id=1, agents=("J",), phase="final"),
     )
     members = ["A", "B", "J"]
-    role_for_actor = {"A": "debater_a", "B": "debater_b", "J": "judge"}
+    role_for_agent = {"A": "debater_a", "B": "debater_b", "J": "judge"}
     rubric = DebateRubric(
         truth_role="debater_a",
         members=members,
@@ -3140,7 +3140,7 @@ def test_debate_env_end_to_end_real_types_rollout():
         schedule=StaticSchedule(slots),
         prompts=selfplay,
         members=members,
-        role_for_actor=role_for_actor,
+        role_for_agent=role_for_agent,
         rubric=rubric,
         dataset=lambda: None,
     )

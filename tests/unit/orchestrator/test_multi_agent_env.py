@@ -1,10 +1,10 @@
-"""Unit tests for MultiAgentEnv: generic multi-actor rollout loop.
+"""Unit tests for MultiAgentEnv: generic multi-agent rollout loop.
 
 System boundary is the Client (faked). The kernel, schedule, and
 rollout loop are exercised for real. Subclass the abstract base with a
 minimal EchoEnv that just echoes member_id + slot.phase — enough to
 verify ordering, atomic commit, monotonic prompt invariant, stop
-conditions, actor_override routing, and lineage-scoped prefix cache.
+conditions, agent_override routing, and lineage-scoped prefix cache.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from verifiers.clients import Client as _VFClient
 from verifiers.clients.openai_chat_completions_token_client import (
     OpenAIChatCompletionsTokenClient,
 )
-from verifiers.envs.multi_actor_kernel import (
+from verifiers.envs.multi_agent_kernel import (
     StaticSchedule,
     TurnSlot,
 )
@@ -157,16 +157,16 @@ def _make_env(
     responses,
     slots=None,
     members=("A", "B"),
-    actor_overrides=None,
+    agent_overrides=None,
 ):
     slots = slots or (
-        TurnSlot(slot_id=0, actors=("A",), phase="p1"),
-        TurnSlot(slot_id=1, actors=("B",), phase="p1"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p1"),
+        TurnSlot(slot_id=1, agents=("B",), phase="p1"),
     )
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=list(members),
-        actor_overrides=actor_overrides,
+        agent_overrides=agent_overrides,
         rubric=EchoRubric(),
         dataset=lambda: None,
     )
@@ -211,12 +211,12 @@ def test_init_rejects_duplicate_members():
         )
 
 
-def test_init_rejects_stray_actor_overrides():
+def test_init_rejects_stray_agent_overrides():
     with pytest.raises(ValueError, match="not in members"):
         EchoEnv(
             schedule=StaticSchedule(()),
             members=["A", "B"],
-            actor_overrides={"C": (None, "other-model")},
+            agent_overrides={"C": (None, "other-model")},
             rubric=EchoRubric(),
             dataset=lambda: None,
         )
@@ -243,7 +243,7 @@ def test_rollout_sequential_tags_trajectory_in_order():
 
 
 def test_error_stop_fires_before_exhausted():
-    slots = (TurnSlot(slot_id=0, actors=("A",), phase="p"),)
+    slots = (TurnSlot(slot_id=0, agents=("A",), phase="p"),)
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A"],
@@ -257,7 +257,7 @@ def test_error_stop_fires_before_exhausted():
 
 
 def test_prompt_too_long_sets_truncated():
-    slots = (TurnSlot(slot_id=0, actors=("A",), phase="p"),)
+    slots = (TurnSlot(slot_id=0, agents=("A",), phase="p"),)
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A"],
@@ -283,7 +283,7 @@ def test_schedule_exhausted_fires_at_end():
 
 
 def test_simultaneous_slot_commits_both_atomically():
-    slots = (TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)
+    slots = (TurnSlot(slot_id=0, agents=("A", "B"), phase="p"),)
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A", "B"],
@@ -300,8 +300,8 @@ def test_simultaneous_slot_commits_both_atomically():
 
 
 def test_simultaneous_slot_rolls_back_on_error():
-    """If any actor in a simultaneous slot raises, NO partial commits land."""
-    slots = (TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)
+    """If any agent in a simultaneous slot raises, NO partial commits land."""
+    slots = (TurnSlot(slot_id=0, agents=("A", "B"), phase="p"),)
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A", "B"],
@@ -329,14 +329,14 @@ def test_simultaneous_slot_rolls_back_on_error():
 
 
 def test_simultaneous_slot_cancels_peer_on_first_failure():
-    """TaskGroup must cancel the surviving actor when one raises.
+    """TaskGroup must cancel the surviving agent when one raises.
 
-    The slow actor sleeps past the fast actor's failure; if it completes
+    The slow agent sleeps past the fast agent's failure; if it completes
     anyway, both the error semantics AND the shared usage tracker are
     compromised (late completion leaks accounting). With TaskGroup the
-    slow actor is cancelled before it can reach the completion line.
+    slow agent is cancelled before it can reach the completion line.
     """
-    slots = (TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)
+    slots = (TurnSlot(slot_id=0, agents=("A", "B"), phase="p"),)
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A", "B"],
@@ -362,7 +362,7 @@ def test_simultaneous_slot_cancels_peer_on_first_failure():
     assert state["stop_condition"] == "has_error"
     assert state["trajectory"] == []
     assert state["_kernel"].slot_index == 0
-    assert client.completed == [], "peer actor completed after first failure"
+    assert client.completed == [], "peer agent completed after first failure"
 
 
 def test_simultaneous_slot_rolls_back_on_extract_fields_failure():
@@ -373,7 +373,7 @@ def test_simultaneous_slot_rolls_back_on_extract_fields_failure():
     state["_kernel"] and state["trajectory"] at their pre-slot
     snapshots.
     """
-    slots = (TurnSlot(slot_id=0, actors=("A", "B", "C"), phase="p"),)
+    slots = (TurnSlot(slot_id=0, agents=("A", "B", "C"), phase="p"),)
 
     class ExtractFieldsFailEnv(EchoEnv):
         def __init__(self, *a, **kw):
@@ -383,7 +383,7 @@ def test_simultaneous_slot_rolls_back_on_extract_fields_failure():
         async def extract_fields(self, public_channel, member_id, slot):
             self.extract_calls += 1
             if self.extract_calls == 2:
-                raise VFError("extract boom on actor 2")
+                raise VFError("extract boom on agent 2")
             return {"member_id": member_id}
 
     env = ExtractFieldsFailEnv(
@@ -425,10 +425,10 @@ def _assert_monotonic(prev: list[dict], curr: list[dict]):
 def test_build_prompt_monotonic_across_slots():
     """For each member, build_prompt(slot_N+1) extends build_prompt(slot_N)."""
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="p1"),
-        TurnSlot(slot_id=1, actors=("B",), phase="p1"),
-        TurnSlot(slot_id=2, actors=("A",), phase="p2"),
-        TurnSlot(slot_id=3, actors=("B",), phase="p2"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p1"),
+        TurnSlot(slot_id=1, agents=("B",), phase="p1"),
+        TurnSlot(slot_id=2, agents=("A",), phase="p2"),
+        TurnSlot(slot_id=3, agents=("B",), phase="p2"),
     )
     env = EchoEnv(
         schedule=StaticSchedule(slots),
@@ -452,22 +452,22 @@ def test_build_prompt_monotonic_across_slots():
 
 
 # ---------------------------------------------------------------------------
-# 6. actor_overrides routing
+# 6. agent_overrides routing
 # ---------------------------------------------------------------------------
 
 
-def test_actor_overrides_routes_per_member():
+def test_agent_overrides_routes_per_member():
     """Member B uses override client; A falls through to default."""
     default = FakeClient([_make_response("A!")])
     override = FakeClient([_make_response("B!")])
     slots = (
-        TurnSlot(slot_id=0, actors=("A",), phase="p"),
-        TurnSlot(slot_id=1, actors=("B",), phase="p"),
+        TurnSlot(slot_id=0, agents=("A",), phase="p"),
+        TurnSlot(slot_id=1, agents=("B",), phase="p"),
     )
     env = EchoEnv(
         schedule=StaticSchedule(slots),
         members=["A", "B"],
-        actor_overrides={"B": (override, "override-model")},
+        agent_overrides={"B": (override, "override-model")},
         rubric=EchoRubric(),
         dataset=lambda: None,
     )

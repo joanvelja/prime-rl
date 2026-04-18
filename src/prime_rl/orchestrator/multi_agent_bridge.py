@@ -1,4 +1,4 @@
-"""Compatibility shim for the verifiers-owned multi-actor bridge."""
+"""Compatibility shim for the verifiers-owned multi-agent bridge."""
 
 from __future__ import annotations
 

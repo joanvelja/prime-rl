@@ -13,7 +13,7 @@ import json
 import pytest
 import verifiers as vf
 from verifiers import rollout_to_member_rollouts
-from verifiers.envs.multi_actor_kernel import (
+from verifiers.envs.multi_agent_kernel import (
     KernelState,
     StaticSchedule,
     TurnSlot,
@@ -199,13 +199,13 @@ def test_str_example_id_round_trips_unmodified():
 
 
 # ===========================================================================
-# Section 3 — Single-actor envs unaffected (no mar_score => legacy path)
+# Section 3 — Single-agent envs unaffected (no mar_score => legacy path)
 # ===========================================================================
 
 
-def test_single_actor_env_legacy_metrics_path_intact():
+def test_single_agent_env_legacy_metrics_path_intact():
     """Rubric writes state["metrics"] directly (no mar_score). Output flatten
-    behavior preserved for backwards compat with single-actor envs."""
+    behavior preserved for backwards compat with single-agent envs."""
     state = State()
     state["example_id"] = 1
     state["task"] = "default"
@@ -215,11 +215,11 @@ def test_single_actor_env_legacy_metrics_path_intact():
     assert output["reward"] == 0.42
     assert output["my_metric"] == 1.0
     assert output["other"] == 2.0
-    # mar_score absent → bridge correctly raises (single-actor envs don't bridge).
+    # mar_score absent → bridge correctly raises (single-agent envs don't bridge).
     assert "mar_score" not in output
 
 
-def test_single_actor_bridge_call_raises_keyerror():
+def test_single_agent_bridge_call_raises_keyerror():
     state = State()
     state["example_id"] = 1
     state["task"] = "default"
@@ -286,7 +286,7 @@ def test_flatten_exception_group_collects_leaves():
 
 
 def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
-    """P0-1 regression: when actors raise different vf.Error subclasses,
+    """P0-1 regression: when agents raise different vf.Error subclasses,
     rollout loop must catch a SINGLE exception (not ExceptionGroup)."""
 
     class _MixedFailEnv(MultiAgentEnv):
@@ -308,7 +308,7 @@ def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
                 raise vf.OverlongPromptError("A: too long")
             if mid == "B":
                 raise vf.InvalidModelResponseError("B: bad response")
-            raise vf.Error("unknown actor")
+            raise vf.Error("unknown agent")
 
         async def build_prompt(self, state, member_id, slot):
             return [{"role": "user", "content": "hi"}]
@@ -317,7 +317,7 @@ def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
             state["completion"] = []
 
     env = _MixedFailEnv(
-        schedule=StaticSchedule((TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)),
+        schedule=StaticSchedule((TurnSlot(slot_id=0, agents=("A", "B"), phase="p"),)),
         members=["A", "B"],
         dataset=lambda: None,
     )
@@ -327,7 +327,7 @@ def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
     state["trajectory_id"] = "ep-0"
     state["sampling_args"] = {"temperature": 0.5}
 
-    slot = TurnSlot(slot_id=0, actors=("A", "B"), phase="p")
+    slot = TurnSlot(slot_id=0, agents=("A", "B"), phase="p")
     # Calling _run_simultaneous_slot directly to exercise the except path.
     # Single, concrete exception expected (NOT ExceptionGroup).
     with pytest.raises(vf.Error) as ei:
@@ -369,7 +369,7 @@ def test_simultaneous_slot_overlong_takes_priority_over_other_vf_errors():
             state["completion"] = []
 
     env = _MixedFailEnv(
-        schedule=StaticSchedule((TurnSlot(slot_id=0, actors=("A", "B"), phase="p"),)),
+        schedule=StaticSchedule((TurnSlot(slot_id=0, agents=("A", "B"), phase="p"),)),
         members=["A", "B"],
         dataset=lambda: None,
     )
@@ -379,7 +379,7 @@ def test_simultaneous_slot_overlong_takes_priority_over_other_vf_errors():
     state["trajectory_id"] = "ep-0"
     state["sampling_args"] = {"temperature": 0.5}
 
-    slot = TurnSlot(slot_id=0, actors=("A", "B"), phase="p")
+    slot = TurnSlot(slot_id=0, agents=("A", "B"), phase="p")
     with pytest.raises(vf.OverlongPromptError):
         asyncio.run(env._run_simultaneous_slot(state, slot))
 
@@ -392,7 +392,7 @@ def test_simultaneous_slot_overlong_takes_priority_over_other_vf_errors():
 def test_quarantined_step_carries_parse_error_in_extras():
     """Kernel quarantines malformed output; _build_step propagates the
     parse_error flag through extras so the trainer can mask completion tokens."""
-    schedule = StaticSchedule((TurnSlot(slot_id=0, actors=("A",), phase="p"),))
+    schedule = StaticSchedule((TurnSlot(slot_id=0, agents=("A",), phase="p"),))
     state = KernelState(slot_index=0)
     # Malformed: unbalanced think tags.
     result = apply_action(state, schedule, "A", "<think>unclosed", token_count=5)

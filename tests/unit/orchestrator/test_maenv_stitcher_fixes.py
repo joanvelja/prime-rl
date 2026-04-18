@@ -21,7 +21,7 @@ from verifiers.clients.openai_chat_completions_token_client import _is_valid_env
 from verifiers.envs.debate.prompts import DebatePrompts, _validate, resolve_prompts
 from verifiers.envs.debate_env import DebateEnv
 from verifiers.envs.debate_rubric import DebateRubric
-from verifiers.envs.multi_actor_kernel import (
+from verifiers.envs.multi_agent_kernel import (
     KernelState,
     StaticSchedule,
     TurnSlot,
@@ -55,7 +55,7 @@ def _make_env(schedule: StaticSchedule) -> DebateEnv:
         schedule=schedule,
         prompts=prompts,
         members=members,
-        role_for_actor={"A": "debater_a", "B": "debater_b"},
+        role_for_agent={"A": "debater_a", "B": "debater_b"},
         rubric=rubric,
         dataset=lambda: None,
     )
@@ -154,10 +154,10 @@ async def _run_roundtrip():
     """Render at slot 0, then at slot 2 after commits — verify stitcher tail."""
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, actors=("A",), phase="propose"),
-            TurnSlot(slot_id=1, actors=("B",), phase="propose"),
-            TurnSlot(slot_id=2, actors=("A",), phase="critique"),
-            TurnSlot(slot_id=3, actors=("B",), phase="critique"),
+            TurnSlot(slot_id=0, agents=("A",), phase="propose"),
+            TurnSlot(slot_id=1, agents=("B",), phase="propose"),
+            TurnSlot(slot_id=2, agents=("A",), phase="critique"),
+            TurnSlot(slot_id=3, agents=("B",), phase="critique"),
         )
     )
     env = _make_env(schedule)
@@ -203,10 +203,10 @@ async def _past_instruction_positional(slot_ids: tuple[int, int, int, int]):
     """Return the past-instruction text rendered into msgs2 for member A."""
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=slot_ids[0], actors=("A",), phase="propose"),
-            TurnSlot(slot_id=slot_ids[1], actors=("B",), phase="propose"),
-            TurnSlot(slot_id=slot_ids[2], actors=("A",), phase="critique"),
-            TurnSlot(slot_id=slot_ids[3], actors=("B",), phase="critique"),
+            TurnSlot(slot_id=slot_ids[0], agents=("A",), phase="propose"),
+            TurnSlot(slot_id=slot_ids[1], agents=("B",), phase="propose"),
+            TurnSlot(slot_id=slot_ids[2], agents=("A",), phase="critique"),
+            TurnSlot(slot_id=slot_ids[3], agents=("B",), phase="critique"),
         )
     )
     env = _make_env(schedule)
@@ -237,13 +237,13 @@ async def _render_own_ctx(schedule: StaticSchedule, commits: list[Utterance], cu
 
 
 def test_num_rounds_is_per_member_under_simultaneous_schedule():
-    # [AB propose, AB critique]: 2 slots, each with both actors.
-    # Global arithmetic: num_slots=2, num_actors=2, num_rounds = 2//2 = 1  → WRONG.
+    # [AB propose, AB critique]: 2 slots, each with both agents.
+    # Global arithmetic: num_slots=2, num_agents=2, num_rounds = 2//2 = 1  → WRONG.
     # Per-member: A participates in 2 slots → num_rounds = 2. Correct.
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, actors=("A", "B"), phase="propose"),
-            TurnSlot(slot_id=1, actors=("A", "B"), phase="critique"),
+            TurnSlot(slot_id=0, agents=("A", "B"), phase="propose"),
+            TurnSlot(slot_id=1, agents=("A", "B"), phase="critique"),
         )
     )
     _, num_rounds = asyncio.run(_render_own_ctx(schedule, [], 0))
@@ -258,11 +258,11 @@ def test_num_rounds_is_per_member_under_asymmetric_schedule():
     # 5//2 = 2 for both. Per-member: A=3, B=2.
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, actors=("A",), phase="propose"),
-            TurnSlot(slot_id=1, actors=("B",), phase="propose"),
-            TurnSlot(slot_id=2, actors=("A",), phase="critique"),
-            TurnSlot(slot_id=3, actors=("B",), phase="critique"),
-            TurnSlot(slot_id=4, actors=("A",), phase="closing"),
+            TurnSlot(slot_id=0, agents=("A",), phase="propose"),
+            TurnSlot(slot_id=1, agents=("B",), phase="propose"),
+            TurnSlot(slot_id=2, agents=("A",), phase="critique"),
+            TurnSlot(slot_id=3, agents=("B",), phase="critique"),
+            TurnSlot(slot_id=4, agents=("A",), phase="closing"),
         )
     )
     env = _make_env(schedule)

@@ -1,14 +1,14 @@
 """Tests for RAEState + compute_rae_advantages.
 
 This is the per-(task, example_id, role_id) baseline path that the
-multi-actor training loop will use as the bridge consumer. Algorithm:
+multi-agent training loop will use as the bridge consumer. Algorithm:
 A_i = R_i - b[(task_i, example_id_i, role_id_i)], EMA baseline update.
 """
 
 import pytest
 from verifiers.types import MemberRollout
 
-from prime_rl.orchestrator.multi_actor_advantage import RAEState, compute_rae_advantages
+from prime_rl.orchestrator.multi_agent_advantage import RAEState, compute_rae_advantages
 
 ENV_NAME = "debate_v1"
 TEMPERATURE = 0.7

@@ -271,7 +271,7 @@ def interleave_rollout(
     temperature = output["sampling_args"]["temperature"]
 
     def _step_is_quarantined(step: vf.TrajectoryStep) -> bool:
-        """A multi-actor step is quarantined when the kernel rejected the
+        """A multi-agent step is quarantined when the kernel rejected the
         raw model output as malformed (parse_channels raised). The raw
         completion is still attached to the step (kernel keeps it for
         transcript replay), but training MUST mask those tokens — otherwise

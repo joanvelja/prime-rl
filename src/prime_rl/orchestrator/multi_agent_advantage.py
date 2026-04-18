@@ -2,7 +2,7 @@
 
 Separate from the GRPO advantage path (advantage.py) — different computation
 model (per-sample with metadata vs. [P,N] tensor), different state lifecycle.
-The orchestrator multi-actor path calls compute_rae_advantages instead of
+The orchestrator multi-agent path calls compute_rae_advantages instead of
 compute_advantages. Both coexist.
 """
 
