@@ -375,7 +375,9 @@ def test_judge_templates_default(default_prompts):
     assert matcher.negative == "DIFFERENT"
 
 
-def test_judge_template_renders():
+def test_judge_template_carries_user_template_verbatim():
+    """JudgeTemplate.user is the raw Python format-string that JudgeRubric
+    will call .format() on with {question}/{answer}/{response} keys."""
     dp = _load_yaml("""\
         version: 2
         system:
@@ -386,12 +388,13 @@ def test_judge_template_renders():
           debater_b: "Q"
         _grader:
           system: "Grade it."
-          user: "Target: {{ target }} Response: {{ response }}"
+          user: "Target: {answer} Response: {response}"
           positive: CORRECT
           negative: INCORRECT
     """)
     jt = dp.judges["grader"]
-    rendered = jt.user.render(target="42", response="forty-two")
+    assert jt.user == "Target: {answer} Response: {response}"
+    rendered = jt.user.format(answer="42", response="forty-two")
     assert "42" in rendered
     assert "forty-two" in rendered
 

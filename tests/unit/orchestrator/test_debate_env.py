@@ -30,7 +30,6 @@ from verifiers.clients import Client as _VFClient
 from verifiers.utils.async_utils import maybe_retry
 from verifiers.envs.debate_env import (
     DebateEnv,
-    _validate_judge_templates,
     load_environment,
 )
 from verifiers.envs.debate.prompts import DebatePrompts, build_context, resolve_prompts
@@ -53,6 +52,69 @@ from verifiers.types import (
     Usage,
 )
 from prime_rl.orchestrator.multi_actor_bridge import rollout_to_member_rollouts
+
+
+# ---------------------------------------------------------------------------
+# Test helpers — legacy-shape views into state["mar_score"]
+# ---------------------------------------------------------------------------
+# The rubric writes one structured key (state["mar_score"]). These helpers
+# project it back to the legacy dict shapes that test assertions reference.
+# Test asserts against the projected shape, so the underlying MARScore
+# carrying the right data is verified end-to-end.
+
+from collections import defaultdict
+from verifiers.types import MARScore as _MARScore
+
+
+class _Views:
+    @staticmethod
+    def _coerce(state):
+        raw = state.get("mar_score")
+        if raw is None:
+            return None
+        return raw if isinstance(raw, _MARScore) else _MARScore.model_validate(raw)
+
+    @staticmethod
+    def metrics(state):
+        mar = _Views._coerce(state)
+        return mar.to_wandb_flat() if mar is not None else {}
+
+    @staticmethod
+    def member_rewards(state):
+        mar = _Views._coerce(state)
+        return {m.member_id: m.reward for m in mar.members} if mar is not None else {}
+
+    @staticmethod
+    def error_info(state):
+        mar = _Views._coerce(state)
+        if mar is None:
+            return {}
+        em = mar.episode_metrics
+        out = {}
+        if "error_type" in em:
+            out["error_type"] = em["error_type"]
+        if "error_phase" in em:
+            out["error_phase"] = em["error_phase"]
+        return out
+
+    @staticmethod
+    def episode_scalar(state):
+        mar = _Views._coerce(state)
+        return mar.episode_scalar if mar is not None else state.get("reward")
+
+    @staticmethod
+    def commits(state):
+        out = defaultdict(list)
+        for step in state.get("trajectory", []):
+            extras = step.get("extras", {})
+            mid = extras.get("member_id")
+            fields = extras.get("fields") or {}
+            if mid and "answer" in fields:
+                out[mid].append(str(fields["answer"]))
+        return dict(out)
+
+
+_views = _Views()
 
 
 # ---------------------------------------------------------------------------
@@ -396,16 +458,16 @@ def test_rubric_sets_episode_and_per_member_rewards():
             },
         ),
     ]
-    state["reward"] = None
-    state["metrics"] = None
+    state.pop("mar_score", None)
+    state.pop("mar_score", None)
 
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 1.0
-    assert state["metrics"]["reward/A"] == 1.0
-    assert state["metrics"]["reward/B"] == 0.0
-    assert state["metrics"]["turns/A"] == 1.0
-    assert state["metrics"]["turns/B"] == 1.0
+    assert _views.episode_scalar(state) == 1.0
+    assert _views.metrics(state)["reward/A"] == 1.0
+    assert _views.metrics(state)["reward/B"] == 0.0
+    assert _views.metrics(state)["turns/A"] == 1.0
+    assert _views.metrics(state)["turns/B"] == 1.0
 
 
 def test_rubric_verifier_wins():
@@ -433,14 +495,14 @@ def test_rubric_verifier_wins():
             },
         ),
     ]
-    state["reward"] = None
-    state["metrics"] = None
+    state.pop("mar_score", None)
+    state.pop("mar_score", None)
 
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
-    assert state["metrics"]["reward/A"] == 0.0
-    assert state["metrics"]["reward/B"] == 1.0
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["reward/A"] == 0.0
+    assert _views.metrics(state)["reward/B"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -546,19 +608,28 @@ def test_full_pipeline_rollout_to_member_rollouts():
     ]
     _run(env.rubric.score_rollout(state))
 
-    assert state["reward"] == 1.0
-    assert state["metrics"]["reward/A"] == 1.0
-    assert state["metrics"]["reward/B"] == 0.0
+    assert _views.episode_scalar(state) == 1.0
+    assert _views.metrics(state)["reward/A"] == 1.0
+    assert _views.metrics(state)["reward/B"] == 0.0
 
     # Judge was injected post-rollout; rubric didn't score it. Extend
-    # member_rewards to match trajectory members before bridging.
-    member_rewards = {**state["member_rewards"], "J": 0.0}
+    # mar_score to match trajectory members before bridging.
+    from verifiers.types import MARScore, MemberScore
+    base_members = [
+        MemberScore(member_id=m.member_id, role_id=m.role_id, reward=m.reward)
+        for m in state["mar_score"].members
+    ]
+    base_members.append(MemberScore(member_id="J", role_id="judge", reward=0.0))
+    augmented = MARScore(
+        members=base_members,
+        episode_scalar=state["mar_score"].episode_scalar,
+    )
     output = {
         "trajectory": state["trajectory"],
         "sampling_args": {"temperature": 0.7},
         "example_id": state["example_id"],
         "trajectory_id": state["trajectory_id"],
-        "member_rewards": member_rewards,
+        "mar_score": augmented,
     }
 
     rollouts = rollout_to_member_rollouts(output, "debate_test")
@@ -1545,8 +1616,8 @@ def _state_with_trajectory(
     state["prompt"] = [{"role": "user", "content": "What is 2+2?"}]
     state["answer"] = answer
     state["trajectory"] = trajectory
-    state["reward"] = None
-    state["metrics"] = None
+    state.pop("mar_score", None)
+    state.pop("mar_score", None)
     return state
 
 
@@ -1587,9 +1658,9 @@ def test_w_truth_wins():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 1.0
-    assert state["metrics"]["reward/A"] == 1.0
-    assert state["metrics"]["reward/B"] == 0.0
+    assert _views.episode_scalar(state) == 1.0
+    assert _views.metrics(state)["reward/A"] == 1.0
+    assert _views.metrics(state)["reward/B"] == 0.0
 
 
 def test_w_truth_loses():
@@ -1602,9 +1673,9 @@ def test_w_truth_loses():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
-    assert state["metrics"]["reward/A"] == 0.0
-    assert state["metrics"]["reward/B"] == 1.0
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["reward/A"] == 0.0
+    assert _views.metrics(state)["reward/B"] == 1.0
 
 
 def test_w_tie():
@@ -1617,10 +1688,10 @@ def test_w_tie():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
+    assert _views.episode_scalar(state) == 0.0
     # Tie matches neither debater_a nor debater_b
-    assert state["metrics"]["reward/A"] == 0.0
-    assert state["metrics"]["reward/B"] == 0.0
+    assert _views.metrics(state)["reward/A"] == 0.0
+    assert _views.metrics(state)["reward/B"] == 0.0
 
 
 def test_w_no_judge_raises_when_judge_declared():
@@ -1646,16 +1717,12 @@ def _open_ended_prompts() -> DebatePrompts:
     from verifiers.envs.debate.prompts import JudgeTemplate
 
     grader = JudgeTemplate(
-        system="Grade: CORRECT or INCORRECT.",
-        user=_je.from_string("Target: {answer}\nResponse: {response}"),
-        user_format_string="Target: {answer}\nResponse: {response}",
+        user="Target: {answer}\nResponse: {response}",
         positive="CORRECT",
         negative="INCORRECT",
     )
     matcher = JudgeTemplate(
-        system="Compare: SAME or DIFFERENT.",
-        user=_je.from_string("A: {answer}\nB: {response}"),
-        user_format_string="A: {answer}\nB: {response}",
+        user="A: {answer}\nB: {response}",
         positive="SAME",
         negative="DIFFERENT",
     )
@@ -1760,7 +1827,7 @@ def test_w_no_judge_fallback_for_judgeless_pack():
     # Ground truth "C", debater_a answered "C" → reward=1.0 via G-fallback.
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 1.0
+    assert _views.episode_scalar(state) == 1.0
 
 
 def test_g_accuracy_mcq():
@@ -1773,8 +1840,8 @@ def test_g_accuracy_mcq():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["metrics"]["accuracy/A"] == 1.0
-    assert state["metrics"]["accuracy/B"] == 0.0
+    assert _views.metrics(state)["accuracy/A"] == 1.0
+    assert _views.metrics(state)["accuracy/B"] == 0.0
 
 
 def test_g_missing_answer():
@@ -1788,10 +1855,10 @@ def test_g_missing_answer():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["metrics"]["accuracy/A"] == 1.0
-    assert state["metrics"]["extraction_failed/A"] == 0.0
-    assert "accuracy/B" not in state["metrics"]
-    assert state["metrics"]["extraction_failed/B"] == 1.0
+    assert _views.metrics(state)["accuracy/A"] == 1.0
+    assert _views.metrics(state)["extraction_failed/A"] == 0.0
+    assert "accuracy/B" not in _views.metrics(state)
+    assert _views.metrics(state)["extraction_failed/B"] == 1.0
 
 
 def test_g_stale_commit_not_graded_when_latest_fails():
@@ -1818,7 +1885,7 @@ def test_g_stale_commit_not_graded_when_latest_fails():
     ], answer="C")
     _run(rubric.score_rollout(state))
 
-    metrics = state["metrics"]
+    metrics = _views.metrics(state)
     assert "accuracy/A" not in metrics, (
         f"stale 'propose' commit 'B' must not be graded; "
         f"got accuracy/A={metrics.get('accuracy/A')}"
@@ -1830,7 +1897,7 @@ def test_g_stale_commit_not_graded_when_latest_fails():
     # Commit sequence still contains A's valid earlier commit for diagnostics,
     # but the flip/final_correct metrics must be skipped since the latest
     # step is unparseable (the rubric's rubric.py:313-315 guard).
-    assert state["commits"]["A"] == ["B"]
+    assert _views.commits(state)["A"] == ["B"]
     assert "final_correct/A" not in metrics, (
         "flip diagnostics must be skipped when latest step is unparseable"
     )
@@ -1846,7 +1913,7 @@ def test_m_agreement_same():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["metrics"]["agreement"] == 1.0
+    assert _views.metrics(state)["agreement"] == 1.0
 
 
 def test_m_agreement_different():
@@ -1859,7 +1926,7 @@ def test_m_agreement_different():
     ])
     _run(rubric.score_rollout(state))
 
-    assert state["metrics"]["agreement"] == 0.0
+    assert _views.metrics(state)["agreement"] == 0.0
 
 
 class FakeJudgeClient(_VFClient):
@@ -2078,9 +2145,9 @@ def test_missing_fields_graceful():
     state = _state_with_trajectory([])
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
-    assert "accuracy/A" not in state["metrics"]
-    assert "agreement" not in state["metrics"]
+    assert _views.episode_scalar(state) == 0.0
+    assert "accuracy/A" not in _views.metrics(state)
+    assert "agreement" not in _views.metrics(state)
 
 
 def test_yaml_without_answer_fields():
@@ -2102,10 +2169,10 @@ def test_yaml_without_answer_fields():
     _run(rubric.score_rollout(state))
 
     # W works: judge picked truth_role
-    assert state["reward"] == 1.0
+    assert _views.episode_scalar(state) == 1.0
     # G/M skipped: no answer fields extracted, no answer_specs
-    assert "accuracy/A" not in state["metrics"]
-    assert "agreement" not in state["metrics"]
+    assert "accuracy/A" not in _views.metrics(state)
+    assert "agreement" not in _views.metrics(state)
 
 
 # ---------------------------------------------------------------------------
@@ -2126,12 +2193,12 @@ def test_flip_hold_correct():
     ])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 2.0
     assert m["num_unique_commits/A"] == 1.0
     assert m["initial_correct/A"] == 1.0
     assert m["final_correct/A"] == 1.0
-    assert state["commits"]["A"] == ["C", "C"]
+    assert _views.commits(state)["A"] == ["C", "C"]
 
 
 def test_flip_hold_incorrect():
@@ -2146,7 +2213,7 @@ def test_flip_hold_incorrect():
     ])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 2.0
     assert m["num_unique_commits/A"] == 1.0
     assert m["initial_correct/A"] == 0.0
@@ -2165,12 +2232,12 @@ def test_flip_earned():
     ])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 2.0
     assert m["num_unique_commits/A"] == 2.0
     assert m["initial_correct/A"] == 0.0  # wrong at propose
     assert m["final_correct/A"] == 1.0    # right at critique
-    assert state["commits"]["A"] == ["B", "C"]
+    assert _views.commits(state)["A"] == ["B", "C"]
 
 
 def test_flip_unearned():
@@ -2185,12 +2252,12 @@ def test_flip_unearned():
     ])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 2.0
     assert m["num_unique_commits/A"] == 2.0
     assert m["initial_correct/A"] == 1.0
     assert m["final_correct/A"] == 0.0
-    assert state["commits"]["A"] == ["C", "B"]
+    assert _views.commits(state)["A"] == ["C", "B"]
 
 
 def test_flip_wobble_correct():
@@ -2207,12 +2274,12 @@ def test_flip_wobble_correct():
     ])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 3.0
     assert m["num_unique_commits/A"] == 2.0
     assert m["initial_correct/A"] == 1.0
     assert m["final_correct/A"] == 1.0
-    assert state["commits"]["A"] == ["C", "B", "C"]
+    assert _views.commits(state)["A"] == ["C", "B", "C"]
 
 
 def test_flip_empty_trajectory_emits_zero_commits():
@@ -2228,7 +2295,7 @@ def test_flip_empty_trajectory_emits_zero_commits():
     state = _state_with_trajectory([])
     _run(rubric.score_rollout(state))
 
-    m = state["metrics"]
+    m = _views.metrics(state)
     assert m["num_commits/A"] == 0.0
     assert m["num_commits/B"] == 0.0
     assert m["num_unique_commits/A"] == 0.0
@@ -2236,7 +2303,7 @@ def test_flip_empty_trajectory_emits_zero_commits():
     # No commits -> no initial/final correctness metric
     assert "initial_correct/A" not in m
     assert "final_correct/A" not in m
-    assert state["commits"] == {}
+    # commits is no longer wiped on error — recomputable from trajectory
 
 
 # ---------------------------------------------------------------------------
@@ -2290,8 +2357,8 @@ def test_debate_rubric_init_accepts_selfplay_pack_without_judge_client():
         _judge_step("debater_a"),
     ])
     _run(rubric.score_rollout(state))
-    assert state["reward"] == 1.0
-    assert state["metrics"]["accuracy/A"] == 1.0
+    assert _views.episode_scalar(state) == 1.0
+    assert _views.metrics(state)["accuracy/A"] == 1.0
 
 
 def test_debate_rubric_init_ok_when_judgeless_pack_has_no_judge_client():
@@ -2390,13 +2457,13 @@ def test_rubric_short_circuits_on_prompt_too_long():
     state["prompt_too_long"] = True
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
-    assert state["metrics"] == {"errored_rollout": 1.0}
-    assert state["error_info"] == {
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["errored_rollout"] == 1.0
+    assert _views.error_info(state) == {
         "error_type": "prompt_too_long",
         "error_phase": "rollout",
     }
-    assert state["commits"] == {}
+    # commits is no longer wiped on error — recomputable from trajectory
 
 
 def test_rubric_short_circuits_on_state_error():
@@ -2415,13 +2482,13 @@ def test_rubric_short_circuits_on_state_error():
     state["error"] = _SimulatedEnvError("boom")
     _run(rubric.score_rollout(state))
 
-    assert state["reward"] == 0.0
-    assert state["metrics"] == {"errored_rollout": 1.0}
-    assert state["error_info"] == {
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["errored_rollout"] == 1.0
+    assert _views.error_info(state) == {
         "error_type": "_SimulatedEnvError",
         "error_phase": "rollout",
     }
-    assert state["commits"] == {}
+    # commits is no longer wiped on error — recomputable from trajectory
 
 
 def test_rubric_does_not_short_circuit_on_clean_rollout():
@@ -2461,11 +2528,11 @@ def test_rubric_short_circuit_does_not_propagate_through_gather():
     _run(rubric.score_group([errored_state, clean_state]))
 
     # Errored rollout: short-circuited.
-    assert errored_state["reward"] == 0.0
-    assert errored_state["metrics"]["errored_rollout"] == 1.0
+    assert _views.episode_scalar(errored_state) == 0.0
+    assert _views.metrics(errored_state)["errored_rollout"] == 1.0
     # Clean rollout: scored normally.
-    assert clean_state["reward"] == 1.0
-    assert clean_state["metrics"]["reward/A"] == 1.0
+    assert _views.episode_scalar(clean_state) == 1.0
+    assert _views.metrics(clean_state)["reward/A"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -2539,11 +2606,11 @@ def test_score_rollout_stores_vf_error_for_retry_discovery():
     err = state.get("error")
     assert err is not None, "state['error'] must be set so maybe_retry can find it"
     assert isinstance(err, vf.InvalidModelResponseError)
-    assert state["reward"] == 0.0
-    assert state["metrics"]["errored_rollout"] == 1.0
-    assert state["error_info"]["error_type"] == "InvalidModelResponseError"
-    assert state["error_info"]["error_phase"] == "scoring"
-    assert state["commits"] == {}
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["errored_rollout"] == 1.0
+    assert _views.error_info(state)["error_type"] == "InvalidModelResponseError"
+    assert _views.error_info(state)["error_phase"] == "scoring"
+    # commits is no longer wiped on error — recomputable from trajectory
 
 
 def test_score_rollout_stores_non_retryable_vf_error_too():
@@ -2566,7 +2633,7 @@ def test_score_rollout_stores_non_retryable_vf_error_too():
 
     err = state.get("error")
     assert isinstance(err, _PermanentTestError)
-    assert state["metrics"]["errored_rollout"] == 1.0
+    assert _views.metrics(state)["errored_rollout"] == 1.0
     # Only one call — score_rollout itself does not retry, it just records.
     assert len(client.calls) == 1
 
@@ -2586,8 +2653,8 @@ def test_score_group_propagates_key_error_for_missing_answer():
         _debater_step("B", "debater_b", answer="B"),
         _judge_step("debater_a"),
     ]
-    state["reward"] = None
-    state["metrics"] = None
+    state.pop("mar_score", None)
+    state.pop("mar_score", None)
 
     with pytest.raises(KeyError, match="state is missing 'answer'"):
         _run(rubric.score_group([state]))
@@ -2741,10 +2808,10 @@ def test_score_rollout_retry_loop_end_to_end(_instant_retry_waits):
     assert len(results) == 1
     final = results[0]
     assert final.get("error") is None
-    metrics = final.get("metrics") or {}
+    metrics = _views.metrics(final)
     assert metrics.get("errored_rollout", 0.0) == 0.0
     # Judge picked debater_a, the truth role → W path → reward=1.0.
-    assert final["reward"] == 1.0
+    assert _views.episode_scalar(final) == 1.0
     # G-path grader returned CORRECT for the truth member's answer.
     assert metrics.get("accuracy/A") == 1.0
 
@@ -2783,9 +2850,9 @@ def test_score_rollout_retry_loop_exhausts_retries_on_permanent_failure(
     final = results[0]
     err = final.get("error")
     assert isinstance(err, vf.InvalidModelResponseError)
-    assert final["metrics"]["errored_rollout"] == 1.0
-    assert final["error_info"]["error_phase"] == "scoring"
-    assert final["error_info"]["error_type"] == "InvalidModelResponseError"
+    assert _views.metrics(final)["errored_rollout"] == 1.0
+    assert _views.error_info(final)["error_phase"] == "scoring"
+    assert _views.error_info(final)["error_type"] == "InvalidModelResponseError"
 
 
 # ---------------------------------------------------------------------------
@@ -2803,7 +2870,7 @@ def test_debate_rubric_composes_grader_and_matcher():
     _matcher templates AND a judge_client is passed, DebateRubric
     instantiates BOTH as JudgeRubric attributes (not lazy singletons,
     not private _call_judge wrappers). judge_prompt on each child must
-    carry the YAML's user_format_string verbatim."""
+    carry the YAML's user template verbatim."""
     client = FakeJudgeClient(verdicts=[])
     rubric = DebateRubric(
         truth_role="debater_a",
@@ -2841,8 +2908,8 @@ def test_score_rollout_uses_composed_grader():
     # for the per-member accuracy branch on debater_a).
     assert len(client.calls) == 1
     # accuracy/A=1.0 because the FakeJudgeClient canned "CORRECT".
-    assert state["metrics"]["accuracy/A"] == 1.0
-    assert state["metrics"]["extraction_failed/A"] == 0.0
+    assert _views.metrics(state)["accuracy/A"] == 1.0
+    assert _views.metrics(state)["extraction_failed/A"] == 0.0
 
 
 def test_score_rollout_uses_composed_matcher_for_open_ended():
@@ -2875,13 +2942,13 @@ def test_score_rollout_uses_composed_matcher_for_open_ended():
 
     # Three judge calls: two graders (A, B) + one matcher (A vs B).
     assert len(client.calls) == 3
-    assert state["metrics"]["agreement"] == 1.0
+    assert _views.metrics(state)["agreement"] == 1.0
 
 
 def test_score_rollout_captures_vf_error_from_grader():
     """v7 silent-0 prevention (CRITICAL): when the composed grader raises
-    a vf.Error, score_rollout must set state["error"] AND state["metrics"]
-    AND state["error_info"] with the correct taxonomy so maybe_retry can
+    a vf.Error, score_rollout must set state["error"] AND state["mar_score"]
+    with the correct error taxonomy in episode_metrics so maybe_retry can
     discover the error via reraise_error_from_state. This is the round-7
     fix that the whole v7 cutover was built to enforce. If grader_rubric
     stops propagating the exception OR score_rollout stops writing
@@ -2898,10 +2965,10 @@ def test_score_rollout_captures_vf_error_from_grader():
         "score_rollout must capture vf.Error onto state['error'] so "
         "maybe_retry.reraise_error_from_state can discover it."
     )
-    assert state["reward"] == 0.0
-    assert state["metrics"]["errored_rollout"] == 1.0
-    assert state["error_info"]["error_type"] == "InvalidModelResponseError"
-    assert state["error_info"]["error_phase"] == "scoring"
+    assert _views.episode_scalar(state) == 0.0
+    assert _views.metrics(state)["errored_rollout"] == 1.0
+    assert _views.error_info(state)["error_type"] == "InvalidModelResponseError"
+    assert _views.error_info(state)["error_phase"] == "scoring"
     # Exactly one call — score_rollout records, it does not retry.
     assert len(client.calls) == 1
 
@@ -2922,22 +2989,21 @@ def test_debate_rubric_rejects_open_ended_without_judge_client():
         )
 
 
-def test_load_environment_rejects_colliding_verdict_tokens():
-    """Phase 1D verdict-collision guard: if a judge template's positive
-    or negative verdict token collides with any EnumScoring answer
-    value (case-insensitive), load_environment must raise ValueError.
-    Otherwise transcript greps for the verdict silently misattribute
-    judge output to a debater commit."""
+def test_debate_prompts_rejects_colliding_verdict_tokens():
+    """Pack invariant (enforced in DebatePrompts.__post_init__): if a judge
+    template's positive or negative verdict token collides with any
+    EnumScoring answer value (case-insensitive), constructing the pack
+    must raise ValueError. Otherwise transcript greps for the verdict
+    silently misattribute judge output to a debater commit."""
     from verifiers.envs.debate.prompts import JudgeTemplate
     from verifiers.envs.debate.fields import EnumScoring
 
     # Build a synthetic pack where the grader's positive token "A"
-    # collides with the MCQ answer enum {A, B, C, D}.
+    # collides with the MCQ answer enum {A, B, C, D}. Construction itself
+    # must raise — no external validator step.
     base = _open_ended_prompts()
     colliding_grader = JudgeTemplate(
-        system="Grade",
-        user=_je.from_string("q: {question} a: {answer} r: {response}"),
-        user_format_string="q: {question} a: {answer} r: {response}",
+        user="q: {question} a: {answer} r: {response}",
         positive="A",
         negative="B",
     )
@@ -2946,23 +3012,22 @@ def test_load_environment_rejects_colliding_verdict_tokens():
         description="MCQ answer",
         scoring=EnumScoring(values=("A", "B", "C", "D")),
     )
-    pack = DebatePrompts(
-        system=base.system,
-        user=base.user,
-        question=base.question,
-        fields={
-            "debater_a": {"propose": {"answer": mcq_field}},
-            "debater_b": {"propose": {"answer": mcq_field}},
-        },
-        think_visibility=base.think_visibility,
-        think_tag=base.think_tag,
-        prefill=base.prefill,
-        opponent_wrap=base.opponent_wrap,
-        judges={"grader": colliding_grader},
-        source_ref="colliding-test",
-    )
     with pytest.raises(ValueError, match="collides with answer enum"):
-        _validate_judge_templates(pack)
+        DebatePrompts(
+            system=base.system,
+            user=base.user,
+            question=base.question,
+            fields={
+                "debater_a": {"propose": {"answer": mcq_field}},
+                "debater_b": {"propose": {"answer": mcq_field}},
+            },
+            think_visibility=base.think_visibility,
+            think_tag=base.think_tag,
+            prefill=base.prefill,
+            opponent_wrap=base.opponent_wrap,
+            judges={"grader": colliding_grader},
+            source_ref="colliding-test",
+        )
 
 
 def test_wrap_opponent_respects_viewer_role():
@@ -3109,10 +3174,10 @@ def test_debate_env_end_to_end_real_types_rollout():
     # Rubric scores normally (selfplay pack MCQ path via classify_enum,
     # no LLM grader needed).
     _run(rubric.score_rollout(state))
-    assert state["reward"] == 1.0
-    assert state["metrics"]["reward/A"] == 1.0
-    assert state["metrics"]["reward/B"] == 0.0
-    assert state["metrics"]["accuracy/A"] == 1.0
+    assert _views.episode_scalar(state) == 1.0
+    assert _views.metrics(state)["reward/A"] == 1.0
+    assert _views.metrics(state)["reward/B"] == 0.0
+    assert _views.metrics(state)["accuracy/A"] == 1.0
 
     # Completion populated.
     assert state["completion"]

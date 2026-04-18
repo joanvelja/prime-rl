@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from prime_rl.orchestrator.multi_actor_bridge import MemberRollout
 
 
-RAEKey = tuple[str, int, str]
+RAEKey = tuple[str, int | str, str]
 """(task, example_id, role_id). ``task`` is the env name (MemberRollout['task']),
 which partitions the baseline store across environments — otherwise two envs
-with overlapping example_ids would contaminate each other's baselines."""
+with overlapping example_ids would contaminate each other's baselines.
+``example_id`` is int|str to match MemberRollout (HuggingFace UID-style ids
+like \"mmlu_0001\" propagate verbatim end-to-end)."""
 
 
 @dataclass

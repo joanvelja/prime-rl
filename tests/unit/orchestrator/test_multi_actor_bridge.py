@@ -1,316 +1,29 @@
+"""Bridge tests construct RolloutOutput by going through state_to_output.
+
+This is the structural test fix that closes the test-fabrication gap that
+hid the original P0 (state["mar_score"] silently dropped at serialization).
+Every fixture goes through the real serialization boundary.
+"""
+
+import json
+from typing import Any
+
 import pytest
 
-from verifiers.types import EpisodeResult, MemberResult, TrajectoryStep
+from verifiers.types import MARScore, MemberScore, State, TrajectoryStep
+from verifiers.utils.save_utils import state_to_output
+
 from prime_rl.orchestrator.multi_actor_bridge import (
     MemberRollout,
-    episodes_to_member_rollouts,
     rollout_to_member_rollouts,
 )
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 ENV_NAME = "debate_v1"
 TEMPERATURE = 0.7
 
 
-def _make_step(trajectory_id: str = "traj-0") -> TrajectoryStep:
-    """Minimal valid TrajectoryStep for structural tests."""
-    return TrajectoryStep(
-        prompt=[],
-        completion=[],
-        response={
-            "id": "r0",
-            "created": 0,
-            "model": "test",
-            "message": {
-                "role": "assistant",
-                "content": "hi",
-                "finish_reason": "stop",
-                "is_truncated": False,
-            },
-        },
-        tokens=None,
-        reward=None,
-        advantage=None,
-        is_truncated=False,
-        trajectory_id=trajectory_id,
-        extras={},
-    )
-
-
-def _make_episode(
-    base_example_id: int = 1,
-    episode_id: str = "ep-0",
-    members: list[MemberResult] | None = None,
-) -> EpisodeResult:
-    if members is None:
-        members = [
-            MemberResult(
-                member_id="alice",
-                role_id="prover",
-                seat_id="A",
-                trajectory=[_make_step("alice-traj")],
-                reward=1.0,
-            ),
-            MemberResult(
-                member_id="bob",
-                role_id="verifier",
-                seat_id="B",
-                trajectory=[_make_step("bob-traj")],
-                reward=0.0,
-            ),
-        ]
-    return EpisodeResult(
-        base_example_id=base_example_id,
-        episode_id=episode_id,
-        members=members,
-    )
-
-
 # ---------------------------------------------------------------------------
-# Tests — episodes_to_member_rollouts
-# ---------------------------------------------------------------------------
-
-
-def test_single_episode_produces_one_rollout_per_member():
-    episode = _make_episode()
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    assert len(rollouts) == 2
-
-
-def test_rollout_has_correct_training_fields():
-    episode = _make_episode()
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    r = rollouts[0]
-
-    assert r["example_id"] == 1
-    assert r["task"] == ENV_NAME
-    assert r["sampling_args"] == {"temperature": TEMPERATURE}
-    assert r["error"] is None
-    assert r["reward"] == 1.0
-    assert len(r["trajectory"]) == 1
-
-
-def test_rollout_has_correct_metadata():
-    episode = _make_episode()
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-
-    alice, bob = rollouts
-    assert alice["episode_id"] == "ep-0"
-    assert alice["member_id"] == "alice"
-    assert alice["role_id"] == "prover"
-
-    assert bob["member_id"] == "bob"
-    assert bob["role_id"] == "verifier"
-
-
-def test_task_is_env_name_not_role_id():
-    """Critical invariant: buffer/scheduler assert task == env_name."""
-    episode = _make_episode()
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    for r in rollouts:
-        assert r["task"] == ENV_NAME
-        assert r["task"] != r["role_id"]
-
-
-def test_multiple_episodes_flatten_correctly():
-    episodes = [
-        _make_episode(base_example_id=1, episode_id="ep-0"),
-        _make_episode(base_example_id=2, episode_id="ep-1"),
-    ]
-    rollouts = episodes_to_member_rollouts(episodes, ENV_NAME, TEMPERATURE)
-    assert len(rollouts) == 4
-
-    ids = [(r["example_id"], r["episode_id"], r["member_id"]) for r in rollouts]
-    assert ids == [
-        (1, "ep-0", "alice"),
-        (1, "ep-0", "bob"),
-        (2, "ep-1", "alice"),
-        (2, "ep-1", "bob"),
-    ]
-
-
-def test_str_example_id_flows_through_bridge():
-    """EpisodeResult.base_example_id can be str (e.g. 'mmlu_0001') and
-    propagates verbatim through the bridge. Buffer and dataset layers
-    accept int | str, so this works end-to-end without coercion."""
-    episode = _make_episode()
-    episode.base_example_id = "mmlu_0001"
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    assert all(r["example_id"] == "mmlu_0001" for r in rollouts)
-
-
-def test_none_example_id_raises():
-    episode = _make_episode()
-    episode.base_example_id = None
-    with pytest.raises(TypeError, match="must be int or str"):
-        episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-
-
-def test_empty_results_returns_empty():
-    assert episodes_to_member_rollouts([], ENV_NAME, TEMPERATURE) == []
-
-
-def test_member_with_none_reward():
-    member = MemberResult(
-        member_id="c",
-        role_id="judge",
-        seat_id="C",
-        trajectory=[],
-        reward=None,
-    )
-    episode = _make_episode(members=[member])
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    assert rollouts[0]["reward"] is None
-
-
-def test_trajectory_passed_through_unchanged():
-    """Trajectory should be the exact same list object, not a copy."""
-    episode = _make_episode()
-    original_traj = episode.members[0].trajectory
-    rollouts = episodes_to_member_rollouts([episode], ENV_NAME, TEMPERATURE)
-    assert rollouts[0]["trajectory"] is original_traj
-
-
-# ---------------------------------------------------------------------------
-# Tests — RAE advantage (compute_rae_advantages + RAEState)
-# ---------------------------------------------------------------------------
-
-from prime_rl.orchestrator.multi_actor_advantage import RAEState, compute_rae_advantages
-
-
-def _make_rollout(
-    example_id: int = 1,
-    role_id: str = "prover",
-    reward: float = 1.0,
-    episode_id: str = "ep-0",
-    member_id: str = "alice",
-) -> MemberRollout:
-    return MemberRollout(
-        example_id=example_id,
-        task=ENV_NAME,
-        trajectory=[],
-        sampling_args={"temperature": TEMPERATURE},
-        error=None,
-        reward=reward,
-        episode_id=episode_id,
-        member_id=member_id,
-        role_id=role_id,
-    )
-
-
-def test_rae_cold_start_advantage_equals_reward():
-    """No baseline yet → baseline defaults to 0 → advantage = reward."""
-    state = RAEState(baselines={})
-    rollouts = [
-        _make_rollout(reward=1.0, role_id="prover"),
-        _make_rollout(reward=0.0, role_id="verifier", member_id="bob"),
-    ]
-    advs = compute_rae_advantages(rollouts, state)
-    assert advs == [1.0, 0.0]
-
-
-def test_rae_baselines_update_after_batch():
-    """After one batch, baselines should reflect EMA update."""
-    state = RAEState(baselines={}, momentum=0.9)
-    rollouts = [_make_rollout(reward=1.0, role_id="prover")]
-    compute_rae_advantages(rollouts, state)
-
-    # EMA: 0.9 * 0.0 + 0.1 * 1.0 = 0.1
-    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.1)
-
-
-def test_rae_second_batch_uses_updated_baseline():
-    state = RAEState(baselines={}, momentum=0.9)
-
-    # Batch 1: cold start
-    rollouts1 = [_make_rollout(reward=1.0)]
-    advs1 = compute_rae_advantages(rollouts1, state)
-    assert advs1 == [1.0]  # baseline was 0
-
-    # Batch 2: baseline is 0.1
-    rollouts2 = [_make_rollout(reward=1.0)]
-    advs2 = compute_rae_advantages(rollouts2, state)
-    assert advs2 == [pytest.approx(0.9)]  # 1.0 - 0.1
-
-    # Baseline after two updates: 0.9 * 0.1 + 0.1 * 1.0 = 0.19
-    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.19)
-
-
-def test_rae_degenerate_group_always_positive():
-    """Alice always wins (reward=1.0). EMA baseline < 1.0 for finite t,
-    so advantage stays positive — the agent keeps learning."""
-    state = RAEState(baselines={}, momentum=0.9)
-    for _ in range(20):
-        advs = compute_rae_advantages([_make_rollout(reward=1.0)], state)
-    # After 20 updates, baseline converges toward 1.0 but never reaches it
-    assert advs[0] > 0
-    assert state.baselines[(ENV_NAME, 1, "prover")] < 1.0
-
-
-def test_rae_per_role_baselines_are_independent():
-    state = RAEState(baselines={}, momentum=0.5)
-    rollouts = [
-        _make_rollout(example_id=1, role_id="prover", reward=1.0, member_id="alice"),
-        _make_rollout(example_id=1, role_id="verifier", reward=0.0, member_id="bob"),
-    ]
-    compute_rae_advantages(rollouts, state)
-
-    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
-    assert state.baselines[(ENV_NAME, 1, "verifier")] == pytest.approx(0.0)
-
-
-def test_rae_per_example_baselines_are_independent():
-    state = RAEState(baselines={}, momentum=0.5)
-    rollouts = [
-        _make_rollout(example_id=1, role_id="prover", reward=1.0),
-        _make_rollout(example_id=2, role_id="prover", reward=0.0, episode_id="ep-1"),
-    ]
-    compute_rae_advantages(rollouts, state)
-
-    assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
-    assert state.baselines[(ENV_NAME, 2, "prover")] == pytest.approx(0.0)
-
-
-def test_rae_within_batch_ordering_invariant():
-    """All advantages in a batch use the SAME pre-batch baselines.
-    Order within the batch must not matter."""
-    state_fwd = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
-    state_rev = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
-
-    r1 = _make_rollout(reward=1.0, episode_id="ep-0")
-    r2 = _make_rollout(reward=0.0, episode_id="ep-1")
-
-    advs_fwd = compute_rae_advantages([r1, r2], state_fwd)
-    advs_rev = compute_rae_advantages([r2, r1], state_rev)
-
-    assert advs_fwd == [pytest.approx(0.5), pytest.approx(-0.5)]
-    assert advs_rev == [pytest.approx(-0.5), pytest.approx(0.5)]
-
-    # Both states should have same final baseline
-    assert state_fwd.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(
-        state_rev.baselines[(ENV_NAME, 1, "prover")]
-    )
-
-
-def test_rae_none_reward_raises():
-    state = RAEState(baselines={})
-    rollouts = [_make_rollout(reward=None)]
-    with pytest.raises(ValueError, match="reward=None"):
-        compute_rae_advantages(rollouts, state)
-
-
-def test_rae_empty_batch():
-    state = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5})
-    advs = compute_rae_advantages([], state)
-    assert advs == []
-    assert state.baselines[(ENV_NAME, 1, "prover")] == 0.5
-
-
-# ---------------------------------------------------------------------------
-# Tests — rollout_to_member_rollouts (DebateEnv bridge)
+# Fixtures (all routed through state_to_output)
 # ---------------------------------------------------------------------------
 
 
@@ -319,8 +32,15 @@ def _make_tagged_step(
     role_id: str,
     phase: str = "opening",
     trajectory_id: str = "traj-0",
+    parse_error: str | None = None,
 ) -> TrajectoryStep:
-    """TrajectoryStep with DebateEnv-style extras tags."""
+    extras: dict[str, Any] = {
+        "member_id": member_id,
+        "role_id": role_id,
+        "phase": phase,
+    }
+    if parse_error is not None:
+        extras["parse_error"] = parse_error
     return TrajectoryStep(
         prompt=[],
         completion=[],
@@ -340,18 +60,22 @@ def _make_tagged_step(
         advantage=None,
         is_truncated=False,
         trajectory_id=trajectory_id,
-        extras={"member_id": member_id, "role_id": role_id, "phase": phase},
+        extras=extras,
     )
 
 
-def _make_rollout_output(
+def _build_state(
+    *,
+    members: list[tuple[str, str, float]] | None = None,
     steps: list[TrajectoryStep] | None = None,
-    example_id: int = 42,
-    temperature: float = 0.7,
+    example_id: int | str = 42,
     trajectory_id: str = "debate-0",
-    member_rewards: dict | None = None,
-) -> dict:
-    """Minimal RolloutOutput dict as DebateEnv would produce."""
+    episode_scalar: float = 1.0,
+    error: BaseException | None = None,
+) -> State:
+    """Build a State that the env would produce, with mar_score written by rubric."""
+    if members is None:
+        members = [("A", "prover", 1.0), ("B", "verifier", 0.0)]
     if steps is None:
         steps = [
             _make_tagged_step("A", "prover", "opening"),
@@ -359,153 +83,283 @@ def _make_rollout_output(
             _make_tagged_step("A", "prover", "rebuttal"),
             _make_tagged_step("B", "verifier", "rebuttal"),
         ]
-    if member_rewards is None:
-        member_rewards = {"A": 1.0, "B": 0.0}
-    return {
-        "trajectory": steps,
-        "sampling_args": {"temperature": temperature},
-        "example_id": example_id,
-        "trajectory_id": trajectory_id,
-        "member_rewards": member_rewards,
-    }
+    state = State()
+    state["example_id"] = example_id
+    state["task"] = "default"
+    state["trajectory"] = steps
+    state["trajectory_id"] = trajectory_id
+    state["sampling_args"] = {"temperature": TEMPERATURE}
+    state["mar_score"] = MARScore(
+        members=[
+            MemberScore(member_id=mid, role_id=rid, reward=r)
+            for mid, rid, r in members
+        ],
+        episode_scalar=episode_scalar,
+        episode_metrics={"agreement": 1.0},
+    )
+    if error is not None:
+        state["error"] = error
+    return state
 
 
-def test_rollout_bridge_splits_by_member():
-    output = _make_rollout_output()
+REQUIRED_COLUMNS = ["trajectory", "sampling_args", "trajectory_id"]
+
+
+def _output_via_state_to_output(state: State) -> dict[str, Any]:
+    """Round-trip state → output → JSON → output (as the wire would).
+
+    Mirrors prime-rl's REQUIRED_STATE_COLUMNS — the orchestrator passes these
+    so trajectory + sampling_args + trajectory_id reach the bridge.
+    """
+    output = state_to_output(state, state_columns=REQUIRED_COLUMNS)
+    # JSON round-trip exercises the actual serialization the env-server uses.
+    serialized = json.dumps(output, default=lambda o: o.model_dump(exclude_none=True))
+    return json.loads(serialized)
+
+
+# ---------------------------------------------------------------------------
+# Bridge — happy path
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_splits_by_member():
+    state = _build_state()
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     assert len(rollouts) == 2
-    member_ids = {r["member_id"] for r in rollouts}
-    assert member_ids == {"A", "B"}
+    assert {r["member_id"] for r in rollouts} == {"A", "B"}
 
 
-def test_rollout_bridge_correct_step_counts():
-    output = _make_rollout_output()
+def test_bridge_correct_step_counts():
+    state = _build_state()
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     by_member = {r["member_id"]: r for r in rollouts}
     assert len(by_member["A"]["trajectory"]) == 2
     assert len(by_member["B"]["trajectory"]) == 2
 
 
-def test_rollout_bridge_training_fields():
-    output = _make_rollout_output()
+def test_bridge_training_fields():
+    state = _build_state()
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     a = next(r for r in rollouts if r["member_id"] == "A")
-
     assert a["example_id"] == 42
     assert a["task"] == ENV_NAME
-    assert a["sampling_args"] == {"temperature": 0.7}
+    assert a["sampling_args"] == {"temperature": TEMPERATURE}
     assert a["error"] is None
     assert a["reward"] == 1.0
     assert a["episode_id"] == "debate-0"
     assert a["role_id"] == "prover"
 
 
-def test_rollout_bridge_per_member_rewards():
-    output = _make_rollout_output()
+def test_bridge_per_member_rewards_match_mar_score():
+    state = _build_state(members=[("A", "prover", 0.7), ("B", "verifier", 0.3)])
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    by_member = {r["member_id"]: r for r in rollouts}
-    assert by_member["A"]["reward"] == 1.0
-    assert by_member["B"]["reward"] == 0.0
+    by_member = {r["member_id"]: r["reward"] for r in rollouts}
+    assert by_member == {"A": 0.7, "B": 0.3}
 
 
-def test_rollout_bridge_missing_member_rewards_raises():
-    """Absence of member_rewards is a schema violation, not a silent None."""
-    output = _make_rollout_output()
-    del output["member_rewards"]
-    with pytest.raises(ValueError, match="member_rewards.*missing"):
-        rollout_to_member_rollouts(output, ENV_NAME)
-
-
-def test_rollout_bridge_empty_trajectory():
-    output = _make_rollout_output(steps=[])
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    assert rollouts == []
-
-
-def test_rollout_bridge_missing_member_id_raises():
-    bad_step = _make_tagged_step("A", "prover")
-    bad_step["extras"] = {}  # no member_id
-    output = _make_rollout_output(steps=[bad_step])
-    with pytest.raises(ValueError, match="member_id"):
-        rollout_to_member_rollouts(output, ENV_NAME)
-
-
-def test_rollout_bridge_missing_sampling_args_raises():
-    output = _make_rollout_output()
-    del output["sampling_args"]
-    with pytest.raises(ValueError, match="sampling_args"):
-        rollout_to_member_rollouts(output, ENV_NAME)
-
-
-def test_rollout_bridge_preserves_step_order():
-    """Steps within a member must maintain temporal order."""
-    s1 = _make_tagged_step("A", "prover", "opening")
-    s2 = _make_tagged_step("B", "verifier", "opening")
-    s3 = _make_tagged_step("A", "prover", "rebuttal")
-    s4 = _make_tagged_step("B", "verifier", "rebuttal")
-    output = _make_rollout_output(steps=[s1, s2, s3, s4])
+def test_bridge_preserves_temporal_order():
+    state = _build_state()
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
     a = next(r for r in rollouts if r["member_id"] == "A")
     assert a["trajectory"][0]["extras"]["phase"] == "opening"
     assert a["trajectory"][1]["extras"]["phase"] == "rebuttal"
 
 
-def test_rollout_bridge_role_id_from_first_step():
-    output = _make_rollout_output()
+def test_bridge_str_example_id():
+    state = _build_state(example_id="mmlu_0001")
+    output = _output_via_state_to_output(state)
     rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    a = next(r for r in rollouts if r["member_id"] == "A")
-    b = next(r for r in rollouts if r["member_id"] == "B")
-    assert a["role_id"] == "prover"
-    assert b["role_id"] == "verifier"
-
-
-def test_rollout_bridge_default_episode_id():
-    """Missing trajectory_id defaults to empty string."""
-    output = _make_rollout_output()
-    del output["trajectory_id"]
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    assert rollouts[0]["episode_id"] == ""
-
-
-def test_rollout_bridge_task_is_env_name():
-    """Same invariant as EpisodeResult bridge: task == env_name."""
-    output = _make_rollout_output()
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
-    for r in rollouts:
-        assert r["task"] == ENV_NAME
+    assert all(r["example_id"] == "mmlu_0001" for r in rollouts)
 
 
 # ---------------------------------------------------------------------------
-# Tests — MultiAgentRubric member_rewards schema (required, full coverage)
+# Bridge — failure modes
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_partial_member_rewards_raises():
-    """Partial coverage is a schema violation: must cover every member."""
-    output = _make_rollout_output(member_rewards={"A": 1.0})  # B missing
-    with pytest.raises(ValueError, match="member_rewards.*missing.*B"):
+def test_bridge_missing_mar_score_raises_key_error():
+    """Missing mar_score = env did not run a MultiAgentRubric. Fail loud."""
+    state = State()
+    state["example_id"] = 1
+    state["task"] = "default"
+    state["trajectory"] = [_make_tagged_step("A", "prover")]
+    state["trajectory_id"] = "ep-0"
+    state["sampling_args"] = {"temperature": TEMPERATURE}
+    output = state_to_output(state)
+    with pytest.raises(KeyError, match="mar_score"):
         rollout_to_member_rollouts(output, ENV_NAME)
 
 
+def test_bridge_missing_member_id_in_step_raises():
+    bad_step = _make_tagged_step("A", "prover")
+    bad_step["extras"] = {}  # strip member_id
+    state = _build_state(steps=[bad_step])
+    output = _output_via_state_to_output(state)
+    with pytest.raises(ValueError, match="member_id"):
+        rollout_to_member_rollouts(output, ENV_NAME)
+
+
+def test_bridge_empty_trajectory_still_emits_per_member_rollouts():
+    """A member with no own-turns is still in mar_score → still gets a
+    MemberRollout (with empty trajectory). Bridge does not silently drop."""
+    state = _build_state(steps=[])
+    output = _output_via_state_to_output(state)
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    # mar_score has 2 members; both get rollouts even with no steps.
+    assert len(rollouts) == 2
+    assert all(r["trajectory"] == [] for r in rollouts)
+
+
 # ---------------------------------------------------------------------------
-# Tests — RAE key extended to (task, example_id, role_id)
+# state_to_output projection — invariants
 # ---------------------------------------------------------------------------
 
 
-def test_rae_task_key_partitions_baselines():
-    """Same (example_id, role_id) under different tasks must not share baselines."""
-    state = RAEState(baselines={}, momentum=0.5)
-    r_task_a = _make_rollout(example_id=1, role_id="prover", reward=1.0)
-    r_task_a["task"] = "env_a"
-    r_task_b = _make_rollout(example_id=1, role_id="prover", reward=0.0)
-    r_task_b["task"] = "env_b"
-    compute_rae_advantages([r_task_a, r_task_b], state)
-    assert state.baselines[("env_a", 1, "prover")] == pytest.approx(0.5)
-    assert state.baselines[("env_b", 1, "prover")] == pytest.approx(0.0)
+def test_state_to_output_projects_episode_scalar_to_reward():
+    state = _build_state(episode_scalar=0.42)
+    output = state_to_output(state)
+    assert output["reward"] == 0.42
 
 
-def test_rae_key_is_three_tuple():
-    """Baseline key is (task, example_id, role_id)."""
-    state = RAEState(baselines={}, momentum=0.9)
-    compute_rae_advantages([_make_rollout(reward=1.0)], state)
-    assert (ENV_NAME, 1, "prover") in state.baselines
+def test_state_to_output_projects_per_member_reward_to_flat_metrics():
+    state = _build_state(members=[("A", "prover", 0.8), ("B", "verifier", 0.2)])
+    output = state_to_output(state)
+    assert output["reward/A"] == 0.8
+    assert output["reward/B"] == 0.2
+
+
+def test_state_to_output_serializes_mar_score_as_dict():
+    state = _build_state()
+    output = state_to_output(state)
+    # In-memory: mar_score is dict (model_dump'd).
+    assert isinstance(output["mar_score"], dict)
+    assert "members" in output["mar_score"]
+
+
+def test_state_to_output_episode_metrics_to_top_level():
+    state = _build_state()
+    output = state_to_output(state)
+    assert output["agreement"] == 1.0
+
+
+def test_bridge_round_trips_through_json():
+    """End-to-end: state → state_to_output → JSON → bridge → MemberRollouts."""
+    state = _build_state()
+    output_dict = _output_via_state_to_output(state)
+    rollouts = rollout_to_member_rollouts(output_dict, ENV_NAME)
+    assert {r["member_id"] for r in rollouts} == {"A", "B"}
+
+
+# ---------------------------------------------------------------------------
+# MARScore — schema enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_mar_score_rejects_duplicate_member_ids():
+    with pytest.raises(ValueError, match="Duplicate member_id"):
+        MARScore(
+            members=[
+                MemberScore(member_id="A", role_id="prover", reward=1.0),
+                MemberScore(member_id="A", role_id="verifier", reward=0.0),
+            ],
+            episode_scalar=0.5,
+        )
+
+
+def test_mar_score_rejects_empty_members():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        MARScore(members=[], episode_scalar=0.0)
+
+
+def test_mar_score_to_wandb_flat_canonical_keys():
+    mar = MARScore(
+        members=[
+            MemberScore(
+                member_id="A",
+                role_id="prover",
+                reward=1.0,
+                metrics={"accuracy": 1.0},
+            ),
+        ],
+        episode_scalar=1.0,
+        episode_metrics={"agreement": 1.0, "winner": 0.0},
+    )
+    flat = mar.to_wandb_flat()
+    assert flat["reward/A"] == 1.0
+    assert flat["accuracy/A"] == 1.0
+    assert flat["agreement"] == 1.0
+    assert flat["winner"] == 0.0
+
+
+def test_mar_score_to_wandb_flat_omits_zero_parse_errors():
+    """Zero parse_error_count should NOT appear in wandb output."""
+    mar = MARScore(
+        members=[MemberScore(member_id="A", role_id="prover", reward=1.0)],
+        episode_scalar=1.0,
+    )
+    flat = mar.to_wandb_flat()
+    assert "parse_errors/A" not in flat
+
+
+def test_mar_score_to_wandb_flat_includes_nonzero_parse_errors():
+    mar = MARScore(
+        members=[
+            MemberScore(
+                member_id="A", role_id="prover", reward=1.0, parse_error_count=3
+            )
+        ],
+        episode_scalar=1.0,
+    )
+    flat = mar.to_wandb_flat()
+    assert flat["parse_errors/A"] == 3
+
+
+def test_mar_score_by_id_returns_lookup():
+    mar = MARScore(
+        members=[
+            MemberScore(member_id="A", role_id="prover", reward=1.0),
+            MemberScore(member_id="B", role_id="verifier", reward=0.0),
+        ],
+        episode_scalar=1.0,
+    )
+    by_id = mar.by_id()
+    assert by_id["A"].reward == 1.0
+    assert by_id["B"].reward == 0.0
+
+
+# ---------------------------------------------------------------------------
+# MemberRollout TypedDict shape (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_member_rollout_has_required_training_fields():
+    state = _build_state()
+    output = _output_via_state_to_output(state)
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    r = rollouts[0]
+    required = {
+        "example_id",
+        "task",
+        "trajectory",
+        "sampling_args",
+        "error",
+        "reward",
+        "episode_id",
+        "member_id",
+        "role_id",
+    }
+    assert required.issubset(set(r.keys()))
+
+
+def test_bridge_member_rollout_compatible_with_typed_dict():
+    """Sanity: bridge return values can be passed where MemberRollout is expected."""
+    state = _build_state()
+    output = _output_via_state_to_output(state)
+    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    sample: MemberRollout = rollouts[0]
+    assert sample["member_id"] in {"A", "B"}

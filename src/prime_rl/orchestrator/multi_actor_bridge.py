@@ -1,19 +1,21 @@
-"""Bridge from multi-actor results to training-compatible rollout dicts.
+"""Bridge: split a multi-actor RolloutOutput into per-member training rollouts.
 
-Two entry points:
-- episodes_to_member_rollouts: from MultiActorEnv's EpisodeResult protocol
-- rollout_to_member_rollouts: from DebateEnv's tagged RolloutOutput
+The env writes a single merged trajectory tagged with ``extras["member_id"]``
+and an episode-level ``MARScore`` that covers every member. This bridge
+projects the episode into ``MemberRollout`` records — one per member — that
+the training pipeline consumes.
+
+There is exactly one entry point and one source of truth: ``output["mar_score"]``.
+Bridge raises ``KeyError`` if absent — that means the env didn't run a
+``MultiAgentRubric`` and you're calling the wrong code path.
 """
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from typing import Any, TypedDict
 
-from verifiers.types import EpisodeResult, MemberResult, TrajectoryStep
-
-_LOGGER = logging.getLogger(__name__)
+from verifiers.types import MARScore, TrajectoryStep
 
 
 class MemberRollout(TypedDict):
@@ -24,15 +26,12 @@ class MemberRollout(TypedDict):
     """
 
     # Training-path fields (read by pretokenize → interleave → TrainingSample).
-    # example_id mirrors EpisodeResult.base_example_id; dataset normalization
-    # (verifiers.envs.environment._ensure_example_id) and the buffer example
-    # store (prime_rl.orchestrator.buffer.Buffer) both accept int | str.
     example_id: int | str
     task: str
     trajectory: list[TrajectoryStep]
     sampling_args: dict[str, Any]
-    error: None
-    reward: float | None
+    error: dict[str, Any] | None
+    reward: float
 
     # Multi-actor metadata
     episode_id: str
@@ -40,130 +39,40 @@ class MemberRollout(TypedDict):
     role_id: str
 
 
-def episodes_to_member_rollouts(
-    results: list[EpisodeResult],
-    env_name: str,
-    temperature: float,
-) -> list[MemberRollout]:
-    """Flatten EpisodeResults into one MemberRollout per member.
-
-    Args:
-        results: Completed episodes from a multi-actor env.
-        env_name: Environment name — becomes ``task`` (NOT role_id).
-        temperature: Sampling temperature injected as a bridge parameter.
-            Neither TurnResp, PolicyHandle, nor EpisodeResult carry this.
-    """
-    rollouts: list[MemberRollout] = []
-    for episode in results:
-        example_id = _validated_example_id(episode)
-        for member in episode.members:
-            rollouts.append(_member_to_rollout(
-                member=member,
-                example_id=example_id,
-                episode_id=episode.episode_id,
-                env_name=env_name,
-                temperature=temperature,
-            ))
-    return rollouts
-
-
-def _validated_example_id(episode: EpisodeResult) -> int | str:
-    """Accept int or str example_id. Anything else raises."""
-    raw = episode.base_example_id
-    if not isinstance(raw, (int, str)):
-        raise TypeError(
-            f"base_example_id must be int or str, got "
-            f"{type(raw).__name__}: {raw!r}"
-        )
-    return raw
-
-
-def _member_to_rollout(
-    member: MemberResult,
-    example_id: int | str,
-    episode_id: str,
-    env_name: str,
-    temperature: float,
-) -> MemberRollout:
-    return MemberRollout(
-        example_id=example_id,
-        task=env_name,
-        trajectory=member.trajectory,
-        sampling_args={"temperature": temperature},
-        error=None,
-        reward=member.reward,
-        episode_id=episode_id,
-        member_id=member.member_id,
-        role_id=member.role_id,
-    )
-
-
-def _resolve_member_rewards(
-    members: list[str],
-    member_rewards: dict[str, float] | None,
-) -> dict[str, float]:
-    """Return per-member reward, requiring full structured coverage.
-
-    MultiAgentRubric contract requires ``state["member_rewards"]`` covers
-    every member. Absence or partial coverage is a schema violation and
-    raises — refusing to silently synthesize signal.
-    """
-    if member_rewards is None:
-        raise ValueError(
-            "state['member_rewards'] is missing. The rubric must be a "
-            "MultiAgentRubric that writes per-member rewards; flat "
-            "metrics fallback has been removed."
-        )
-    missing = [m for m in members if m not in member_rewards]
-    if missing:
-        raise ValueError(
-            "state['member_rewards'] does not cover all members: "
-            f"missing {missing}. The rubric must write a reward for "
-            "every member — partial coverage is a schema violation."
-        )
-    return {m: member_rewards[m] for m in members}
-
-
-# ---------------------------------------------------------------------------
-# RolloutOutput bridge (DebateEnv — tagged merged trajectory)
-# ---------------------------------------------------------------------------
-
-
 def rollout_to_member_rollouts(
     output: dict[str, Any],
     env_name: str,
 ) -> list[MemberRollout]:
-    """Split a DebateEnv RolloutOutput into one MemberRollout per member.
+    """Split a multi-actor RolloutOutput into one MemberRollout per member.
 
-    DebateEnv produces a single merged trajectory where each TrajectoryStep
-    is tagged with ``extras["member_id"]`` and ``extras["role_id"]``.
-    This function groups steps by member and builds MemberRollouts that
-    are identical in shape to those from ``episodes_to_member_rollouts``.
+    Reads ``output["mar_score"]`` (the typed payload written by
+    ``MultiAgentRubric``) for per-member rewards and roles, and groups
+    ``output["trajectory"]`` by ``extras["member_id"]`` to assemble each
+    member's step list.
 
     Args:
-        output: RolloutOutput dict with keys: trajectory, sampling_args,
-            example_id, and optionally metrics and trajectory_id.
+        output: RolloutOutput dict with required keys: trajectory, sampling_args,
+            example_id, mar_score. Optional: error, trajectory_id.
         env_name: Environment name — becomes ``task``.
+
+    Raises:
+        KeyError: if ``mar_score`` is missing — the env did not run a
+            ``MultiAgentRubric``.
     """
-    trajectory: list[TrajectoryStep] = output.get("trajectory", [])
-    if not trajectory:
-        return []
+    mar_raw = output["mar_score"]
+    mar = (
+        mar_raw if isinstance(mar_raw, MARScore) else MARScore.model_validate(mar_raw)
+    )
 
-    sampling_args = output.get("sampling_args")
-    if sampling_args is None:
-        raise ValueError(
-            "RolloutOutput missing 'sampling_args' — required for interleave_rollout"
-        )
-
+    sampling_args = output["sampling_args"]
     temperature = sampling_args["temperature"]
     example_id = output["example_id"]
     episode_id = output.get("trajectory_id", "")
-    member_rewards = output.get("member_rewards")
+    rollout_error = output.get("error")
+    trajectory: list[TrajectoryStep] = output.get("trajectory", [])
 
-    # Group steps by member_id, preserving temporal order
-    member_steps: dict[str, list[TrajectoryStep]] = defaultdict(list)
-    member_role: dict[str, str] = {}
-
+    # Group steps by member_id (preserving temporal order).
+    steps_by_member: dict[str, list[TrajectoryStep]] = defaultdict(list)
     for step in trajectory:
         extras = step.get("extras", {})
         mid = extras.get("member_id")
@@ -171,26 +80,19 @@ def rollout_to_member_rollouts(
             raise ValueError(
                 f"TrajectoryStep missing extras['member_id']: {step!r}"
             )
-        member_steps[mid].append(step)
-        if mid not in member_role:
-            member_role[mid] = extras.get("role_id", "")
+        steps_by_member[mid].append(step)
 
-    members_present = list(member_steps.keys())
-    resolved = _resolve_member_rewards(members_present, member_rewards)
-
-    rollouts: list[MemberRollout] = []
-    for mid, steps in member_steps.items():
-        reward = resolved[mid]
-        rollouts.append(MemberRollout(
+    return [
+        MemberRollout(
             example_id=example_id,
             task=env_name,
-            trajectory=steps,
+            trajectory=steps_by_member.get(m.member_id, []),
             sampling_args={"temperature": temperature},
-            error=None,
-            reward=reward,
+            error=rollout_error,
+            reward=m.reward,
             episode_id=episode_id,
-            member_id=mid,
-            role_id=member_role[mid],
-        ))
-
-    return rollouts
+            member_id=m.member_id,
+            role_id=m.role_id,
+        )
+        for m in mar.members
+    ]
