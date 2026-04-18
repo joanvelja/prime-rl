@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 import verifiers as vf
 from verifiers.errors import KernelProtocolError
 from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
@@ -23,8 +22,8 @@ class _StructuredRubric(MultiAgentRubric):
         super().__init__()
         self.members = members
 
-    async def score_rollout(self, state) -> None:
-        state["mar_score"] = MARScore(
+    async def build_marscore(self, state) -> MARScore:
+        return MARScore(
             members=[
                 MemberScore(member_id=m, role_id=m, reward=1.0) for m in self.members
             ],
@@ -41,11 +40,11 @@ class _RaisingRubric(MultiAgentRubric):
         self.fail_on = fail_on
         self._i = -1
 
-    async def score_rollout(self, state) -> None:
+    async def build_marscore(self, state) -> MARScore:
         self._i += 1
         if self._i in self.fail_on:
             raise KernelProtocolError(f"boom-{self._i}")
-        state["mar_score"] = MARScore(
+        return MARScore(
             members=[
                 MemberScore(member_id=m, role_id=m, reward=1.0) for m in self.members
             ],
@@ -63,6 +62,51 @@ def test_multi_agent_rubric_contract_writes_mar_score():
     state: dict = {}
     _run(rubric.score_rollout(state))
     assert _rewards_by_member(state) == {"alice": 1.0, "bob": 1.0}
+
+
+def test_score_rollout_short_circuits_prompt_too_long():
+    class _ShouldNotRunRubric(MultiAgentRubric):
+        members = ["a"]
+
+        async def build_marscore(self, state) -> MARScore:
+            raise AssertionError("build_marscore should not run")
+
+    rubric = _ShouldNotRunRubric()
+    state = {"prompt_too_long": True}
+
+    _run(rubric.score_rollout(state))
+
+    assert _rewards_by_member(state) == {"a": 0.0}
+    assert state["mar_score"].episode_metrics == {
+        "errored_rollout": 1.0,
+        "error_type": "prompt_too_long",
+        "error_phase": "rollout",
+    }
+
+
+def test_score_rollout_short_circuits_existing_state_error():
+    class _ShouldNotRunRubric(MultiAgentRubric):
+        members = ["a"]
+
+        async def build_marscore(self, state) -> MARScore:
+            raise AssertionError("build_marscore should not run")
+
+    class _SimulatedEnvError(Exception):
+        pass
+
+    rubric = _ShouldNotRunRubric()
+    error = _SimulatedEnvError("boom")
+    state = {"error": error}
+
+    _run(rubric.score_rollout(state))
+
+    assert state["error"] is error
+    assert _rewards_by_member(state) == {"a": 0.0}
+    assert state["mar_score"].episode_metrics == {
+        "errored_rollout": 1.0,
+        "error_type": "_SimulatedEnvError",
+        "error_phase": "rollout",
+    }
 
 
 def test_score_group_error_boundary_isolates_failures():
@@ -92,7 +136,7 @@ def test_score_group_non_vf_error_propagates():
     class _BuggyRubric(MultiAgentRubric):
         members = ["a"]
 
-        async def score_rollout(self, state) -> None:
+        async def build_marscore(self, state) -> MARScore:
             raise AttributeError("programming bug")
 
     rubric = _BuggyRubric()
@@ -114,13 +158,13 @@ def test_multi_agent_rubric_is_subclass_of_rubric():
     assert issubclass(MultiAgentRubric, vf.Rubric)
 
 
-def test_score_group_preserves_existing_mar_score_on_subsequent_error():
-    """If subclass wrote mar_score before raising, base must NOT overwrite it."""
+def test_score_rollout_overwrites_partial_mar_score_on_vf_error():
+    """A scoring-time vf.Error must end in the canonical zero-reward MARScore."""
 
     class _PartialFailRubric(MultiAgentRubric):
         members = ["a", "b"]
 
-        async def score_rollout(self, state) -> None:
+        async def build_marscore(self, state) -> MARScore:
             state["mar_score"] = MARScore(
                 members=[
                     MemberScore(member_id="a", role_id="a", reward=0.7),
@@ -132,7 +176,12 @@ def test_score_group_preserves_existing_mar_score_on_subsequent_error():
 
     rubric = _PartialFailRubric()
     state: dict = {}
-    _run(rubric.score_group([state]))
-    # Base sees existing mar_score and does NOT overwrite with zero-reward
-    # default. Subclass's partial write wins.
-    assert _rewards_by_member(state) == {"a": 0.7, "b": 0.3}
+    _run(rubric.score_rollout(state))
+
+    assert isinstance(state["error"], KernelProtocolError)
+    assert _rewards_by_member(state) == {"a": 0.0, "b": 0.0}
+    assert state["mar_score"].episode_metrics == {
+        "errored_rollout": 1.0,
+        "error_type": "KernelProtocolError",
+        "error_phase": "scoring",
+    }

@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
 import pytest
-
 import verifiers as vf
+from verifiers import rollout_to_member_rollouts
 from verifiers.envs.multi_actor_kernel import (
     KernelState,
     StaticSchedule,
@@ -21,12 +20,9 @@ from verifiers.envs.multi_actor_kernel import (
     apply_action,
 )
 from verifiers.envs.multi_agent_env import MultiAgentEnv, _flatten_exception_group
-from verifiers.types import MARScore, MemberScore, Response, ResponseMessage, State, TrajectoryStep, Usage
+from verifiers.types import MARScore, MemberScore, State, TrajectoryStep
 from verifiers.utils.save_utils import state_to_output
 from verifiers.utils.usage_utils import StateUsageTracker
-
-from prime_rl.orchestrator.multi_actor_bridge import rollout_to_member_rollouts
-
 
 REQUIRED_COLUMNS = ["trajectory", "sampling_args", "trajectory_id"]
 
@@ -298,8 +294,16 @@ def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
             super().__init__(**kw)
             self.dataset = lambda: None
 
-        async def get_model_response(self, state, prompt, *, client=None, model=None):
-            mid = state.get("_lineage_key")
+        async def get_model_response(
+            self,
+            state,
+            prompt,
+            *,
+            client=None,
+            model=None,
+            request_context=None,
+        ):
+            mid = request_context.lineage_key if request_context else None
             if mid == "A":
                 raise vf.OverlongPromptError("A: too long")
             if mid == "B":
@@ -342,8 +346,16 @@ def test_simultaneous_slot_overlong_takes_priority_over_other_vf_errors():
             super().__init__(**kw)
             self.dataset = lambda: None
 
-        async def get_model_response(self, state, prompt, *, client=None, model=None):
-            mid = state.get("_lineage_key")
+        async def get_model_response(
+            self,
+            state,
+            prompt,
+            *,
+            client=None,
+            model=None,
+            request_context=None,
+        ):
+            mid = request_context.lineage_key if request_context else None
             if mid == "A":
                 raise vf.InvalidModelResponseError("A first")
             if mid == "B":
@@ -500,7 +512,7 @@ def test_errored_rollout_marscore_carries_zero_rewards_for_all_members():
     class _AlwaysFail(MultiAgentRubric):
         members = ["A", "B"]
 
-        async def score_rollout(self, state):
+        async def build_marscore(self, state):
             raise vf.InfraError("boom")
 
     rubric = _AlwaysFail()

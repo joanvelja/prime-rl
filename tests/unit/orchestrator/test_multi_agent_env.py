@@ -14,27 +14,25 @@ import logging
 from typing import Any, cast
 
 import pytest
-
 import verifiers as vf
 from verifiers.clients import Client as _VFClient
 from verifiers.clients.openai_chat_completions_token_client import (
     OpenAIChatCompletionsTokenClient,
 )
-from verifiers.envs.multi_agent_env import MultiAgentEnv
 from verifiers.envs.multi_actor_kernel import (
     StaticSchedule,
     TurnSlot,
 )
-from verifiers.errors import Error as VFError, OverlongPromptError
+from verifiers.envs.multi_agent_env import MultiAgentEnv
+from verifiers.errors import Error as VFError
+from verifiers.errors import OverlongPromptError
 from verifiers.types import (
     Response,
     ResponseMessage,
-    ResponseTokens,
     RolloutInput,
     State,
     Usage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake client — system boundary stub
@@ -310,8 +308,8 @@ def test_simultaneous_slot_rolls_back_on_error():
         rubric=EchoRubric(),
         dataset=lambda: None,
     )
-    # First call succeeds; second raises. gather raises on first exception;
-    # since we stage responses THEN commit, the kernel is untouched.
+    # First call succeeds; second raises. Since the slot only publishes
+    # after all responses are staged, the kernel is untouched.
     class MixedClient(FakeClient):
         def __init__(self):
             super().__init__([])
@@ -367,27 +365,28 @@ def test_simultaneous_slot_cancels_peer_on_first_failure():
     assert client.completed == [], "peer actor completed after first failure"
 
 
-def test_simultaneous_slot_rolls_back_on_post_commit_hook_failure():
-    """If on_step_committed raises mid-slot, NOTHING is published.
+def test_simultaneous_slot_rolls_back_on_extract_fields_failure():
+    """If extract_fields raises mid-slot, NOTHING is published.
 
-    extract_fields / _build_step / on_step_committed run after the
-    kernel has been folded into a LOCAL buffer. Invariant: raising in
-    any of them leaves state["_kernel"] and state["trajectory"] at
-    their pre-slot snapshots.
+    extract_fields / _build_step run after the kernel has been folded
+    into a LOCAL buffer. Invariant: raising in either leaves
+    state["_kernel"] and state["trajectory"] at their pre-slot
+    snapshots.
     """
     slots = (TurnSlot(slot_id=0, actors=("A", "B", "C"), phase="p"),)
 
-    class HookFailEnv(EchoEnv):
+    class ExtractFieldsFailEnv(EchoEnv):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
-            self.committed_calls = 0
+            self.extract_calls = 0
 
-        async def on_step_committed(self, state, utt, fields):
-            self.committed_calls += 1
-            if self.committed_calls == 2:
-                raise VFError("hook boom on actor 2")
+        async def extract_fields(self, public_channel, member_id, slot):
+            self.extract_calls += 1
+            if self.extract_calls == 2:
+                raise VFError("extract boom on actor 2")
+            return {"member_id": member_id}
 
-    env = HookFailEnv(
+    env = ExtractFieldsFailEnv(
         schedule=StaticSchedule(slots),
         members=["A", "B", "C"],
         rubric=EchoRubric(),

@@ -11,8 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from prime_rl.orchestrator.multi_actor_bridge import MemberRollout
-
+from verifiers.types import MemberRollout
 
 RAEKey = tuple[str, int | str, str]
 """(task, example_id, role_id). ``task`` is the env name (MemberRollout['task']),

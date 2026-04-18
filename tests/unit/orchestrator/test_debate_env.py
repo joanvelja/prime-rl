@@ -21,19 +21,27 @@ prime_rl.trainer.world (torch/distributed). Orthogonal to this suite.
 from __future__ import annotations
 
 import asyncio
+
+# ---------------------------------------------------------------------------
+# Test helpers — legacy-shape views into state["mar_score"]
+# ---------------------------------------------------------------------------
+# The rubric writes one structured key (state["mar_score"]). These helpers
+# project it back to the legacy dict shapes that test assertions reference.
+# Test asserts against the projected shape, so the underlying MARScore
+# carrying the right data is verified end-to-end.
+from collections import defaultdict
 from typing import Any
 
 import pytest
-
 import verifiers as vf
+from verifiers import rollout_to_member_rollouts
 from verifiers.clients import Client as _VFClient
-from verifiers.utils.async_utils import maybe_retry
+from verifiers.envs.debate.fields import EnumScoring, FieldSpec
+from verifiers.envs.debate.prompts import DebatePrompts, build_context, resolve_prompts
 from verifiers.envs.debate_env import (
     DebateEnv,
     load_environment,
 )
-from verifiers.envs.debate.prompts import DebatePrompts, build_context, resolve_prompts
-from verifiers.envs.debate.fields import EnumScoring, FieldSpec
 from verifiers.envs.debate_rubric import DebateRubric
 from verifiers.envs.multi_actor_kernel import (
     KernelState,
@@ -41,7 +49,9 @@ from verifiers.envs.multi_actor_kernel import (
     TurnSlot,
     apply_action,
 )
-from verifiers.errors import Error as VFError, KernelProtocolError
+from verifiers.errors import Error as VFError
+from verifiers.errors import KernelProtocolError
+from verifiers.types import MARScore as _MARScore
 from verifiers.types import (
     Response,
     ResponseMessage,
@@ -51,19 +61,7 @@ from verifiers.types import (
     TrajectoryStep,
     Usage,
 )
-from prime_rl.orchestrator.multi_actor_bridge import rollout_to_member_rollouts
-
-
-# ---------------------------------------------------------------------------
-# Test helpers — legacy-shape views into state["mar_score"]
-# ---------------------------------------------------------------------------
-# The rubric writes one structured key (state["mar_score"]). These helpers
-# project it back to the legacy dict shapes that test assertions reference.
-# Test asserts against the projected shape, so the underlying MARScore
-# carrying the right data is verified end-to-end.
-
-from collections import defaultdict
-from verifiers.types import MARScore as _MARScore
+from verifiers.utils.async_utils import maybe_retry
 
 
 class _Views:
@@ -1262,9 +1260,10 @@ def test_apply_action_quarantines_malformed_think_markup():
     must still raise — that's actual protocol corruption, not a
     formatting slip by one model.
     """
-    from verifiers.envs.multi_actor_kernel import (
-        KernelState as _KS, StaticSchedule as _Sch, TurnSlot as _TS, apply_action as _ap
-    )
+    from verifiers.envs.multi_actor_kernel import KernelState as _KS
+    from verifiers.envs.multi_actor_kernel import StaticSchedule as _Sch
+    from verifiers.envs.multi_actor_kernel import TurnSlot as _TS
+    from verifiers.envs.multi_actor_kernel import apply_action as _ap
     from verifiers.errors import ContentParseError, KernelProtocolError
 
     schedule = _Sch((_TS(slot_id=0, actors=("A",), phase="p"),))
@@ -1334,9 +1333,10 @@ def test_rollout_survives_benign_prose_with_bracket_words():
     public_channel for the offender and the schedule advances so peers
     still get to speak and the rubric still scores them.
     """
-    from verifiers.envs.multi_actor_kernel import (
-        KernelState as _KS, StaticSchedule as _Sch, TurnSlot as _TS, apply_action as _ap
-    )
+    from verifiers.envs.multi_actor_kernel import KernelState as _KS
+    from verifiers.envs.multi_actor_kernel import StaticSchedule as _Sch
+    from verifiers.envs.multi_actor_kernel import TurnSlot as _TS
+    from verifiers.envs.multi_actor_kernel import apply_action as _ap
 
     schedule = _Sch((
         _TS(slot_id=0, actors=("A",), phase="opening"),
@@ -1353,7 +1353,6 @@ def test_rollout_survives_benign_prose_with_bracket_words():
     assert r2.committed[0].public_channel == "Clean response"
 
     # Episode completed normally.
-    from verifiers.envs.multi_actor_kernel import StaticSchedule
     assert schedule.current_slot(r2.new_state) is None
 
 
@@ -2995,8 +2994,8 @@ def test_debate_prompts_rejects_colliding_verdict_tokens():
     EnumScoring answer value (case-insensitive), constructing the pack
     must raise ValueError. Otherwise transcript greps for the verdict
     silently misattribute judge output to a debater commit."""
-    from verifiers.envs.debate.prompts import JudgeTemplate
     from verifiers.envs.debate.fields import EnumScoring
+    from verifiers.envs.debate.prompts import JudgeTemplate
 
     # Build a synthetic pack where the grader's positive token "A"
     # collides with the MCQ answer enum {A, B, C, D}. Construction itself

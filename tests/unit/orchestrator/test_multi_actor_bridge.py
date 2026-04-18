@@ -9,14 +9,9 @@ import json
 from typing import Any
 
 import pytest
-
-from verifiers.types import MARScore, MemberScore, State, TrajectoryStep
+from verifiers import rollout_to_member_rollouts
+from verifiers.types import MARScore, MemberRollout, MemberScore, State, TrajectoryStep
 from verifiers.utils.save_utils import state_to_output
-
-from prime_rl.orchestrator.multi_actor_bridge import (
-    MemberRollout,
-    rollout_to_member_rollouts,
-)
 
 ENV_NAME = "debate_v1"
 TEMPERATURE = 0.7
