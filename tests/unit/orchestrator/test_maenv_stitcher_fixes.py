@@ -27,6 +27,7 @@ from verifiers.envs.multi_agent_kernel import (
     TurnSlot,
     Utterance,
 )
+from verifiers.types import AssistantMessage, SystemMessage, ToolMessage, UserMessage
 from verifiers.utils.message_utils import fold_consecutive_user_messages
 
 
@@ -81,32 +82,32 @@ def _state(commits: list[Utterance]) -> dict:
 
 def test_fold_idempotent_on_simple_run():
     msgs = [
-        {"role": "user", "content": "a"},
-        {"role": "user", "content": "b"},
-        {"role": "user", "content": "c"},
+        UserMessage(content="a"),
+        UserMessage(content="b"),
+        UserMessage(content="c"),
     ]
     once = fold_consecutive_user_messages(msgs)
     twice = fold_consecutive_user_messages(once)
     assert once == twice
     assert len(once) == 1
-    assert once[0]["content"] == "a\n\nb\n\nc"
+    assert once[0].content == "a\n\nb\n\nc"
 
 
 def test_fold_noop_on_sa_tool_trajectory():
     msgs = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
-        {"role": "tool", "tool_call_id": "1", "content": "r"},
-        {"role": "assistant", "content": "done"},
+        SystemMessage(content="sys"),
+        UserMessage(content="q"),
+        AssistantMessage(content=None, tool_calls=[{"id": "1", "name": "t", "arguments": "{}"}]),
+        ToolMessage(tool_call_id="1", content="r"),
+        AssistantMessage(content="done"),
     ]
     assert fold_consecutive_user_messages(msgs) == msgs
 
 
 def test_fold_leaves_tool_messages_untouched():
     msgs = [
-        {"role": "tool", "tool_call_id": "a", "content": "r1"},
-        {"role": "tool", "tool_call_id": "b", "content": "r2"},
+        ToolMessage(tool_call_id="a", content="r1"),
+        ToolMessage(tool_call_id="b", content="r2"),
     ]
     # Adjacent tool messages MUST NOT be folded — tool_call_id uniqueness
     # is what correlates results to specific calls.
@@ -119,30 +120,27 @@ def test_fold_skips_multimodal_content_lists():
     # [user, user], fall back to MITO, and the model still gets valid
     # input via the chat template. Slow-path, but correct.
     msgs = [
-        {
-            "role": "user",
-            "content": [{"type": "image_url", "image_url": {"url": "x"}}],
-        },
-        {"role": "user", "content": "describe it"},
+        UserMessage(content=[{"type": "image_url", "image_url": {"url": "x"}}]),
+        UserMessage(content="describe it"),
     ]
     folded = fold_consecutive_user_messages(msgs)
-    assert folded == msgs  # exact byte-for-byte pass-through
-    # image part must still be present + structurally intact
-    assert folded[0]["content"] == [{"type": "image_url", "image_url": {"url": "x"}}]
-    assert folded[1] == {"role": "user", "content": "describe it"}
+    assert folded == msgs  # exact pass-through
+    assert folded[0].content == [{"type": "image_url", "image_url": {"url": "x"}}]
+    assert folded[1].content == "describe it"
 
 
 def test_fold_preserves_other_fields_on_merged_user():
+    # CustomBaseModel has extra="allow", so OpenAI-style `name` rides along.
     msgs = [
-        {"role": "user", "content": "hi", "name": "alice"},
-        {"role": "user", "content": "again"},
+        UserMessage(content="hi", name="alice"),
+        UserMessage(content="again"),
     ]
     folded = fold_consecutive_user_messages(msgs)
     assert len(folded) == 1
-    # `name` from the first message carries over; we don't try to merge
-    # conflicting metadata.
-    assert folded[0].get("name") == "alice"
-    assert folded[0]["content"] == "hi\n\nagain"
+    # `name` from the first message carries over via model_copy; we don't
+    # merge conflicting metadata.
+    assert getattr(folded[0], "name", None) == "alice"
+    assert folded[0].content == "hi\n\nagain"
 
 
 # ---------------------------------------------------------------------------
@@ -179,14 +177,14 @@ async def _run_roundtrip():
     f2 = fold_consecutive_user_messages(msgs2)
 
     # Post-commit form of slot 0 = folded msgs0 + A1 as assistant msg.
-    cache_after_0 = list(f0) + [{"role": "assistant", "content": "A1 raw"}]
+    cache_after_0 = list(f0) + [AssistantMessage(content="A1 raw")]
     tail = f2[len(cache_after_0):]
 
     # Prefix stability
     assert f2[: len(cache_after_0)] == cache_after_0
     # Tail is exactly one user message
-    assert [m["role"] for m in tail] == ["user"]
-    # Stitcher accepts it
+    assert [m.role for m in tail] == ["user"]
+    # Stitcher accepts it (_get_role reads attr or key, so typed is fine)
     assert _is_valid_env_tail(tail)
 
 
