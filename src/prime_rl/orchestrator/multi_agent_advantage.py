@@ -8,8 +8,10 @@ compute_advantages. Both coexist.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from verifiers import rollout_to_member_rollouts
 from verifiers.types import MemberRollout
 
 RAEKey = tuple[str, int | str, str]
@@ -36,6 +38,37 @@ class RAEState:
     def update(self, key: RAEKey, reward: float) -> None:
         prev = self.baselines.get(key, 0.0)
         self.baselines[key] = self.momentum * prev + (1 - self.momentum) * reward
+
+
+def fan_out_for_multi_agent(
+    rollouts: list[Mapping],
+    *,
+    drop_judge: bool = True,
+) -> tuple[list[MemberRollout], list[list[int]]]:
+    """Project episode-level rollouts to per-member training units.
+
+    Returns ``(training_units, rollout_to_unit_idxs)``. The latter maps each
+    input rollout index to the indices of its member units in
+    ``training_units`` — the orchestrator uses it to fold per-unit token
+    counts back to per-rollout metric rows (results_df is per-episode).
+
+    ``drop_judge`` filters out ``member_id == "judge"`` units. By the
+    ``zero_sum_reward`` construction the judge gets reward 0 for every
+    episode; including it in training only burns gradient compute against
+    a zero-signal advantage. Pass ``False`` only for diagnostic runs that
+    want judge transcripts in the training batch (e.g. SFT-on-judge).
+    """
+    training_units: list[MemberRollout] = []
+    rollout_to_unit_idxs: list[list[int]] = []
+    for rollout in rollouts:
+        members = rollout_to_member_rollouts(rollout)
+        if drop_judge:
+            members = [m for m in members if m["member_id"] != "judge"]
+        rollout_to_unit_idxs.append(
+            list(range(len(training_units), len(training_units) + len(members)))
+        )
+        training_units.extend(members)
+    return training_units, rollout_to_unit_idxs
 
 
 def compute_rae_advantages(

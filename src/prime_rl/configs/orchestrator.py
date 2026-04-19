@@ -586,6 +586,37 @@ AdvantageConfig: TypeAlias = Annotated[
 ]
 
 
+class RAEConfig(BaseModel):
+    """Role-conditioned Advantage Estimation (SPIRAL Alg.1) — multi-agent advantage path.
+
+    Activates automatically when the env group's rubric is a MultiAgentRubric;
+    these knobs only matter in that case. The single-agent GRPO path
+    (``advantage:`` config) is unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    momentum: Annotated[
+        float,
+        Field(
+            ge=0.0,
+            le=1.0,
+            description="EMA decay rate α for baseline updates (Alg.1, line 20). "
+            "Higher α → slower baseline drift; SPIRAL paper specifies α∈[0,1] without "
+            "pinning a value, 0.9 is the conventional default.",
+        ),
+    ] = 0.9
+    drop_judge: Annotated[
+        bool,
+        Field(
+            description="Drop member_id == 'judge' rollouts from the training batch. "
+            "The judge has zero reward by zero_sum_reward construction, so its "
+            "advantage is always -baseline (policy-neutral noise). Training on "
+            "judge tokens only burns gradient compute.",
+        ),
+    ] = True
+
+
 class GibberishFilterConfig(BaseModel):
     """Flags rare tokens generated at high entropy (Section 5.2, https://arxiv.org/abs/2510.02387)."""
 
@@ -753,6 +784,9 @@ class OrchestratorConfig(BaseConfig):
 
     # The advantage configuration
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
+
+    # Role-conditioned Advantage Estimation (multi-agent path)
+    rae: RAEConfig = RAEConfig()
 
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]

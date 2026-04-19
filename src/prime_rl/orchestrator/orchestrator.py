@@ -9,6 +9,11 @@ import tomli_w
 
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step, get_eval_sampling_args
+from prime_rl.orchestrator.multi_agent_advantage import (
+    RAEState,
+    compute_rae_advantages,
+    fan_out_for_multi_agent,
+)
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
@@ -32,6 +37,7 @@ monkey_patch_chat_completion_logprobs()
 import pandas as pd
 import verifiers as vf
 from transformers import AutoProcessor, AutoTokenizer
+from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
 
 from prime_rl.configs.orchestrator import BufferConfig, OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
@@ -137,6 +143,15 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Check if this is a vision-language model (used throughout for VLM-specific paths)
     is_vlm = config.model.vlm is not None
+    if use_rae and is_vlm:
+        # VLM image cache is keyed by rollout index; fanning a single rollout
+        # into multiple per-member units would need cache-key duplication and
+        # per-member visibility filtering. Defer until a VLM debate use case
+        # actually shows up.
+        raise NotImplementedError(
+            "VLM + multi-agent training is not yet supported (image cache "
+            "fan-out across per-member rollouts is unimplemented)."
+        )
 
     # Load tokenizer and processor (processor only for VLM models)
     logger.info(f"Initializing tokenizer for {config.model.name}")
@@ -182,6 +197,33 @@ async def orchestrate(config: OrchestratorConfig):
         map_kwargs=dict(writer_batch_size=1),  # set defensively to not error on map operations on large datasets
     )
     verification_enabled = config.verification.enabled
+
+    # Detect multi-agent envs and gate downstream branching. The MA path
+    # routes rollouts through ``rollout_to_member_rollouts`` →
+    # ``compute_rae_advantages`` (SPIRAL Alg.1) instead of GRPO. Mixing MA
+    # and single-agent envs in one orchestrator process is not supported:
+    # they need different per-step branching logic and the simpler
+    # homogeneous case covers every production setup we have today.
+    ma_env_names = {
+        name
+        for name, env in zip(train_env_group.env_names, train_env_group.envs)
+        if isinstance(env.rubric, MultiAgentRubric)
+    }
+    non_ma_env_names = set(train_env_group.env_names) - ma_env_names
+    if ma_env_names and non_ma_env_names:
+        raise NotImplementedError(
+            f"Mixed multi-agent and single-agent envs in the same group are "
+            f"not supported. MA: {sorted(ma_env_names)}, "
+            f"single-agent: {sorted(non_ma_env_names)}. Run them in separate "
+            f"orchestrator processes."
+        )
+    use_rae = bool(ma_env_names)
+    if use_rae:
+        logger.info(
+            f"Multi-agent training detected (envs={sorted(ma_env_names)}). "
+            f"Routing through RAE per-member advantage path "
+            f"(momentum={config.rae.momentum}, drop_judge={config.rae.drop_judge})."
+        )
 
     train_env_deferred_group_scoring_tasks = (
         {env_name for env_name in train_env_names if task_uses_group_scoring(train_env_group, env_name)}
@@ -390,9 +432,10 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Reset weights to base model if starting from scratch
     progress = Progress()
+    rae_state: RAEState | None = RAEState(momentum=config.rae.momentum) if use_rae else None
 
     if checkpoint_step is not None and ckpt_manager is not None:
-        ckpt_manager.load(progress, buffer, step=checkpoint_step)
+        ckpt_manager.load(progress, buffer, step=checkpoint_step, rae_state=rae_state)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
         scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
         if config.eval and config.eval.skip_eval_on_resume:
@@ -446,7 +489,7 @@ async def orchestrate(config: OrchestratorConfig):
         ):
             logger.info(f"Saving checkpoint at step {progress.step}")
             save_ckpt_start_time = time.perf_counter()
-            ckpt_manager.save(progress, buffer, step=progress.step)
+            ckpt_manager.save(progress, buffer, step=progress.step, rae_state=rae_state)
             save_ckpt_time = time.perf_counter() - save_ckpt_start_time
 
         # Break if we have reached the maximum number of steps
@@ -551,29 +594,48 @@ async def orchestrate(config: OrchestratorConfig):
         # Apply rollout filters (zeros reward/mask for degenerate generations)
         filter_metrics = apply_filters(rollout_filters, train_rollouts)
 
-        # Compute advantages
+        # Compute advantages — branch on multi-agent vs single-agent path.
+        # Multi-agent: fan each rollout out into per-member rollouts via the
+        # verifiers bridge, optionally drop the judge member (zero-reward by
+        # zero_sum_reward construction → wasted gradient compute), then
+        # compute per-member RAE advantages (SPIRAL Alg.1). Each member
+        # rollout becomes a "training unit" downstream — pretokenize and
+        # interleave_rollout consume MemberRollout the same as RolloutOutput
+        # since they read the same dict keys.
+        # Single-agent: training unit = rollout (1:1), GRPO advantages.
         example_ids = [r["example_id"] for r in train_rollouts]
         num_rollouts = len(train_rollouts)
         num_unique_examples = len(set(example_ids))
         rewards = [r["reward"] for r in train_rollouts]
         completion_lens = [get_completion_len(r) for r in train_rollouts]
-        advantages = compute_advantages(
-            rewards,
-            completion_lens,
-            config.rollouts_per_example,
-            config.advantage,
-        )
 
-        # Convert rollouts to training samples
+        if use_rae:
+            assert rae_state is not None  # gated by use_rae at startup
+            training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
+                train_rollouts, drop_judge=config.rae.drop_judge
+            )
+            advantages = compute_rae_advantages(training_units, rae_state)
+        else:
+            training_units = list(train_rollouts)
+            rollout_to_unit_idxs = [[i] for i in range(num_rollouts)]
+            advantages = compute_advantages(
+                rewards,
+                completion_lens,
+                config.rollouts_per_example,
+                config.advantage,
+            )
+
+        # Convert training units to training samples
         parallel_preprocess_start = time.perf_counter()
 
         # Pretokenize before VLM image cache build (which strips image data from messages)
-        for rollout in train_rollouts:
-            pretokenize_rollout_trajectory(rollout, tokenizer, processor=processor)
+        for unit in training_units:
+            pretokenize_rollout_trajectory(unit, tokenizer, processor=processor)
 
         # VLM: build image cache in a thread so it doesn't block the event loop.
         # This lets the scheduler continue servicing inflight rollout requests
         # and — with max_async_level >= 2 — overlap with the next batch's inference.
+        # MA + VLM is gated at startup; in MA mode is_vlm is always False here.
         if is_vlm:
             vlm_cache = await asyncio.get_event_loop().run_in_executor(
                 rollout_executor, build_vlm_image_cache, train_rollouts, processor
@@ -585,39 +647,49 @@ async def orchestrate(config: OrchestratorConfig):
         else:
             vlm_cache = None
 
-        # Process rollouts in parallel
-        def process_rollout(rollout: vf.RolloutOutput, rollout_idx: int) -> list[TrainingSample] | None:
-            return interleave_rollout(rollout, vlm_cache=vlm_cache, cache_key=rollout_idx)
+        # Process units in parallel
+        def process_unit(unit, unit_idx: int) -> list[TrainingSample] | None:
+            return interleave_rollout(unit, vlm_cache=vlm_cache, cache_key=unit_idx)
 
         loop = asyncio.get_event_loop()
         futures = [
-            loop.run_in_executor(rollout_executor, process_rollout, r, rollout_idx)
-            for rollout_idx, r in enumerate(train_rollouts)
+            loop.run_in_executor(rollout_executor, process_unit, u, unit_idx)
+            for unit_idx, u in enumerate(training_units)
         ]
         results = await asyncio.gather(*futures)
 
-        # Collect results and assign advantages
+        # Collect results and assign per-unit advantages. For metrics, fold
+        # per-unit token counts back to per-rollout (results_df rows are still
+        # per-episode — that's the metric granularity downstream consumers
+        # expect, single-agent or multi-agent).
         train_examples: list[TrainingSample] = []
         rollout_prefill_lens: list[int] = []
         rollout_decode_lens: list[int] = []
         rollout_samples_per_rollout: list[int] = []
         num_prefill_tokens = 0
         num_decode_tokens = 0
-        for rollout, advantage, samples in zip(train_rollouts, advantages, results):
+        for unit_idxs in rollout_to_unit_idxs:
             rollout_prefill_tokens = 0
             rollout_decode_tokens = 0
-            if samples is not None:
-                rollout_samples_per_rollout.append(len(samples))
+            rollout_total_samples = 0
+            for unit_idx in unit_idxs:
+                samples = results[unit_idx]
+                advantage = advantages[unit_idx]
+                unit = training_units[unit_idx]
+                if samples is None:
+                    continue
+                rollout_total_samples += len(samples)
                 for sample in samples:
                     sample.advantage = advantage
-                    sample.reward = rollout["reward"]
+                    sample.reward = unit["reward"]
                     sample_decode_tokens = sum(sample.completion_mask)
-                    sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
+                    sample_prefill_tokens = (
+                        len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
+                    )
                     rollout_decode_tokens += sample_decode_tokens
                     rollout_prefill_tokens += sample_prefill_tokens
                     train_examples.append(sample)
-            else:
-                rollout_samples_per_rollout.append(0)
+            rollout_samples_per_rollout.append(rollout_total_samples)
             rollout_prefill_lens.append(rollout_prefill_tokens)
             rollout_decode_lens.append(rollout_decode_tokens)
             num_prefill_tokens += rollout_prefill_tokens
