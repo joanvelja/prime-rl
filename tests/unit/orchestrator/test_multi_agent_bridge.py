@@ -24,14 +24,12 @@ TEMPERATURE = 0.7
 
 def _make_tagged_step(
     member_id: str,
-    role_id: str,
     phase: str = "opening",
     trajectory_id: str = "traj-0",
     parse_error: str | None = None,
 ) -> TrajectoryStep:
     extras: dict[str, Any] = {
         "member_id": member_id,
-        "role_id": role_id,
         "phase": phase,
     }
     if parse_error is not None:
@@ -61,7 +59,7 @@ def _make_tagged_step(
 
 def _build_state(
     *,
-    members: list[tuple[str, str, float]] | None = None,
+    members: list[tuple[str, float]] | None = None,
     steps: list[TrajectoryStep] | None = None,
     example_id: int | str = 42,
     trajectory_id: str = "debate-0",
@@ -70,24 +68,23 @@ def _build_state(
 ) -> State:
     """Build a State that the env would produce, with mar_score written by rubric."""
     if members is None:
-        members = [("A", "prover", 1.0), ("B", "verifier", 0.0)]
+        members = [("A", 1.0), ("B", 0.0)]
     if steps is None:
         steps = [
-            _make_tagged_step("A", "prover", "opening"),
-            _make_tagged_step("B", "verifier", "opening"),
-            _make_tagged_step("A", "prover", "rebuttal"),
-            _make_tagged_step("B", "verifier", "rebuttal"),
+            _make_tagged_step("A", "opening"),
+            _make_tagged_step("B", "opening"),
+            _make_tagged_step("A", "rebuttal"),
+            _make_tagged_step("B", "rebuttal"),
         ]
     state = State()
     state["example_id"] = example_id
-    state["task"] = "default"
+    state["task"] = ENV_NAME
     state["trajectory"] = steps
     state["trajectory_id"] = trajectory_id
     state["sampling_args"] = {"temperature": TEMPERATURE}
     state["mar_score"] = MARScore(
         members=[
-            MemberScore(member_id=mid, role_id=rid, reward=r)
-            for mid, rid, r in members
+            MemberScore(member_id=mid, reward=r) for mid, r in members
         ],
         episode_scalar=episode_scalar,
         episode_metrics={"agreement": 1.0},
@@ -120,7 +117,7 @@ def _output_via_state_to_output(state: State) -> dict[str, Any]:
 def test_bridge_splits_by_member():
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     assert len(rollouts) == 2
     assert {r["member_id"] for r in rollouts} == {"A", "B"}
 
@@ -128,7 +125,7 @@ def test_bridge_splits_by_member():
 def test_bridge_correct_step_counts():
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     by_member = {r["member_id"]: r for r in rollouts}
     assert len(by_member["A"]["trajectory"]) == 2
     assert len(by_member["B"]["trajectory"]) == 2
@@ -137,21 +134,21 @@ def test_bridge_correct_step_counts():
 def test_bridge_training_fields():
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     a = next(r for r in rollouts if r["member_id"] == "A")
     assert a["example_id"] == 42
+    # task is what state["task"] held — bridge no longer overwrites with env_name
     assert a["task"] == ENV_NAME
     assert a["sampling_args"] == {"temperature": TEMPERATURE}
     assert a["error"] is None
     assert a["reward"] == 1.0
     assert a["episode_id"] == "debate-0"
-    assert a["role_id"] == "prover"
 
 
 def test_bridge_per_member_rewards_match_mar_score():
-    state = _build_state(members=[("A", "prover", 0.7), ("B", "verifier", 0.3)])
+    state = _build_state(members=[("A", 0.7), ("B", 0.3)])
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     by_member = {r["member_id"]: r["reward"] for r in rollouts}
     assert by_member == {"A": 0.7, "B": 0.3}
 
@@ -159,7 +156,7 @@ def test_bridge_per_member_rewards_match_mar_score():
 def test_bridge_preserves_temporal_order():
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     a = next(r for r in rollouts if r["member_id"] == "A")
     assert a["trajectory"][0]["extras"]["phase"] == "opening"
     assert a["trajectory"][1]["extras"]["phase"] == "rebuttal"
@@ -168,7 +165,7 @@ def test_bridge_preserves_temporal_order():
 def test_bridge_str_example_id():
     state = _build_state(example_id="mmlu_0001")
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     assert all(r["example_id"] == "mmlu_0001" for r in rollouts)
 
 
@@ -181,22 +178,22 @@ def test_bridge_missing_mar_score_raises_key_error():
     """Missing mar_score = env did not run a MultiAgentRubric. Fail loud."""
     state = State()
     state["example_id"] = 1
-    state["task"] = "default"
-    state["trajectory"] = [_make_tagged_step("A", "prover")]
+    state["task"] = ENV_NAME
+    state["trajectory"] = [_make_tagged_step("A")]
     state["trajectory_id"] = "ep-0"
     state["sampling_args"] = {"temperature": TEMPERATURE}
     output = state_to_output(state)
     with pytest.raises(KeyError, match="mar_score"):
-        rollout_to_member_rollouts(output, ENV_NAME)
+        rollout_to_member_rollouts(output)
 
 
 def test_bridge_missing_member_id_in_step_raises():
-    bad_step = _make_tagged_step("A", "prover")
+    bad_step = _make_tagged_step("A")
     bad_step["extras"] = {}  # strip member_id
     state = _build_state(steps=[bad_step])
     output = _output_via_state_to_output(state)
     with pytest.raises(ValueError, match="member_id"):
-        rollout_to_member_rollouts(output, ENV_NAME)
+        rollout_to_member_rollouts(output)
 
 
 def test_bridge_empty_trajectory_still_emits_per_member_rollouts():
@@ -204,7 +201,7 @@ def test_bridge_empty_trajectory_still_emits_per_member_rollouts():
     MemberRollout (with empty trajectory). Bridge does not silently drop."""
     state = _build_state(steps=[])
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     # mar_score has 2 members; both get rollouts even with no steps.
     assert len(rollouts) == 2
     assert all(r["trajectory"] == [] for r in rollouts)
@@ -222,7 +219,7 @@ def test_state_to_output_projects_episode_scalar_to_reward():
 
 
 def test_state_to_output_projects_per_member_reward_to_flat_metrics():
-    state = _build_state(members=[("A", "prover", 0.8), ("B", "verifier", 0.2)])
+    state = _build_state(members=[("A", 0.8), ("B", 0.2)])
     output = state_to_output(state)
     assert output["reward/A"] == 0.8
     assert output["reward/B"] == 0.2
@@ -246,7 +243,7 @@ def test_bridge_round_trips_through_json():
     """End-to-end: state → state_to_output → JSON → bridge → MemberRollouts."""
     state = _build_state()
     output_dict = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output_dict, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output_dict)
     assert {r["member_id"] for r in rollouts} == {"A", "B"}
 
 
@@ -259,8 +256,8 @@ def test_mar_score_rejects_duplicate_member_ids():
     with pytest.raises(ValueError, match="Duplicate member_id"):
         MARScore(
             members=[
-                MemberScore(member_id="A", role_id="prover", reward=1.0),
-                MemberScore(member_id="A", role_id="verifier", reward=0.0),
+                MemberScore(member_id="A", reward=1.0),
+                MemberScore(member_id="A", reward=0.0),
             ],
             episode_scalar=0.5,
         )
@@ -271,12 +268,11 @@ def test_mar_score_rejects_empty_members():
         MARScore(members=[], episode_scalar=0.0)
 
 
-def test_mar_score_to_wandb_flat_canonical_keys():
+def test_mar_score_to_metrics_flat_canonical_keys():
     mar = MARScore(
         members=[
             MemberScore(
                 member_id="A",
-                role_id="prover",
                 reward=1.0,
                 metrics={"accuracy": 1.0},
             ),
@@ -284,41 +280,39 @@ def test_mar_score_to_wandb_flat_canonical_keys():
         episode_scalar=1.0,
         episode_metrics={"agreement": 1.0, "winner": 0.0},
     )
-    flat = mar.to_wandb_flat()
+    flat = mar.to_metrics_flat()
     assert flat["reward/A"] == 1.0
     assert flat["accuracy/A"] == 1.0
     assert flat["agreement"] == 1.0
     assert flat["winner"] == 0.0
 
 
-def test_mar_score_to_wandb_flat_omits_zero_parse_errors():
-    """Zero parse_error_count should NOT appear in wandb output."""
+def test_mar_score_to_metrics_flat_omits_zero_parse_errors():
+    """Zero parse_error_count should NOT appear in flat metrics."""
     mar = MARScore(
-        members=[MemberScore(member_id="A", role_id="prover", reward=1.0)],
+        members=[MemberScore(member_id="A", reward=1.0)],
         episode_scalar=1.0,
     )
-    flat = mar.to_wandb_flat()
+    flat = mar.to_metrics_flat()
     assert "parse_errors/A" not in flat
 
 
-def test_mar_score_to_wandb_flat_includes_nonzero_parse_errors():
+def test_mar_score_to_metrics_flat_includes_nonzero_parse_errors():
     mar = MARScore(
         members=[
-            MemberScore(
-                member_id="A", role_id="prover", reward=1.0, parse_error_count=3
-            )
+            MemberScore(member_id="A", reward=1.0, parse_error_count=3)
         ],
         episode_scalar=1.0,
     )
-    flat = mar.to_wandb_flat()
+    flat = mar.to_metrics_flat()
     assert flat["parse_errors/A"] == 3
 
 
 def test_mar_score_by_id_returns_lookup():
     mar = MARScore(
         members=[
-            MemberScore(member_id="A", role_id="prover", reward=1.0),
-            MemberScore(member_id="B", role_id="verifier", reward=0.0),
+            MemberScore(member_id="A", reward=1.0),
+            MemberScore(member_id="B", reward=0.0),
         ],
         episode_scalar=1.0,
     )
@@ -335,7 +329,7 @@ def test_mar_score_by_id_returns_lookup():
 def test_member_rollout_has_required_training_fields():
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     r = rollouts[0]
     required = {
         "example_id",
@@ -346,7 +340,6 @@ def test_member_rollout_has_required_training_fields():
         "reward",
         "episode_id",
         "member_id",
-        "role_id",
     }
     assert required.issubset(set(r.keys()))
 
@@ -355,6 +348,6 @@ def test_bridge_member_rollout_compatible_with_typed_dict():
     """Sanity: bridge return values can be passed where MemberRollout is expected."""
     state = _build_state()
     output = _output_via_state_to_output(state)
-    rollouts = rollout_to_member_rollouts(output, ENV_NAME)
+    rollouts = rollout_to_member_rollouts(output)
     sample: MemberRollout = rollouts[0]
     assert sample["member_id"] in {"A", "B"}

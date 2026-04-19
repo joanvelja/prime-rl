@@ -1,8 +1,8 @@
 """Tests for RAEState + compute_rae_advantages.
 
-This is the per-(task, example_id, role_id) baseline path that the
+This is the per-(task, example_id, member_id) baseline path that the
 multi-agent training loop will use as the bridge consumer. Algorithm:
-A_i = R_i - b[(task_i, example_id_i, role_id_i)], EMA baseline update.
+A_i = R_i - b[(task_i, example_id_i, member_id_i)], EMA baseline update.
 """
 
 import pytest
@@ -17,10 +17,9 @@ TEMPERATURE = 0.7
 def _make_rollout(
     *,
     example_id: int | str = 1,
-    role_id: str = "prover",
+    member_id: str = "prover",
     reward: float = 1.0,
     episode_id: str = "ep-0",
-    member_id: str = "alice",
     task: str = ENV_NAME,
 ) -> MemberRollout:
     return MemberRollout(
@@ -32,7 +31,6 @@ def _make_rollout(
         reward=reward,
         episode_id=episode_id,
         member_id=member_id,
-        role_id=role_id,
     )
 
 
@@ -45,8 +43,8 @@ def test_cold_start_advantage_equals_reward():
     """No baseline yet → baseline defaults to 0 → advantage = reward."""
     state = RAEState(baselines={})
     rollouts = [
-        _make_rollout(reward=1.0, role_id="prover"),
-        _make_rollout(reward=0.0, role_id="verifier", member_id="bob"),
+        _make_rollout(reward=1.0, member_id="prover"),
+        _make_rollout(reward=0.0, member_id="verifier"),
     ]
     advs = compute_rae_advantages(rollouts, state)
     assert advs == [1.0, 0.0]
@@ -55,7 +53,7 @@ def test_cold_start_advantage_equals_reward():
 def test_baselines_update_after_batch():
     """After one batch, baselines should reflect EMA update."""
     state = RAEState(baselines={}, momentum=0.9)
-    rollouts = [_make_rollout(reward=1.0, role_id="prover")]
+    rollouts = [_make_rollout(reward=1.0, member_id="prover")]
     compute_rae_advantages(rollouts, state)
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.1)
 
@@ -79,11 +77,11 @@ def test_degenerate_group_always_positive():
     assert state.baselines[(ENV_NAME, 1, "prover")] < 1.0
 
 
-def test_per_role_baselines_independent():
+def test_per_member_baselines_independent():
     state = RAEState(baselines={}, momentum=0.5)
     rollouts = [
-        _make_rollout(example_id=1, role_id="prover", reward=1.0, member_id="alice"),
-        _make_rollout(example_id=1, role_id="verifier", reward=0.0, member_id="bob"),
+        _make_rollout(example_id=1, member_id="prover", reward=1.0),
+        _make_rollout(example_id=1, member_id="verifier", reward=0.0),
     ]
     compute_rae_advantages(rollouts, state)
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
@@ -93,8 +91,8 @@ def test_per_role_baselines_independent():
 def test_per_example_baselines_independent():
     state = RAEState(baselines={}, momentum=0.5)
     rollouts = [
-        _make_rollout(example_id=1, role_id="prover", reward=1.0),
-        _make_rollout(example_id=2, role_id="prover", reward=0.0, episode_id="ep-1"),
+        _make_rollout(example_id=1, member_id="prover", reward=1.0),
+        _make_rollout(example_id=2, member_id="prover", reward=0.0, episode_id="ep-1"),
     ]
     compute_rae_advantages(rollouts, state)
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.5)
@@ -102,10 +100,10 @@ def test_per_example_baselines_independent():
 
 
 def test_per_task_baselines_independent():
-    """Same (example_id, role_id) under different tasks must NOT share baselines."""
+    """Same (example_id, member_id) under different tasks must NOT share baselines."""
     state = RAEState(baselines={}, momentum=0.5)
-    r_a = _make_rollout(example_id=1, role_id="prover", reward=1.0, task="env_a")
-    r_b = _make_rollout(example_id=1, role_id="prover", reward=0.0, task="env_b")
+    r_a = _make_rollout(example_id=1, member_id="prover", reward=1.0, task="env_a")
+    r_b = _make_rollout(example_id=1, member_id="prover", reward=0.0, task="env_b")
     compute_rae_advantages([r_a, r_b], state)
     assert state.baselines[("env_a", 1, "prover")] == pytest.approx(0.5)
     assert state.baselines[("env_b", 1, "prover")] == pytest.approx(0.0)
@@ -153,7 +151,7 @@ def test_str_example_id_keys_baseline_correctly():
 
 
 def test_repeated_key_in_batch_uses_mean_for_baseline_update():
-    """Two rollouts with the same (task, example_id, role_id): both get
+    """Two rollouts with the same (task, example_id, member_id): both get
     advantages computed from the SAME pre-batch baseline; baseline is
     then updated using the MEAN of the rewards (not last-write-wins)."""
     state = RAEState(baselines={}, momentum=0.5)

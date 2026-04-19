@@ -50,13 +50,12 @@ def _utt(mid: str, sid: int, phase: str, raw: str, pub: str) -> Utterance:
 
 def _make_env(schedule: StaticSchedule) -> DebateEnv:
     prompts = resolve_prompts("selfplay")
-    members = ["A", "B"]
-    rubric = DebateRubric(truth_role="debater_a", members=members, prompts=prompts)
+    members = ["debater_a", "debater_b"]
+    rubric = DebateRubric(truth_member="debater_a", members=members, prompts=prompts)
     return DebateEnv(
         schedule=schedule,
         prompts=prompts,
         members=members,
-        role_for_agent={"A": "debater_a", "B": "debater_b"},
         rubric=rubric,
         dataset=lambda: None,
     )
@@ -152,24 +151,24 @@ async def _run_roundtrip():
     """Render at slot 0, then at slot 2 after commits — verify stitcher tail."""
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, agents=("A",), phase="propose"),
-            TurnSlot(slot_id=1, agents=("B",), phase="propose"),
-            TurnSlot(slot_id=2, agents=("A",), phase="critique"),
-            TurnSlot(slot_id=3, agents=("B",), phase="critique"),
+            TurnSlot(slot_id=0, agents=("debater_a",), phase="propose"),
+            TurnSlot(slot_id=1, agents=("debater_b",), phase="propose"),
+            TurnSlot(slot_id=2, agents=("debater_a",), phase="critique"),
+            TurnSlot(slot_id=3, agents=("debater_b",), phase="critique"),
         )
     )
     env = _make_env(schedule)
     slots = env.schedule._slots
 
-    msgs0 = await env.build_prompt(_state([]), "A", slots[0])
+    msgs0 = await env.build_prompt(_state([]), "debater_a", slots[0])
     msgs2 = await env.build_prompt(
         _state(
             [
-                _utt("A", 0, "propose", "A1 raw", "A1 pub"),
-                _utt("B", 1, "propose", "B1 raw", "B1 pub"),
+                _utt("debater_a", 0, "propose", "A1 raw", "A1 pub"),
+                _utt("debater_b", 1, "propose", "B1 raw", "B1 pub"),
             ]
         ),
-        "A",
+        "debater_a",
         slots[2],
     )
 
@@ -201,18 +200,18 @@ async def _past_instruction_positional(slot_ids: tuple[int, int, int, int]):
     """Return the past-instruction text rendered into msgs2 for member A."""
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=slot_ids[0], agents=("A",), phase="propose"),
-            TurnSlot(slot_id=slot_ids[1], agents=("B",), phase="propose"),
-            TurnSlot(slot_id=slot_ids[2], agents=("A",), phase="critique"),
-            TurnSlot(slot_id=slot_ids[3], agents=("B",), phase="critique"),
+            TurnSlot(slot_id=slot_ids[0], agents=("debater_a",), phase="propose"),
+            TurnSlot(slot_id=slot_ids[1], agents=("debater_b",), phase="propose"),
+            TurnSlot(slot_id=slot_ids[2], agents=("debater_a",), phase="critique"),
+            TurnSlot(slot_id=slot_ids[3], agents=("debater_b",), phase="critique"),
         )
     )
     env = _make_env(schedule)
     commits = [
-        _utt("A", slot_ids[0], "propose", "A1 raw", "A1 pub"),
-        _utt("B", slot_ids[1], "propose", "B1 raw", "B1 pub"),
+        _utt("debater_a",slot_ids[0], "propose", "A1 raw", "A1 pub"),
+        _utt("debater_b",slot_ids[1], "propose", "B1 raw", "B1 pub"),
     ]
-    msgs = await env.build_prompt(_state(commits), "A", env.schedule._slots[2])
+    msgs = await env.build_prompt(_state(commits), "debater_a", env.schedule._slots[2])
     # Past-own-turn instruction sits before the assistant msg with A1's raw content.
     past_user_texts = []
     for i, m in enumerate(msgs):
@@ -229,9 +228,9 @@ async def _past_instruction_positional(slot_ids: tuple[int, int, int, int]):
 async def _render_own_ctx(schedule: StaticSchedule, commits: list[Utterance], current_slot_idx: int):
     env = _make_env(schedule)
     msgs = await env.build_prompt(
-        _state(commits), "A", env.schedule._slots[current_slot_idx]
+        _state(commits), "debater_a", env.schedule._slots[current_slot_idx]
     )
-    return msgs, env._member_round_count("A")
+    return msgs, env._member_round_count("debater_a")
 
 
 def test_num_rounds_is_per_member_under_simultaneous_schedule():
@@ -240,8 +239,8 @@ def test_num_rounds_is_per_member_under_simultaneous_schedule():
     # Per-member: A participates in 2 slots → num_rounds = 2. Correct.
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, agents=("A", "B"), phase="propose"),
-            TurnSlot(slot_id=1, agents=("A", "B"), phase="critique"),
+            TurnSlot(slot_id=0, agents=("debater_a", "debater_b"), phase="propose"),
+            TurnSlot(slot_id=1, agents=("debater_a", "debater_b"), phase="critique"),
         )
     )
     _, num_rounds = asyncio.run(_render_own_ctx(schedule, [], 0))
@@ -256,16 +255,16 @@ def test_num_rounds_is_per_member_under_asymmetric_schedule():
     # 5//2 = 2 for both. Per-member: A=3, B=2.
     schedule = StaticSchedule(
         slots=(
-            TurnSlot(slot_id=0, agents=("A",), phase="propose"),
-            TurnSlot(slot_id=1, agents=("B",), phase="propose"),
-            TurnSlot(slot_id=2, agents=("A",), phase="critique"),
-            TurnSlot(slot_id=3, agents=("B",), phase="critique"),
-            TurnSlot(slot_id=4, agents=("A",), phase="closing"),
+            TurnSlot(slot_id=0, agents=("debater_a",), phase="propose"),
+            TurnSlot(slot_id=1, agents=("debater_b",), phase="propose"),
+            TurnSlot(slot_id=2, agents=("debater_a",), phase="critique"),
+            TurnSlot(slot_id=3, agents=("debater_b",), phase="critique"),
+            TurnSlot(slot_id=4, agents=("debater_a",), phase="closing"),
         )
     )
     env = _make_env(schedule)
-    assert env._member_round_count("A") == 3
-    assert env._member_round_count("B") == 2
+    assert env._member_round_count("debater_a") == 3
+    assert env._member_round_count("debater_b") == 2
 
 
 def test_sparse_slot_ids_do_not_corrupt_past_round_label():

@@ -14,19 +14,21 @@ from dataclasses import dataclass, field
 from verifiers.types import MemberRollout
 
 RAEKey = tuple[str, int | str, str]
-"""(task, example_id, role_id). ``task`` is the env name (MemberRollout['task']),
+"""(task, example_id, member_id). ``task`` is the env name (MemberRollout['task']),
 which partitions the baseline store across environments — otherwise two envs
 with overlapping example_ids would contaminate each other's baselines.
 ``example_id`` is int|str to match MemberRollout (HuggingFace UID-style ids
-like \"mmlu_0001\" propagate verbatim end-to-end)."""
+like \"mmlu_0001\" propagate verbatim end-to-end). ``member_id`` is the single
+participant label after the verifiers α-cut (role_id was deleted as a
+redundant duplicate label)."""
 
 
 @dataclass
 class RAEState:
-    """Persistent EMA baselines keyed by (task, example_id, role_id).
+    """Persistent EMA baselines keyed by (task, example_id, member_id).
 
     Cold start: missing keys default to 0.0 baseline, so the first
-    advantage for a new (task, example, role) tuple equals the raw reward.
+    advantage for a new (task, example, member) tuple equals the raw reward.
     """
 
     baselines: dict[RAEKey, float] = field(default_factory=dict)
@@ -43,7 +45,7 @@ def compute_rae_advantages(
 ) -> list[float]:
     """Compute per-member advantages and update EMA baselines.
 
-    A_i = R_i - b[(task_i, example_id_i, role_id_i)]
+    A_i = R_i - b[(task_i, example_id_i, member_id_i)]
 
     Baselines are read BEFORE the batch, then updated AFTER all advantages
     are computed. This prevents within-batch ordering effects.
@@ -58,13 +60,13 @@ def compute_rae_advantages(
                 f"MemberRollout has reward=None "
                 f"(episode={mr['episode_id']}, member={mr['member_id']})"
             )
-        key: RAEKey = (mr["task"], mr["example_id"], mr["role_id"])
+        key: RAEKey = (mr["task"], mr["example_id"], mr["member_id"])
         baseline = state.baselines.get(key, 0.0)
         advantages.append(reward - baseline)
         updates.append((key, reward))
 
     # Aggregate rewards per key so update order doesn't matter when
-    # the same (task, example_id, role_id) appears multiple times in a batch.
+    # the same (task, example_id, member_id) appears multiple times in a batch.
     key_sums: dict[RAEKey, float] = defaultdict(float)
     key_counts: dict[RAEKey, int] = defaultdict(int)
     for key, reward in updates:

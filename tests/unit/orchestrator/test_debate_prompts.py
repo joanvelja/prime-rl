@@ -50,7 +50,7 @@ def selfplay_prompts():
 def _ctx(**overrides):
     defaults = dict(
         task_prompt="What is 2+2?",
-        viewer_role="debater_a",
+        viewer_id="debater_a",
         phase="propose",
         round_index=0,
         num_rounds=2,
@@ -76,7 +76,7 @@ def _load_yaml(yaml_str: str) -> DebatePrompts:
 def test_build_context_basic():
     ctx = _ctx()
     assert ctx["task_prompt"] == "What is 2+2?"
-    assert ctx["viewer_role"] == "debater_a"
+    assert ctx["viewer_id"] == "debater_a"
     assert ctx["phase"] == "propose"
     assert ctx["is_first_round"] is True
     assert ctx["is_last_round"] is False
@@ -405,22 +405,21 @@ def test_judge_template_carries_user_template_verbatim():
 
 
 def test_wrap_opponent_fallback_attributes_speaker(default_prompts):
-    """No opponent_wrap template defined → fall back to [role_id] prefix.
+    """No opponent_wrap template defined → fall back to [member_id] prefix.
     Bare passthrough would leave attribution implicit (order-dependent) —
     see F1 judge attribution fix."""
     result = default_prompts.wrap_opponent(
         "propose",
         "hello",
-        member_id="A",
-        role_id="debater_a",
-        viewer_role="debater_b",
+        member_id="debater_a",
+        viewer_id="debater_b",
     )
     assert result == "[debater_a] hello"
 
 
-def test_wrap_opponent_with_template_injects_role_label():
-    """A template that references {{ role_id }} must render the speaker's
-    role in the wrapped output, so the judge can attribute unambiguously."""
+def test_wrap_opponent_with_template_injects_member_label():
+    """A template that references {{ member_id }} must render the speaker's
+    member id in the wrapped output, so the judge can attribute unambiguously."""
     dp = _load_yaml("""\
         version: 2
         system:
@@ -430,21 +429,19 @@ def test_wrap_opponent_with_template_injects_role_label():
           debater_a: "Q"
           debater_b: "Q"
         opponent_wrap:
-          debater: "[{{ role_id }} @ {{ phase }}]: {{ text }}"
+          debater: "[{{ member_id }} @ {{ phase }}]: {{ text }}"
     """)
     result_a = dp.wrap_opponent(
         "propose",
         "I argue X",
-        member_id="A",
-        role_id="debater_a",
-        viewer_role="debater_b",
+        member_id="debater_a",
+        viewer_id="debater_b",
     )
     result_b = dp.wrap_opponent(
         "propose",
         "I argue Y",
-        member_id="B",
-        role_id="debater_b",
-        viewer_role="debater_a",
+        member_id="debater_b",
+        viewer_id="debater_a",
     )
     assert result_a == "[debater_a @ propose]: I argue X"
     assert result_b == "[debater_b @ propose]: I argue Y"

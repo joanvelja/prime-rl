@@ -25,7 +25,7 @@ class _StructuredRubric(MultiAgentRubric):
     async def build_marscore(self, state) -> MARScore:
         return MARScore(
             members=[
-                MemberScore(member_id=m, role_id=m, reward=1.0) for m in self.members
+                MemberScore(member_id=m, reward=1.0) for m in self.members
             ],
             episode_scalar=1.0,
         )
@@ -46,7 +46,7 @@ class _RaisingRubric(MultiAgentRubric):
             raise KernelProtocolError(f"boom-{self._i}")
         return MARScore(
             members=[
-                MemberScore(member_id=m, role_id=m, reward=1.0) for m in self.members
+                MemberScore(member_id=m, reward=1.0) for m in self.members
             ],
             episode_scalar=1.0,
         )
@@ -77,8 +77,8 @@ def test_score_rollout_short_circuits_prompt_too_long():
     _run(rubric.score_rollout(state))
 
     assert _rewards_by_member(state) == {"a": 0.0}
-    assert state["mar_score"].episode_metrics == {
-        "errored_rollout": 1.0,
+    assert state["mar_score"].episode_metrics == {"errored_rollout": 1.0}
+    assert state["mar_score"].episode_error == {
         "error_type": "prompt_too_long",
         "error_phase": "rollout",
     }
@@ -102,8 +102,8 @@ def test_score_rollout_short_circuits_existing_state_error():
 
     assert state["error"] is error
     assert _rewards_by_member(state) == {"a": 0.0}
-    assert state["mar_score"].episode_metrics == {
-        "errored_rollout": 1.0,
+    assert state["mar_score"].episode_metrics == {"errored_rollout": 1.0}
+    assert state["mar_score"].episode_error == {
         "error_type": "_SimulatedEnvError",
         "error_phase": "rollout",
     }
@@ -124,7 +124,10 @@ def test_score_group_error_boundary_isolates_failures():
     assert isinstance(f["error"], KernelProtocolError)
     assert _rewards_by_member(f) == {"alice": 0.0, "bob": 0.0}
     assert f["mar_score"].episode_metrics["errored_rollout"] == 1.0
-    assert f["mar_score"].episode_metrics["error_type"] == "KernelProtocolError"
+    assert f["mar_score"].episode_error == {
+        "error_type": "KernelProtocolError",
+        "error_phase": "scoring",
+    }
 
     for s in succeeded:
         assert _rewards_by_member(s) == {"alice": 1.0, "bob": 1.0}
@@ -167,8 +170,8 @@ def test_score_rollout_overwrites_partial_mar_score_on_vf_error():
         async def build_marscore(self, state) -> MARScore:
             state["mar_score"] = MARScore(
                 members=[
-                    MemberScore(member_id="a", role_id="a", reward=0.7),
-                    MemberScore(member_id="b", role_id="b", reward=0.3),
+                    MemberScore(member_id="a", reward=0.7),
+                    MemberScore(member_id="b", reward=0.3),
                 ],
                 episode_scalar=0.5,
             )
@@ -180,8 +183,8 @@ def test_score_rollout_overwrites_partial_mar_score_on_vf_error():
 
     assert isinstance(state["error"], KernelProtocolError)
     assert _rewards_by_member(state) == {"a": 0.0, "b": 0.0}
-    assert state["mar_score"].episode_metrics == {
-        "errored_rollout": 1.0,
+    assert state["mar_score"].episode_metrics == {"errored_rollout": 1.0}
+    assert state["mar_score"].episode_error == {
         "error_type": "KernelProtocolError",
         "error_phase": "scoring",
     }

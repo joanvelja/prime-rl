@@ -19,7 +19,7 @@ from verifiers.envs.multi_agent_kernel import (
     TurnSlot,
     apply_action,
 )
-from verifiers.envs.multi_agent_env import MultiAgentEnv, _flatten_exception_group
+from verifiers.envs.multi_agent_env import MultiAgentEnv
 from verifiers.types import MARScore, MemberScore, State, TrajectoryStep
 from verifiers.utils.save_utils import state_to_output
 from verifiers.utils.usage_utils import StateUsageTracker
@@ -36,8 +36,8 @@ def test_marscore_rejects_duplicate_member_ids():
     with pytest.raises(ValueError, match="Duplicate member_id"):
         MARScore(
             members=[
-                MemberScore(member_id="A", role_id="prover", reward=1.0),
-                MemberScore(member_id="A", role_id="verifier", reward=0.0),
+                MemberScore(member_id="A", reward=1.0),
+                MemberScore(member_id="A", reward=0.0),
             ],
             episode_scalar=0.5,
         )
@@ -52,8 +52,8 @@ def test_marscore_validation_runs_on_model_validate_too():
     """Schema invariants must hold regardless of construction path."""
     payload = {
         "members": [
-            {"member_id": "X", "role_id": "r", "reward": 1.0},
-            {"member_id": "X", "role_id": "r", "reward": 0.0},
+            {"member_id": "X", "reward": 1.0},
+            {"member_id": "X", "reward": 0.0},
         ],
         "episode_scalar": 0.5,
     }
@@ -73,8 +73,8 @@ def _build_clean_state(*, episode_scalar=1.0, parse_errors=None) -> State:
     state["task"] = "default"
     state["trajectory_id"] = "ep-7"
     state["sampling_args"] = {"temperature": 0.5}
-    extras_a = {"member_id": "A", "role_id": "prover", "phase": "p"}
-    extras_b = {"member_id": "B", "role_id": "verifier", "phase": "p"}
+    extras_a = {"member_id": "A", "phase": "p"}
+    extras_b = {"member_id": "B", "phase": "p"}
     if parse_errors.get("A"):
         extras_a["parse_error"] = parse_errors["A"]
     if parse_errors.get("B"):
@@ -101,10 +101,10 @@ def _build_clean_state(*, episode_scalar=1.0, parse_errors=None) -> State:
     ]
     state["mar_score"] = MARScore(
         members=[
-            MemberScore(member_id="A", role_id="prover", reward=1.0,
+            MemberScore(member_id="A", reward=1.0,
                         parse_error_count=1 if parse_errors.get("A") else 0,
                         metrics={"accuracy": 1.0}),
-            MemberScore(member_id="B", role_id="verifier", reward=0.0,
+            MemberScore(member_id="B", reward=0.0,
                         parse_error_count=1 if parse_errors.get("B") else 0,
                         metrics={"accuracy": 0.0}),
         ],
@@ -123,7 +123,7 @@ def _wire_round_trip(state: State) -> dict:
 def test_round_trip_preserves_per_member_rewards():
     state = _build_clean_state()
     output = _wire_round_trip(state)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     rewards = {r["member_id"]: r["reward"] for r in rollouts}
     assert rewards == {"A": 1.0, "B": 0.0}
 
@@ -146,18 +146,21 @@ def test_round_trip_preserves_per_member_metrics_via_flat_top_level_keys():
     assert output["winner"] == 0.0
 
 
-def test_round_trip_preserves_role_id():
+def test_round_trip_preserves_member_id_assignment():
+    """After the α-cut, member_id is the single label; round-trip MUST keep
+    each step routed to the correct member's MemberRollout."""
     state = _build_clean_state()
     output = _wire_round_trip(state)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
-    by_member = {r["member_id"]: r["role_id"] for r in rollouts}
-    assert by_member == {"A": "prover", "B": "verifier"}
+    rollouts = rollout_to_member_rollouts(output)
+    by_member = {r["member_id"]: [s["extras"]["member_id"] for s in r["trajectory"]]
+                 for r in rollouts}
+    assert by_member == {"A": ["A"], "B": ["B"]}
 
 
 def test_round_trip_preserves_episode_id_from_trajectory_id():
     state = _build_clean_state()
     output = _wire_round_trip(state)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert all(r["episode_id"] == "ep-7" for r in rollouts)
 
 
@@ -172,7 +175,7 @@ def test_round_trip_preserves_temporal_step_order_per_member():
                                   "finish_reason": "stop", "is_truncated": False}},
             tokens=None, reward=None, advantage=None, is_truncated=False,
             trajectory_id="ep-7",
-            extras={"member_id": "A", "role_id": "prover", "phase": "rebuttal"},
+            extras={"member_id": "A", "phase": "rebuttal"},
         ),
         TrajectoryStep(
             prompt=[], completion=[],
@@ -181,11 +184,11 @@ def test_round_trip_preserves_temporal_step_order_per_member():
                                   "finish_reason": "stop", "is_truncated": False}},
             tokens=None, reward=None, advantage=None, is_truncated=False,
             trajectory_id="ep-7",
-            extras={"member_id": "B", "role_id": "verifier", "phase": "rebuttal"},
+            extras={"member_id": "B", "phase": "rebuttal"},
         ),
     ])
     output = _wire_round_trip(state)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     a = next(r for r in rollouts if r["member_id"] == "A")
     assert [s["extras"]["phase"] for s in a["trajectory"]] == ["p", "rebuttal"]
 
@@ -194,7 +197,7 @@ def test_str_example_id_round_trips_unmodified():
     state = _build_clean_state()
     state["example_id"] = "huggingface_uid_42"
     output = _wire_round_trip(state)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert all(r["example_id"] == "huggingface_uid_42" for r in rollouts)
 
 
@@ -229,7 +232,7 @@ def test_single_agent_bridge_call_raises_keyerror():
     state["sampling_args"] = {"temperature": 0.5}
     output = state_to_output(state, state_columns=["sampling_args"])
     with pytest.raises(KeyError, match="mar_score"):
-        rollout_to_member_rollouts(output, "test_env")
+        rollout_to_member_rollouts(output)
 
 
 # ===========================================================================
@@ -243,7 +246,7 @@ def test_bridge_accepts_marscore_object_in_memory():
     output = state_to_output(state, state_columns=REQUIRED_COLUMNS)
     # state_to_output dumps to dict via model_dump.
     assert isinstance(output["mar_score"], dict)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert len(rollouts) == 2
 
 
@@ -251,7 +254,7 @@ def test_bridge_accepts_dict_after_json_round_trip():
     state = _build_clean_state()
     output = _wire_round_trip(state)
     assert isinstance(output["mar_score"], dict)
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert len(rollouts) == 2
 
 
@@ -261,28 +264,13 @@ def test_bridge_accepts_mar_score_object_directly():
     state = _build_clean_state()
     output = state_to_output(state, state_columns=REQUIRED_COLUMNS)
     output["mar_score"] = state["mar_score"]  # replace dict with object
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert len(rollouts) == 2
 
 
 # ===========================================================================
 # Section 5 — P0-1: ExceptionGroup mixed-error handling
 # ===========================================================================
-
-
-def test_flatten_exception_group_collects_leaves():
-    """Internal helper: flat ExceptionGroup → leaf tuple in order."""
-    eg = ExceptionGroup("group", [
-        ValueError("a"),
-        ExceptionGroup("nested", [TypeError("b"), KeyError("c")]),
-        RuntimeError("d"),
-    ])
-    leaves = _flatten_exception_group(eg)
-    assert len(leaves) == 4
-    assert isinstance(leaves[0], ValueError)
-    assert isinstance(leaves[1], TypeError)
-    assert isinstance(leaves[2], KeyError)
-    assert isinstance(leaves[3], RuntimeError)
 
 
 def test_simultaneous_slot_mixed_vf_errors_raises_single_concrete_exception():
@@ -401,42 +389,36 @@ def test_quarantined_step_carries_parse_error_in_extras():
     assert utt.public_channel == ""
 
 
-def test_count_parse_errors_accumulates_per_member():
-    """DebateRubric._count_parse_errors walks trajectory and tallies."""
-    from verifiers.envs.debate_rubric import _count_parse_errors
+def test_member_snapshot_tallies_parse_errors():
+    """Parse-error counting now lives in ``member_snapshot``: per-member step
+    walk that records ``extras['parse_error']`` occurrences. The trainer
+    consumes the count through ``MemberScore.parse_error_count``."""
+    from verifiers.envs.debate.prompts import resolve_prompts
+    from verifiers.envs.debate_rubric import member_snapshot
+    import importlib.resources
 
-    state = State()
-    state["trajectory"] = [
-        TrajectoryStep(
+    prompts_dir = importlib.resources.files("verifiers.envs.debate") / "prompts"
+    prompts = resolve_prompts(str(prompts_dir / "default.yaml"))
+
+    def _step(member_id: str, parse_error: str | None = None) -> TrajectoryStep:
+        extras: dict[str, Any] = {"member_id": member_id, "phase": "propose"}
+        if parse_error is not None:
+            extras["parse_error"] = parse_error
+        return TrajectoryStep(
             prompt=[], completion=[],
             response={"id": "x", "created": 0, "model": "m",
                       "message": {"role": "assistant", "content": "",
                                   "finish_reason": "stop", "is_truncated": False}},
             tokens=None, reward=None, advantage=None, is_truncated=False,
-            trajectory_id="t",
-            extras={"member_id": "A", "parse_error": "unbalanced"},
-        ),
-        TrajectoryStep(
-            prompt=[], completion=[],
-            response={"id": "y", "created": 0, "model": "m",
-                      "message": {"role": "assistant", "content": "ok",
-                                  "finish_reason": "stop", "is_truncated": False}},
-            tokens=None, reward=None, advantage=None, is_truncated=False,
-            trajectory_id="t",
-            extras={"member_id": "A"},
-        ),
-        TrajectoryStep(
-            prompt=[], completion=[],
-            response={"id": "z", "created": 0, "model": "m",
-                      "message": {"role": "assistant", "content": "",
-                                  "finish_reason": "stop", "is_truncated": False}},
-            tokens=None, reward=None, advantage=None, is_truncated=False,
-            trajectory_id="t",
-            extras={"member_id": "B", "parse_error": "stray closer"},
-        ),
-    ]
-    counts = _count_parse_errors(state, ["A", "B"])
-    assert counts == {"A": 1, "B": 1}
+            trajectory_id="t", extras=extras,
+        )
+
+    a_steps = [_step("A", "unbalanced"), _step("A")]
+    b_steps = [_step("B", "stray closer")]
+    snap_a = member_snapshot("debater_a", a_steps, prompts)
+    snap_b = member_snapshot("debater_b", b_steps, prompts)
+    assert snap_a["parse_errors"] == 1
+    assert snap_b["parse_errors"] == 1
 
 
 def test_marscore_projects_parse_error_count_to_wandb_when_nonzero():
@@ -528,23 +510,27 @@ def test_errored_rollout_round_trips_correctly():
     state = _build_clean_state()
     state["mar_score"] = MARScore(
         members=[
-            MemberScore(member_id="A", role_id="prover", reward=0.0),
-            MemberScore(member_id="B", role_id="verifier", reward=0.0),
+            MemberScore(member_id="A", reward=0.0),
+            MemberScore(member_id="B", reward=0.0),
         ],
         episode_scalar=0.0,
-        episode_metrics={
-            "errored_rollout": 1.0,
+        episode_metrics={"errored_rollout": 1.0},
+        episode_error={
             "error_type": "InvalidModelResponseError",
             "error_phase": "scoring",
         },
     )
     output = _wire_round_trip(state)
-    # Legacy projections present.
+    # Averageable scalars project to top-level (legacy GRPO/wandb shape).
     assert output["reward"] == 0.0
     assert output["errored_rollout"] == 1.0
-    assert output["error_type"] == "InvalidModelResponseError"
+    # error metadata stays nested under mar_score (categorical, not averageable).
+    assert output["mar_score"]["episode_error"] == {
+        "error_type": "InvalidModelResponseError",
+        "error_phase": "scoring",
+    }
     # Bridge still produces per-member rollouts.
-    rollouts = rollout_to_member_rollouts(output, "test_env")
+    rollouts = rollout_to_member_rollouts(output)
     assert len(rollouts) == 2
     assert all(r["reward"] == 0.0 for r in rollouts)
 
@@ -559,15 +545,19 @@ def test_bridge_raises_on_step_missing_member_id():
     state["trajectory"][0]["extras"] = {}  # strip member_id
     output = _wire_round_trip(state)
     with pytest.raises(ValueError, match="member_id"):
-        rollout_to_member_rollouts(output, "test_env")
+        rollout_to_member_rollouts(output)
 
 
-def test_bridge_raises_on_missing_sampling_args():
+def test_bridge_defaults_temperature_when_sampling_args_omits_it():
+    """``state_to_output`` always projects ``sampling_args`` (defaulting to
+    ``{}``); the bridge in turn defaults ``temperature`` to OpenAI's
+    canonical ``1.0`` so vf-eval flows that don't pin temperature still
+    produce trainable MemberRollouts."""
     state = _build_clean_state()
-    output = state_to_output(state, state_columns=["trajectory"])
-    # No sampling_args column.
-    with pytest.raises(KeyError, match="sampling_args"):
-        rollout_to_member_rollouts(output, "test_env")
+    state["sampling_args"] = {}  # explicit empty — no temperature
+    output = state_to_output(state, state_columns=REQUIRED_COLUMNS)
+    rollouts = rollout_to_member_rollouts(output)
+    assert all(r["sampling_args"]["temperature"] == 1.0 for r in rollouts)
 
 
 def test_bridge_raises_on_missing_mar_score():
@@ -575,37 +565,37 @@ def test_bridge_raises_on_missing_mar_score():
     del state["mar_score"]
     output = state_to_output(state, state_columns=REQUIRED_COLUMNS)
     with pytest.raises(KeyError, match="mar_score"):
-        rollout_to_member_rollouts(output, "test_env")
+        rollout_to_member_rollouts(output)
 
 
 # ===========================================================================
-# Section 10 — to_wandb_flat projection invariants
+# Section 10 — to_metrics_flat projection invariants
 # ===========================================================================
 
 
-def test_to_wandb_flat_idempotent_on_repeated_calls():
+def test_to_metrics_flat_idempotent_on_repeated_calls():
     mar = MARScore(
-        members=[MemberScore(member_id="A", role_id="r", reward=1.0,
+        members=[MemberScore(member_id="A", reward=1.0,
                              metrics={"x": 1.0})],
         episode_scalar=1.0,
         episode_metrics={"agreement": 1.0},
     )
-    a = mar.to_wandb_flat()
-    b = mar.to_wandb_flat()
+    a = mar.to_metrics_flat()
+    b = mar.to_metrics_flat()
     assert a == b
     a["mutated"] = True
-    assert "mutated" not in mar.to_wandb_flat()  # fresh dict each time
+    assert "mutated" not in mar.to_metrics_flat()  # fresh dict each time
 
 
-def test_to_wandb_flat_episode_metrics_not_clobbered_by_member_metrics():
+def test_to_metrics_flat_episode_metrics_not_clobbered_by_member_metrics():
     """Episode-level keys MUST NOT be overwritten by per-member projections."""
     mar = MARScore(
-        members=[MemberScore(member_id="A", role_id="r", reward=1.0,
+        members=[MemberScore(member_id="A", reward=1.0,
                              metrics={"agreement": 999.0})],  # collides
         episode_scalar=1.0,
         episode_metrics={"agreement": 0.5},
     )
-    flat = mar.to_wandb_flat()
+    flat = mar.to_metrics_flat()
     # Per-member projects to "agreement/A", episode keeps "agreement"
     assert flat["agreement"] == 0.5
     assert flat["agreement/A"] == 999.0
@@ -617,8 +607,8 @@ def test_member_rewards_are_canonical_keys():
     accessor."""
     mar = MARScore(
         members=[
-            MemberScore(member_id="A", role_id="r", reward=0.7),
-            MemberScore(member_id="B", role_id="r", reward=0.3),
+            MemberScore(member_id="A", reward=0.7),
+            MemberScore(member_id="B", reward=0.3),
         ],
         episode_scalar=0.5,
     )
