@@ -8,7 +8,6 @@ compute_advantages. Both coexist.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 from verifiers.types import MemberRollout
@@ -43,16 +42,19 @@ def compute_rae_advantages(
     member_rollouts: list[MemberRollout],
     state: RAEState,
 ) -> list[float]:
-    """Compute per-member advantages and update EMA baselines.
+    """Compute per-member advantages and update EMA baselines per SPIRAL Alg.1.
 
-    A_i = R_i - b[(task_i, example_id_i, member_id_i)]
+    For each rollout in order:
+      b[(task, example_id, member_id)] ← α·b + (1-α)·R       (Alg.1, line 20)
+      A(τ) = R(τ) - b[(task, example_id, member_id)]         (Alg.1, line 21)
 
-    Baselines are read BEFORE the batch, then updated AFTER all advantages
-    are computed. This prevents within-batch ordering effects.
+    Update-then-subtract, per-trajectory. Within-batch order matters when
+    multiple rollouts share a key — the recursion is the point. Each
+    trajectory's advantage uses the baseline that has just absorbed its
+    own reward; downstream trajectories then see a baseline weighted toward
+    their predecessors' rewards.
     """
     advantages: list[float] = []
-    updates: list[tuple[RAEKey, float]] = []
-
     for mr in member_rollouts:
         reward = mr["reward"]
         if reward is None:
@@ -61,19 +63,6 @@ def compute_rae_advantages(
                 f"(episode={mr['episode_id']}, member={mr['member_id']})"
             )
         key: RAEKey = (mr["task"], mr["example_id"], mr["member_id"])
-        baseline = state.baselines.get(key, 0.0)
-        advantages.append(reward - baseline)
-        updates.append((key, reward))
-
-    # Aggregate rewards per key so update order doesn't matter when
-    # the same (task, example_id, member_id) appears multiple times in a batch.
-    key_sums: dict[RAEKey, float] = defaultdict(float)
-    key_counts: dict[RAEKey, int] = defaultdict(int)
-    for key, reward in updates:
-        key_sums[key] += reward
-        key_counts[key] += 1
-
-    for key, total in key_sums.items():
-        state.update(key, total / key_counts[key])
-
+        state.update(key, reward)
+        advantages.append(reward - state.baselines[key])
     return advantages

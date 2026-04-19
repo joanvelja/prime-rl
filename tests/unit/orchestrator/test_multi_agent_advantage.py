@@ -39,15 +39,17 @@ def _make_rollout(
 # ---------------------------------------------------------------------------
 
 
-def test_cold_start_advantage_equals_reward():
-    """No baseline yet → baseline defaults to 0 → advantage = reward."""
-    state = RAEState(baselines={})
+def test_cold_start_advantage_is_reward_minus_post_update_baseline():
+    """Per SPIRAL Alg.1: b ← α·b + (1-α)·R BEFORE A = R - b. With cold-start
+    b=0 and momentum=0.9, the baseline after the first update equals
+    (1-α)·R; the advantage becomes R - (1-α)·R = α·R."""
+    state = RAEState(baselines={}, momentum=0.9)
     rollouts = [
         _make_rollout(reward=1.0, member_id="prover"),
         _make_rollout(reward=0.0, member_id="verifier"),
     ]
     advs = compute_rae_advantages(rollouts, state)
-    assert advs == [1.0, 0.0]
+    assert advs == [pytest.approx(0.9), pytest.approx(0.0)]
 
 
 def test_baselines_update_after_batch():
@@ -59,11 +61,14 @@ def test_baselines_update_after_batch():
 
 
 def test_second_batch_uses_updated_baseline():
+    """Two sequential batches with R=1, momentum=0.9 (cold start):
+        b_1 = 0.1; A_1 = 1 - 0.1 = 0.9
+        b_2 = 0.9·0.1 + 0.1·1 = 0.19; A_2 = 1 - 0.19 = 0.81"""
     state = RAEState(baselines={}, momentum=0.9)
     advs1 = compute_rae_advantages([_make_rollout(reward=1.0)], state)
-    assert advs1 == [1.0]
+    assert advs1 == [pytest.approx(0.9)]
     advs2 = compute_rae_advantages([_make_rollout(reward=1.0)], state)
-    assert advs2 == [pytest.approx(0.9)]
+    assert advs2 == [pytest.approx(0.81)]
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.19)
 
 
@@ -109,20 +114,29 @@ def test_per_task_baselines_independent():
     assert state.baselines[("env_b", 1, "prover")] == pytest.approx(0.0)
 
 
-def test_within_batch_ordering_invariant():
-    """All advantages in a batch use the SAME pre-batch baselines.
-    Order within the batch must not matter."""
+def test_within_batch_ordering_compounds_per_trajectory():
+    """Per SPIRAL Alg.1, the EMA recursion runs once per τ. When two
+    rollouts share a key, swapping their order yields different advantages
+    AND different end baselines — the recursion is the point.
+
+    Forward [r=1.0, r=0.0], b₀=0.5, momentum=0.9:
+        b₁ = 0.9·0.5 + 0.1·1 = 0.55; A₁ = 1 - 0.55 = 0.45
+        b₂ = 0.9·0.55 + 0.1·0 = 0.495; A₂ = 0 - 0.495 = -0.495
+
+    Reverse [r=0.0, r=1.0]:
+        b₁ = 0.9·0.5 + 0.1·0 = 0.45; A₁ = 0 - 0.45 = -0.45
+        b₂ = 0.9·0.45 + 0.1·1 = 0.505; A₂ = 1 - 0.505 = 0.495"""
     state_fwd = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
     state_rev = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5}, momentum=0.9)
     r1 = _make_rollout(reward=1.0, episode_id="ep-0")
     r2 = _make_rollout(reward=0.0, episode_id="ep-1")
     advs_fwd = compute_rae_advantages([r1, r2], state_fwd)
     advs_rev = compute_rae_advantages([r2, r1], state_rev)
-    assert advs_fwd == [pytest.approx(0.5), pytest.approx(-0.5)]
-    assert advs_rev == [pytest.approx(-0.5), pytest.approx(0.5)]
-    assert state_fwd.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(
-        state_rev.baselines[(ENV_NAME, 1, "prover")]
-    )
+    assert advs_fwd == [pytest.approx(0.45), pytest.approx(-0.495)]
+    assert advs_rev == [pytest.approx(-0.45), pytest.approx(0.495)]
+    # End baselines DIFFER — order matters.
+    assert state_fwd.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.495)
+    assert state_rev.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.505)
 
 
 def test_none_reward_raises():
@@ -150,26 +164,26 @@ def test_str_example_id_keys_baseline_correctly():
     assert state.baselines[(ENV_NAME, "mmlu_0001", "prover")] == pytest.approx(0.5)
 
 
-def test_repeated_key_in_batch_uses_mean_for_baseline_update():
-    """Two rollouts with the same (task, example_id, member_id): both get
-    advantages computed from the SAME pre-batch baseline; baseline is
-    then updated using the MEAN of the rewards (not last-write-wins)."""
+def test_repeated_key_in_batch_compounds_per_trajectory():
+    """Two rollouts sharing (task, example_id, member_id) trigger N
+    sequential per-trajectory EMA updates (SPIRAL Alg.1, not a single
+    mean-aggregated update). With momentum=0.5, b₀=0, rewards [1.0, 0.0]:
+        b₁ = 0.5·0 + 0.5·1 = 0.5; A₁ = 1 - 0.5 = 0.5
+        b₂ = 0.5·0.5 + 0.5·0 = 0.25; A₂ = 0 - 0.25 = -0.25"""
     state = RAEState(baselines={}, momentum=0.5)
     rs = [
         _make_rollout(reward=1.0, episode_id="ep-0"),
         _make_rollout(reward=0.0, episode_id="ep-1"),
     ]
     advs = compute_rae_advantages(rs, state)
-    # Both used pre-batch baseline = 0.0
-    assert advs == [1.0, 0.0]
-    # Baseline updated with mean(reward) = 0.5
-    # new = 0.5 * 0 + 0.5 * 0.5 = 0.25
+    assert advs == [pytest.approx(0.5), pytest.approx(-0.25)]
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.25)
 
 
 def test_zero_reward_from_errored_rollout_keys_correctly():
     """Errored mar_score produces MemberRollouts with reward=0.0 — RAE
-    should treat them like any other zero-reward sample (no special case)."""
+    should treat them like any other zero-reward sample (no special case).
+    Per Alg.1: b = 0.5·0.7 + 0.5·0 = 0.35; A = 0 - 0.35 = -0.35."""
     state = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.7}, momentum=0.5)
     advs = compute_rae_advantages([_make_rollout(reward=0.0)], state)
-    assert advs == [pytest.approx(-0.7)]
+    assert advs == [pytest.approx(-0.35)]
