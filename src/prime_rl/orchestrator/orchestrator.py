@@ -189,12 +189,12 @@ async def orchestrate(config: OrchestratorConfig):
     )
     verification_enabled = config.verification.enabled
 
-    # Detect multi-agent envs and gate downstream branching. The MA path
-    # routes rollouts through ``rollout_to_member_rollouts`` →
-    # ``compute_rae_advantages`` (SPIRAL Alg.1) instead of GRPO. Mixing MA
-    # and single-agent envs in one orchestrator process is not supported:
-    # they need different per-step branching logic and the simpler
-    # homogeneous case covers every production setup we have today.
+    # Detect multi-agent envs. Stage 2 of the pipeline (per-rollout → per-
+    # member fan-out) activates here. The advantage estimator (stage 3) is
+    # selected independently via config.advantage.type. Mixing MA and
+    # single-agent envs in one orchestrator process is not supported: they
+    # need different per-step routing and the simpler homogeneous case
+    # covers every production setup we have today.
     ma_env_names = {
         name
         for name, env in zip(train_env_group.env_names, train_env_group.envs)
@@ -208,18 +208,37 @@ async def orchestrate(config: OrchestratorConfig):
             f"single-agent: {sorted(non_ma_env_names)}. Run them in separate "
             f"orchestrator processes."
         )
-    use_rae = bool(ma_env_names)
-    if use_rae:
+    is_ma = bool(ma_env_names)
+
+    # Cross-validate the advantage estimator against env type. Pydantic
+    # can't see the rubric (it's loaded in load_environment above), so the
+    # check lives here. Fail loud — silent fallbacks would corrupt training.
+    advantage_type = config.advantage.type if config.advantage else None
+    if is_ma and advantage_type == "default":
+        raise ValueError(
+            "advantage.type='default' (within-batch group-mean baseline) is "
+            "not implemented for multi-agent envs — fan-out makes the "
+            "samples_per_problem grouping ambiguous. Use type='ema_per_member' "
+            "(SPIRAL Alg.1) or type='custom' for MA training."
+        )
+    if (not is_ma) and advantage_type == "ema_per_member":
+        raise ValueError(
+            "advantage.type='ema_per_member' requires a MultiAgentRubric env "
+            "(member_id key has no meaning otherwise). Use type='default' or "
+            "type='custom' for single-agent training."
+        )
+
+    if is_ma:
         logger.info(
-            f"Multi-agent training detected (envs={sorted(ma_env_names)}). "
-            f"Routing through RAE per-member advantage path "
-            f"(momentum={config.rae.momentum}, drop_judge={config.rae.drop_judge})."
+            f"Multi-agent envs={sorted(ma_env_names)}. Routing through "
+            f"per-member fan-out (drop_judge={config.multi_agent.drop_judge}); "
+            f"advantage estimator={advantage_type}."
         )
         if is_vlm:
             # VLM image cache is keyed by rollout index; fanning a single
             # rollout into per-member units would need cache-key duplication
             # and per-member visibility filtering. Defer until a VLM debate
-            # use case actually shows up. Gate must come AFTER use_rae is
+            # use case actually shows up. Gate must come AFTER is_ma is
             # bound — Python local scoping makes any function-level
             # assignment promote the name to local-throughout.
             raise NotImplementedError(
@@ -432,12 +451,18 @@ async def orchestrate(config: OrchestratorConfig):
     # Track previous ckpt_step to detect when ckpt_step jumps over eval interval boundaries
     prev_ckpt_step = -1
 
-    # Reset weights to base model if starting from scratch
+    # Reset weights to base model if starting from scratch.
+    # Persistent advantage state (currently only RAEState for ema_per_member;
+    # generalize when we add a second stateful estimator).
     progress = Progress()
-    rae_state: RAEState | None = RAEState(momentum=config.rae.momentum) if use_rae else None
+    advantage_state: RAEState | None = (
+        RAEState(momentum=config.advantage.momentum)
+        if advantage_type == "ema_per_member"
+        else None
+    )
 
     if checkpoint_step is not None and ckpt_manager is not None:
-        ckpt_manager.load(progress, buffer, step=checkpoint_step, rae_state=rae_state)
+        ckpt_manager.load(progress, buffer, step=checkpoint_step, rae_state=advantage_state)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
         scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
         if config.eval and config.eval.skip_eval_on_resume:
@@ -491,7 +516,7 @@ async def orchestrate(config: OrchestratorConfig):
         ):
             logger.info(f"Saving checkpoint at step {progress.step}")
             save_ckpt_start_time = time.perf_counter()
-            ckpt_manager.save(progress, buffer, step=progress.step, rae_state=rae_state)
+            ckpt_manager.save(progress, buffer, step=progress.step, rae_state=advantage_state)
             save_ckpt_time = time.perf_counter() - save_ckpt_start_time
 
         # Break if we have reached the maximum number of steps
@@ -611,18 +636,27 @@ async def orchestrate(config: OrchestratorConfig):
         rewards = [r["reward"] for r in train_rollouts]
         completion_lens = [get_completion_len(r) for r in train_rollouts]
 
-        if use_rae:
-            assert rae_state is not None  # gated by use_rae at startup
+        # Stage 2: routing — fan out MA episodes to per-member units (single-
+        # agent path is identity).
+        if is_ma:
             training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
-                train_rollouts, drop_judge=config.rae.drop_judge
+                train_rollouts, drop_judge=config.multi_agent.drop_judge
             )
-            advantages = compute_rae_advantages(training_units, rae_state)
         else:
             training_units = list(train_rollouts)
             rollout_to_unit_idxs = [[i] for i in range(num_rollouts)]
+
+        # Stage 3: advantage estimator dispatch. EMA-per-member (RAE/SPIRAL)
+        # is stateful and consumes per-unit MemberRollout dicts; default and
+        # custom GRPO consume flat reward / length lists shaped by
+        # samples_per_problem.
+        if advantage_type == "ema_per_member":
+            assert advantage_state is not None  # gated above
+            advantages = compute_rae_advantages(training_units, advantage_state)
+        else:
             advantages = compute_advantages(
-                rewards,
-                completion_lens,
+                [u["reward"] for u in training_units],
+                [get_completion_len(u) for u in training_units],
                 config.rollouts_per_example,
                 config.advantage,
             )
@@ -963,7 +997,7 @@ async def orchestrate(config: OrchestratorConfig):
     # Write final checkpoint
     if ckpt_manager is not None:
         logger.info("Writing final checkpoint")
-        ckpt_manager.save(progress, buffer, step=progress.step, rae_state=rae_state)
+        ckpt_manager.save(progress, buffer, step=progress.step, rae_state=advantage_state)
 
     # Close training batch sender
     training_batch_sender.close()

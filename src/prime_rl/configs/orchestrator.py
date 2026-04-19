@@ -580,22 +580,23 @@ class CustomAdvantageConfig(BaseModel):
     ]
 
 
-AdvantageConfig: TypeAlias = Annotated[
-    DefaultAdvantageConfig | CustomAdvantageConfig,
-    Field(discriminator="type"),
-]
+class EMAPerMemberAdvantageConfig(BaseModel):
+    """Per-(task, example_id, member_id) EMA baseline subtraction (SPIRAL Alg.1).
 
+    A baseline-subtraction estimator — same family as the within-batch
+    group-mean baseline used by ``DefaultAdvantageConfig``, just with a
+    different baseline aggregation (cross-batch EMA keyed by member_id
+    instead of within-batch mean keyed by example_id). Composes with any
+    loss function in the trainer; the advantage produced is just a scalar.
 
-class RAEConfig(BaseModel):
-    """Role-conditioned Advantage Estimation (SPIRAL Alg.1) — multi-agent advantage path.
-
-    Activates automatically when the env group's rubric is a MultiAgentRubric;
-    these knobs only matter in that case. The single-agent GRPO path
-    (``advantage:`` config) is unchanged.
+    Requires the env's rubric to be a ``MultiAgentRubric`` so the
+    ``member_id`` key has a meaningful value (validated at orchestrator
+    startup, not at pydantic load time — config can't see the rubric).
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    type: Literal["ema_per_member"] = "ema_per_member"
     momentum: Annotated[
         float,
         Field(
@@ -606,13 +607,33 @@ class RAEConfig(BaseModel):
             "pinning a value, 0.9 is the conventional default.",
         ),
     ] = 0.9
+
+
+AdvantageConfig: TypeAlias = Annotated[
+    DefaultAdvantageConfig | EMAPerMemberAdvantageConfig | CustomAdvantageConfig,
+    Field(discriminator="type"),
+]
+
+
+class MultiAgentConfig(BaseModel):
+    """Multi-agent routing knobs — orthogonal to the advantage estimator.
+
+    These control how per-rollout episodes get fanned out into per-member
+    training units (stage 2 of the pipeline). The baseline / advantage
+    computation (stage 3) lives in ``AdvantageConfig`` and is independent.
+
+    Activates automatically when the env's rubric is a ``MultiAgentRubric``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     drop_judge: Annotated[
         bool,
         Field(
-            description="Drop member_id == 'judge' rollouts from the training batch. "
-            "The judge has zero reward by zero_sum_reward construction, so its "
-            "advantage is always -baseline (policy-neutral noise). Training on "
-            "judge tokens only burns gradient compute.",
+            description="Drop member_id == 'judge' units from the training batch. "
+            "The judge gets reward 0 by zero_sum_reward construction, so its "
+            "advantage is policy-neutral noise — training on those tokens only "
+            "burns gradient compute. Set to False only for diagnostic SFT-on-judge runs.",
         ),
     ] = True
 
@@ -782,11 +803,14 @@ class OrchestratorConfig(BaseConfig):
     # Rollout verification configuration
     verification: VerificationConfig = VerificationConfig()
 
-    # The advantage configuration
+    # The advantage configuration (stage 3 of the pipeline; see AdvantageConfig
+    # docstring). For multi-agent envs, set type="ema_per_member" or "custom";
+    # for single-agent envs, set type="default" or "custom".
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
 
-    # Role-conditioned Advantage Estimation (multi-agent path)
-    rae: RAEConfig = RAEConfig()
+    # Multi-agent routing knobs (stage 2 — fan-out). Ignored when the env's
+    # rubric is a single-agent Rubric.
+    multi_agent: MultiAgentConfig = MultiAgentConfig()
 
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig()]
