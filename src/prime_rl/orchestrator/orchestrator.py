@@ -143,15 +143,6 @@ async def orchestrate(config: OrchestratorConfig):
 
     # Check if this is a vision-language model (used throughout for VLM-specific paths)
     is_vlm = config.model.vlm is not None
-    if use_rae and is_vlm:
-        # VLM image cache is keyed by rollout index; fanning a single rollout
-        # into multiple per-member units would need cache-key duplication and
-        # per-member visibility filtering. Defer until a VLM debate use case
-        # actually shows up.
-        raise NotImplementedError(
-            "VLM + multi-agent training is not yet supported (image cache "
-            "fan-out across per-member rollouts is unimplemented)."
-        )
 
     # Load tokenizer and processor (processor only for VLM models)
     logger.info(f"Initializing tokenizer for {config.model.name}")
@@ -224,6 +215,17 @@ async def orchestrate(config: OrchestratorConfig):
             f"Routing through RAE per-member advantage path "
             f"(momentum={config.rae.momentum}, drop_judge={config.rae.drop_judge})."
         )
+        if is_vlm:
+            # VLM image cache is keyed by rollout index; fanning a single
+            # rollout into per-member units would need cache-key duplication
+            # and per-member visibility filtering. Defer until a VLM debate
+            # use case actually shows up. Gate must come AFTER use_rae is
+            # bound — Python local scoping makes any function-level
+            # assignment promote the name to local-throughout.
+            raise NotImplementedError(
+                "VLM + multi-agent training is not yet supported (image cache "
+                "fan-out across per-member rollouts is unimplemented)."
+            )
 
     train_env_deferred_group_scoring_tasks = (
         {env_name for env_name in train_env_names if task_uses_group_scoring(train_env_group, env_name)}
@@ -961,7 +963,7 @@ async def orchestrate(config: OrchestratorConfig):
     # Write final checkpoint
     if ckpt_manager is not None:
         logger.info("Writing final checkpoint")
-        ckpt_manager.save(progress, buffer, step=progress.step)
+        ckpt_manager.save(progress, buffer, step=progress.step, rae_state=rae_state)
 
     # Close training batch sender
     training_batch_sender.close()
