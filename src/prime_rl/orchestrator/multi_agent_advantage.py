@@ -44,6 +44,7 @@ def fan_out_for_multi_agent(
     rollouts: list[Mapping],
     *,
     drop_judge: bool = True,
+    filter_by_learner_seat: bool = False,
 ) -> tuple[list[MemberRollout], list[list[int]]]:
     """Project episode-level rollouts to per-member training units.
 
@@ -57,6 +58,13 @@ def fan_out_for_multi_agent(
     episode; including it in training only burns gradient compute against
     a zero-signal advantage. Pass ``False`` only for diagnostic runs that
     want judge transcripts in the training batch (e.g. SFT-on-judge).
+
+    ``filter_by_learner_seat`` keeps only the member matching
+    ``rollout.info['learner_seat']``. Used by external-opponent training
+    (the opposite seat and judge are frozen external endpoints whose
+    trajectories are dead weight on the training path). Raises when the
+    key is missing -- enabling the filter on a self-play env is a config
+    mismatch, not a silent no-op.
     """
     training_units: list[MemberRollout] = []
     rollout_to_unit_idxs: list[list[int]] = []
@@ -64,6 +72,19 @@ def fan_out_for_multi_agent(
         members = rollout_to_member_rollouts(rollout)
         if drop_judge:
             members = [m for m in members if m["member_id"] != "judge"]
+        if filter_by_learner_seat:
+            info = rollout.get("info") or {}
+            seat = info.get("learner_seat")
+            if seat is None:
+                raise ValueError(
+                    "fan_out_for_multi_agent: filter_by_learner_seat=True but "
+                    "rollout.info['learner_seat'] is missing "
+                    f"(example_id={rollout.get('example_id')!r}). The env-pack "
+                    "must stamp info.learner_seat per row (e.g. gpqa_debate "
+                    "with opponent_model set). Disable the filter for "
+                    "self-play envs."
+                )
+            members = [m for m in members if m["member_id"] == seat]
         rollout_to_unit_idxs.append(
             list(range(len(training_units), len(training_units) + len(members)))
         )

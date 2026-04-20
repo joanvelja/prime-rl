@@ -757,6 +757,19 @@ class MultiAgentConfig(BaseModel):
         ),
     ] = True
 
+    filter_by_learner_seat: Annotated[
+        bool,
+        Field(
+            description="Keep only the member matching rollout.info['learner_seat'] "
+            "in the training batch. Enables external-opponent training: the frozen "
+            "opponent's and judge's trajectories are projected out before RAE / the "
+            "trainer see them, avoiding wasted gradient compute on tokens whose "
+            "parameters don't update. Requires the env-pack to stamp info.learner_seat "
+            "per row (e.g. gpqa_debate with opponent_model set). Leave False for "
+            "self-play envs — enabling it raises at fan-out time when the key is absent.",
+        ),
+    ] = False
+
 
 class GibberishFilterConfig(BaseModel):
     """Flags rare tokens generated at high entropy (Section 5.2, https://arxiv.org/abs/2510.02387)."""

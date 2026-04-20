@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from verifiers.types import MARScore, MemberScore, State, TrajectoryStep
 from verifiers.utils.save_utils import state_to_output
 
@@ -131,3 +132,26 @@ def test_fan_out_handles_empty_rollouts_list():
     units, mapping = fan_out_for_multi_agent([])
     assert units == []
     assert mapping == []
+
+
+def test_fan_out_filter_by_learner_seat_keeps_only_matching_member():
+    """filter_by_learner_seat=True reads rollout.info['learner_seat'] and
+    keeps only that member's unit. External-opponent training: the frozen
+    opposite seat's trajectory never reaches the trainer."""
+    rollouts = [_build_rollout(example_id=1, trajectory_id="ep-1")]
+    rollouts[0]["info"] = {"learner_seat": "debater_a"}
+    units, mapping = fan_out_for_multi_agent(
+        rollouts, filter_by_learner_seat=True
+    )
+    assert [u["member_id"] for u in units] == ["debater_a"]
+    assert mapping == [[0]]
+
+
+def test_fan_out_filter_by_learner_seat_missing_info_raises():
+    """filter_by_learner_seat=True on a rollout without info.learner_seat
+    is a config mismatch (filter enabled on a self-play env), not a silent
+    no-op."""
+    rollouts = [_build_rollout(example_id=1)]
+    rollouts[0]["info"] = {}
+    with pytest.raises(ValueError, match="info\\['learner_seat'\\] is missing"):
+        fan_out_for_multi_agent(rollouts, filter_by_learner_seat=True)

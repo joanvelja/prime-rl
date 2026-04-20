@@ -237,7 +237,9 @@ async def orchestrate(config: OrchestratorConfig):
     if is_ma:
         logger.info(
             f"Multi-agent envs={sorted(ma_env_names)}. Routing through per-member fan-out "
-            f"(drop_judge={config.multi_agent.drop_judge}); advantage estimator={advantage_type}."
+            f"(drop_judge={config.multi_agent.drop_judge}, "
+            f"filter_by_learner_seat={config.multi_agent.filter_by_learner_seat}); "
+            f"advantage estimator={advantage_type}."
         )
         if is_vlm:
             raise NotImplementedError(
@@ -481,6 +483,7 @@ async def orchestrate(config: OrchestratorConfig):
                 training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
                     train_rollouts,
                     drop_judge=config.multi_agent.drop_judge,
+                    filter_by_learner_seat=config.multi_agent.filter_by_learner_seat,
                 )
                 if advantage_type == "ema_per_member":
                     assert advantage_state is not None
