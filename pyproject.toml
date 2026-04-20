@@ -127,6 +127,8 @@ override-dependencies = [
 torch = { index = "pytorch-cu128" }
 # Keep verifiers fetchable for fresh clones and CI; local sibling checkouts can
 # still be used ad hoc for fork development.
+# Joan fork carries the multi-actor debate env (tmp/verifiers/envs/debate*) that
+# PR #1 orchestrator code depends on — do not swap to upstream.
 verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "35826af" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
