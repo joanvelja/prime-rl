@@ -18,6 +18,8 @@ configs/endpoints.py
 **/evals
 **/run_*/
 !configs/**/evals
+!scripts/evals
+!scripts/evals/**
 final_summary.json
 .pydantic_config
 .chroma_db
@@ -200,3 +202,8 @@ debug_I2_zero_band
 
 outputs/
 .red-team/
+
+# Ad-hoc scratch (bottleneck analysis, codex handoff, raw core dumps)
+.bottleneck-analysis/
+.codex
+/core

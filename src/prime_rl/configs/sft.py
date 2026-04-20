@@ -87,6 +87,11 @@ class SFTDataConfig(BaseDataConfig):
     # Configuring
     loss_mask: LossMaskConfig = LossMaskConfig()
 
+    system_prompt_pool_path: Annotated[
+        str | None,
+        Field(description="Path to a JSON file containing a list of system prompt strings. If set, a system prompt is prepended to every single-turn sample using profile-weighted sampling."),
+    ] = None
+
     @model_validator(mode="after")
     def validate_subsets_and_splits(self):
         if self.subsets is not None or self.splits is not None:
