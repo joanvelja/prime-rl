@@ -1,0 +1,12 @@
+{
+  "add_prefix_space": null,
+  "backend": "tokenizers",
+  "bos_token": "<|begin_of_text|>",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|im_end|>",
+  "is_local": false,
+  "model_max_length": 65536,
+  "pad_token": "<|pad|>",
+  "tokenizer_class": "TokenizersBackend",
+  "use_default_system_prompt": false
+}

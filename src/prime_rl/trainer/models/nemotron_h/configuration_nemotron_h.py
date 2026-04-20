@@ -130,7 +130,9 @@ class NemotronHConfig(PretrainedConfig):
         if "hybrid_override_pattern" in kwargs:
             pattern = kwargs.pop("hybrid_override_pattern")
             if layers_block_type is None:
-                layers_block_type = [self.PATTERN_MAP[c] for c in pattern]
+                # nvidia's pattern uses '-' as a layer separator (e.g. "M-M-M*-M-M-E-")
+                # as well as single-char layer codes. Strip separators before mapping.
+                layers_block_type = [self.PATTERN_MAP[c] for c in pattern if c in self.PATTERN_MAP]
 
         if layers_block_type is None:
             layers_block_type = ["mamba", "moe", "attention", "moe"]

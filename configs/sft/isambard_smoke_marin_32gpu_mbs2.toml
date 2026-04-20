@@ -1,0 +1,46 @@
+# 32-GPU smoke for the multi-node winning config: mbs=2, reshard=true,
+# flat 1D FSDP. Baseline reference for future perf probes.
+
+max_steps = 50
+loss_impl = "liger_fused"
+output_dir = "/lus/lfs1aip2/scratch/a6r/joanv.a6r/outputs/smoke-marin-32gpu-mbs2"
+
+[model]
+name = "marin-community/marin-8b-base"
+attn = "flash_attention_3"
+reshard_after_forward = true
+reduce_dtype = "bfloat16"
+optimization_dtype = "bfloat16"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-marin"
+
+[data]
+micro_batch_size = 2                   # grad_accum = 128 / (32 × 2) = 2
+
+[scheduler]
+warmup_steps = 5
+decay_steps = 45
+
+[ckpt]
+interval = 500
+
+[deployment]
+type = "multi_node"
+num_nodes = 8
+gpus_per_node = 4
+num_gpus = 32
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-32gpu-mbs2"
+
+[slurm]
+job_name = "smoke-marin-32gpu-mbs2"
+partition = "workq"
+account = "brics.a6r"
+time = "00:30:00"
+project_dir = "/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_multi_node_sft.sbatch.j2"
+
+pre_run_command = """export NCCL_DEBUG=WARN"""

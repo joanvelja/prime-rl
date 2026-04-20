@@ -201,15 +201,26 @@ def train(config: SFTConfig):
         case _:
             raise ValueError(f"Invalid loss implementation: {config.loss_impl}")
 
-    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returning (loss_sum, token_count) over unmasked tokens."""
+    perf_counter = get_perf_counter(model, config.data.seq_len)
+
+    def compute_loss(micro_batch: dict) -> tuple[torch.Tensor, torch.Tensor, int, list[int]]:
+        """Forward pass returning (loss_sum, trainable_tokens, processed_tokens, sequence_lengths)."""
         input_ids = micro_batch["input_ids"].to("cuda")
         position_ids = micro_batch["position_ids"].to("cuda")
         target_ids = micro_batch["target_ids"].to("cuda")
         loss_mask = micro_batch["loss_mask"].to("cuda")
+        cu_seqlens = micro_batch.get("cu_seqlens")
+        max_seqlen = micro_batch.get("max_seqlen")
 
         if cp_enabled:
-            input_ids, position_ids = setup_cp_params(input_ids, position_ids, cp_rank, cp_size, cp_group)
+            input_ids, position_ids = setup_cp_params(
+                input_ids,
+                position_ids,
+                cp_rank,
+                cp_size,
+                cp_group,
+                cu_seqlens=cu_seqlens,
+            )
             target_ids = shard_for_cp(target_ids, cp_rank=cp_rank, cp_world_size=cp_size)
             loss_mask = shard_for_cp(loss_mask, cp_rank=cp_rank, cp_world_size=cp_size)
 
@@ -217,15 +228,33 @@ def train(config: SFTConfig):
             set_lora_num_tokens(torch.full((1,), input_ids.numel(), dtype=torch.int32, device="cuda"))
 
         token_count = loss_mask.sum(dtype=torch.int64)
+        processed_token_count = input_ids.numel()
+        if not cp_enabled and cu_seqlens is not None:
+            sequence_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        else:
+            sequence_lengths = [input_ids.shape[1]] * input_ids.shape[0]
 
         with maybe_activation_offloading(config.model.ac_offloading):
             if config.loss_impl in ("liger_fused", "quack_fused"):
                 masked_target_ids = target_ids.clone()
                 masked_target_ids[~loss_mask] = FUSED_CE_IGNORE_INDEX
-                out = forward(model, input_ids, position_ids, labels=masked_target_ids)
+                out = forward(
+                    model,
+                    input_ids,
+                    position_ids,
+                    cu_seqlens=cu_seqlens if not cp_enabled else None,
+                    max_seqlen=max_seqlen if not cp_enabled else None,
+                    labels=masked_target_ids,
+                )
                 loss_sum = out["loss"] * token_count
             else:
-                out = forward(model, input_ids, position_ids)
+                out = forward(
+                    model,
+                    input_ids,
+                    position_ids,
+                    cu_seqlens=cu_seqlens if not cp_enabled else None,
+                    max_seqlen=max_seqlen if not cp_enabled else None,
+                )
                 logits = out["logits"]
                 B, L, V = logits.shape
                 token_loss = ce_loss(logits.view(-1, V), target_ids.view(-1)).view(B, L)
@@ -233,7 +262,7 @@ def train(config: SFTConfig):
                 del logits
 
         del out
-        return loss_sum, token_count
+        return loss_sum, token_count, processed_token_count, [int(length) for length in sequence_lengths]
 
     maybe_record_function = nullcontext
 
@@ -245,7 +274,7 @@ def train(config: SFTConfig):
 
         with torch.no_grad():
             for micro_batch in data_iter:
-                loss_sum, token_count = compute_loss(micro_batch)
+                loss_sum, token_count, _, _ = compute_loss(micro_batch)
                 if not torch.isnan(loss_sum.detach()):
                     total_loss_sum += loss_sum.detach()
                     total_token_count += token_count
@@ -330,8 +359,10 @@ def train(config: SFTConfig):
         forward_backward_start_time = time.perf_counter()
 
         step_loss_sum = torch.tensor(0.0, device="cuda")
-        step_local_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
-        nan_loss_count = torch.tensor(0, device="cuda")
+        step_local_trainable_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
+        step_local_processed_token_count = torch.tensor(0, dtype=torch.int64, device="cuda")
+        step_local_flops = torch.tensor(0.0, dtype=torch.float64, device="cuda")
+        nan_loss_count_tensor = torch.tensor(0, device="cuda")
         batch_max_vio = torch.tensor(0.0, device="cuda")
         for micro_step in range(grad_accum_steps):
             micro_batch = next(dataiter)
@@ -342,17 +373,23 @@ def train(config: SFTConfig):
                 )
 
             with maybe_record_function("forward"):
-                local_loss_sum, local_token_count = compute_loss(micro_batch)
+                local_loss_sum, local_trainable_token_count, local_processed_token_count, sequence_lengths = compute_loss(
+                    micro_batch
+                )
 
-            step_local_token_count += local_token_count
+            step_local_trainable_token_count += local_trainable_token_count
+            step_local_processed_token_count += local_processed_token_count
+            step_local_flops += perf_counter.estimate_batch_flops(local_processed_token_count, sequence_lengths)
 
-            if torch.isnan(local_loss_sum.detach()):
-                nan_loss_count += 1
-                logger.warning("Local loss is nan, excluding this micro step from backward")
-                scaled_loss = torch.nan_to_num(local_loss_sum, nan=0.0) / grad_accum_steps
-            else:
-                step_loss_sum += local_loss_sum.detach()
-                scaled_loss = local_loss_sum / grad_accum_steps
+            # Branchless: avoid a Python-side .item() sync in the hot path. We accumulate
+            # the nan count as a tensor; the `if any nan` log emission happens at step end
+            # after the single per-step all-reduce. safe = nan_to_num(loss, 0) gives a
+            # zero-contribution backward when nan, matching the old branch's semantics
+            # (excluding that micro-step from the backward update).
+            safe_loss = torch.nan_to_num(local_loss_sum, nan=0.0)
+            step_loss_sum += safe_loss.detach()
+            nan_loss_count_tensor += local_loss_sum.detach().isnan().to(nan_loss_count_tensor.dtype)
+            scaled_loss = safe_loss / grad_accum_steps
 
             with maybe_record_function("backward"):
                 scaled_loss.backward()
@@ -369,12 +406,17 @@ def train(config: SFTConfig):
         # All-reduce token counts and rescale gradients to get a global token-weighted mean.
         # FSDP already divided grads by fsdp_gradient_divide_factor, so we undo that and
         # divide by the true global token count instead.
-        global_step_token_count = step_local_token_count.clone()
-        dist.all_reduce(global_step_token_count, op=dist.ReduceOp.SUM, group=dp_cp_group)
-        global_token_count_val = global_step_token_count.item()
+        global_step_trainable_token_count = step_local_trainable_token_count.clone()
+        dist.all_reduce(global_step_trainable_token_count, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        global_trainable_token_count_val = global_step_trainable_token_count.item()
+        global_step_processed_token_count = step_local_processed_token_count.clone()
+        dist.all_reduce(global_step_processed_token_count, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        global_processed_token_count_val = global_step_processed_token_count.item()
+        dist.all_reduce(step_local_flops, op=dist.ReduceOp.SUM, group=dp_cp_group)
+        global_step_flops = step_local_flops.item()
 
-        if global_token_count_val > 0:
-            grad_scale = parallel_dims.fsdp_gradient_divide_factor * grad_accum_steps / global_token_count_val
+        if global_trainable_token_count_val > 0:
+            grad_scale = parallel_dims.fsdp_gradient_divide_factor * grad_accum_steps / global_trainable_token_count_val
             for param in model.parameters():
                 if param.grad is not None:
                     param.grad.mul_(grad_scale)
@@ -389,12 +431,14 @@ def train(config: SFTConfig):
 
         # Compute the global mean loss for logging.
         dist.all_reduce(step_loss_sum, op=dist.ReduceOp.SUM, group=dp_cp_group)
-        dist.all_reduce(nan_loss_count, op=dist.ReduceOp.SUM)
-        if global_token_count_val > 0:
-            batch_loss = (step_loss_sum / global_token_count_val).item()
+        dist.all_reduce(nan_loss_count_tensor, op=dist.ReduceOp.SUM)
+        if global_trainable_token_count_val > 0:
+            batch_loss = (step_loss_sum / global_trainable_token_count_val).item()
         else:
             batch_loss = 0.0
-        nan_loss_count = nan_loss_count.item()
+        nan_loss_count = nan_loss_count_tensor.item()
+        if nan_loss_count > 0:
+            logger.warning(f"{nan_loss_count} micro-step(s) had nan loss, excluded from backward")
 
         logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
         grad_norm = clip_grad_norm_(
@@ -416,20 +460,27 @@ def train(config: SFTConfig):
         if memory_profiler is not None:
             memory_profiler.step()
 
-        # Compute step metrics
-        # Divide by CP since those ranks process the same data
-        num_tokens = config.data.batch_size * config.data.seq_len // config.model.cp
-        progress.total_tokens += num_tokens
+        # Compute step metrics from actual processed tokens, not nominal batch_size * seq_len.
+        progress.total_tokens += global_processed_token_count_val
         progress.total_samples = dataset.step
-        perf_counter = get_perf_counter(model, config.data.seq_len)
-        perf_counter.count_tokens(num_tokens)
+        perf_counter.count_batch(
+            global_processed_token_count_val,
+            batch_flops=global_step_flops,
+            trainable_tokens=global_trainable_token_count_val,
+        )
         throughput = perf_counter.get_tokens_per_second() or 0
+        trainable_throughput = perf_counter.get_trainable_tokens_per_second() or 0
         mfu = perf_counter.get_mfu() or 0
         peak_memory = torch.cuda.max_memory_reserved() / 1024**3  # GiB
 
         # Log step metrics
         step_time = time.perf_counter() - step_start_time
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f} | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
+        step_message = (
+            f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f} | Grad. Norm: {grad_norm:.4f} "
+            f"| LR: {current_lr:.2e} | Throughput: {throughput:.0f} processed tok/s | "
+            f"Trainable Throughput: {trainable_throughput:.0f} tok/s | MFU: {mfu:.1f}% | "
+            f"Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
+        )
         if is_tt_moe_model(model) and batch_max_vio.item() > 0:
             step_message += f" | Max Vio: {batch_max_vio.item():.4f}"
         logger.success(step_message)
@@ -461,6 +512,8 @@ def train(config: SFTConfig):
         perf_metrics = {
             "perf/throughput": throughput,
             "perf/throughput_per_gpu": throughput / world.world_size,
+            "perf/trainable_throughput": trainable_throughput,
+            "perf/trainable_throughput_per_gpu": trainable_throughput / world.world_size,
             "perf/peak_memory": peak_memory,
             "perf/mfu": mfu,
             "step": progress.step,

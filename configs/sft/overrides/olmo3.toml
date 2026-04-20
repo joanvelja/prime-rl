@@ -17,6 +17,14 @@ output_dir = "outputs/sft-baseline-olmo-3-7b"
 
 [model]
 name = "allenai/Olmo-3-1025-7B"
+attn = "sdpa"                           # HF fallback path (no prime-rl custom impl).
+                                        # FA2 and FA3 both produce nan grads at
+                                        # step 0 (probes 3908172, 3909038 — likely
+                                        # FA varlen interaction with olmo3's
+                                        # sliding_window=4096 at seq_len=4096).
+                                        # SDPA verified clean (probe 3908559):
+                                        # loss 1.17→0.99, grad_norm 0.9-1.5,
+                                        # MFU 23.9%. ~15pp MFU hit vs FA3-custom.
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-olmo-3-7b"

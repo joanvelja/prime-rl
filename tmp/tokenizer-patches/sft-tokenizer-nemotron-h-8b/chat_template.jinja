@@ -1,0 +1,6 @@
+{% if messages[0]['role'] == 'system' %}<SPECIAL_10>System
+{{ messages[0]['content'] }}{% set loop_msgs = messages[1:] %}{% else %}<SPECIAL_10>System
+{% set loop_msgs = messages %}{% endif %}{% for message in loop_msgs %}{% if message['role'] == 'user' %}<SPECIAL_11>User
+{{ message['content'] }}{% elif message['role'] == 'assistant' %}<SPECIAL_11>Assistant
+{{ message['content'] }}{% endif %}{% endfor %}{% if add_generation_prompt %}<SPECIAL_11>Assistant
+{% endif %}

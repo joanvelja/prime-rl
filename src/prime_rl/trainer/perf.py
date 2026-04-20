@@ -21,6 +21,8 @@ class PerfCounter:
     def __init__(self, model: nn.Module, seq_len: int, window_size: int):
         self.window_size = window_size
         self.tokens = []
+        self.trainable_tokens = []
+        self.flops = []
         self.times = []
         self.model = model
 
@@ -34,13 +36,31 @@ class PerfCounter:
         # If not tie_word_embeddings, we exclude the embedding parameters from the total number of parameters
         # If tie_word_embeddings, the embedding parameters are already excluded (shared with the LM head)
         self.num_params = self._get_num_params(model, exclude_embedding=not model.config.tie_word_embeddings)
+        self.attention_flop_per_seq_sq = self._get_attention_flop_per_seq_sq(model.config)
+        self.non_attention_flop_per_token = self._get_non_attention_flop_per_token(model.config)
         self.num_flop_per_token = self._get_num_flop_per_token(model.config, seq_len=seq_len)
 
     def count_tokens(self, tokens: int):
-        self.tokens.append(tokens)
+        self.count_batch(tokens)
+
+    def count_batch(
+        self,
+        processed_tokens: int,
+        *,
+        batch_flops: float | None = None,
+        sequence_lengths: list[int] | None = None,
+        trainable_tokens: int | None = None,
+    ) -> None:
+        if batch_flops is None:
+            batch_flops = self.estimate_batch_flops(processed_tokens, sequence_lengths)
+        self.tokens.append(processed_tokens)
+        self.trainable_tokens.append(trainable_tokens if trainable_tokens is not None else processed_tokens)
+        self.flops.append(batch_flops)
         self.times.append(time.perf_counter())
         if len(self.tokens) > self.window_size:
             self.tokens.pop(0)
+            self.trainable_tokens.pop(0)
+            self.flops.pop(0)
             self.times.pop(0)
 
     def get_tokens_per_second(self) -> float | None:
@@ -48,11 +68,21 @@ class PerfCounter:
             return None
         return sum(self.tokens[1:]) / (self.times[-1] - self.times[0])
 
-    def get_mfu(self) -> float | None:
-        tokens_per_second = self.get_tokens_per_second()
-        if tokens_per_second is None:
+    def get_trainable_tokens_per_second(self) -> float | None:
+        if len(self.trainable_tokens) < 2:
             return None
-        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world.world_size
+        return sum(self.trainable_tokens[1:]) / (self.times[-1] - self.times[0])
+
+    def get_mfu(self) -> float | None:
+        if len(self.flops) < 2:
+            return None
+        return 100 * sum(self.flops[1:]) / (self.times[-1] - self.times[0]) / self.gpu_peak_flops / self._world.world_size
+
+    def estimate_batch_flops(self, processed_tokens: int, sequence_lengths: list[int] | None = None) -> float:
+        if sequence_lengths is None:
+            return float(self.num_flop_per_token * processed_tokens)
+        attention_flops = self.attention_flop_per_seq_sq * sum(length * length for length in sequence_lengths)
+        return float(self.non_attention_flop_per_token * processed_tokens + attention_flops)
 
     def _get_peak_flops(self, device_name: str) -> float:
         """
@@ -63,9 +93,11 @@ class PerfCounter:
         if "A100" in device_name:
             # https://www.nvidia.com/en-us/data-center/a100/
             return 312e12
-        if "H100" in device_name or "H200" in device_name:
+        if "H100" in device_name or "H200" in device_name or "GH100" in device_name or "GH200" in device_name:
             # https://www.nvidia.com/en-us/data-center/h100/
             # https://resources.nvidia.com/en-us-data-center-overview-mc/en-us-data-center-overview/hpc-datasheet-sc23-h200
+            # Grace Hopper SKUs report `GH100` / `GH200` in the device name, but
+            # they use Hopper-class GPU tensor throughput for MFU purposes.
             if "NVL" in device_name:
                 return 835e12
             elif "PCIe" in device_name:
@@ -154,16 +186,15 @@ class PerfCounter:
         ## Total
         return q_params + kv_params + o_params + dense_mlp_params + sparse_mlp_params + lm_head_params
 
-    def _get_num_flop_per_token(self, model_config: PretrainedConfig, seq_len: int) -> int:
+    def _get_attention_flop_per_seq_sq(self, model_config: PretrainedConfig) -> int:
         # Handle VLM models with nested text_config (e.g., Qwen3-VL)
         if hasattr(model_config, "text_config"):
             model_config = model_config.text_config
 
-        l, h, q, t = (  # noqa: E741
+        l, h, q = (  # noqa: E741
             model_config.num_hidden_layers,
             model_config.num_attention_heads,
             model_config.hidden_size // model_config.num_attention_heads,
-            seq_len,
         )
         # Reasoning behind the factor of 12 for the self-attention part of the formula:
         # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
@@ -171,7 +202,12 @@ class PerfCounter:
         #    but recomputation should not be counted in calculating MFU           (+0)
         # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
         # 4. we follow the convention and do not account for sparsity in causal attention
-        attention_flops = 12 * l * h * q * t
+        return 12 * l * h * q
+
+    def _get_non_attention_flop_per_token(self, model_config: PretrainedConfig) -> int:
+        # Handle VLM models with nested text_config (e.g., Qwen3-VL)
+        if hasattr(model_config, "text_config"):
+            model_config = model_config.text_config
 
         if has_lora_layers(self.model):
             # LoRA case:
@@ -183,14 +219,13 @@ class PerfCounter:
             lora_adapter_params = self._count_lora_adapter_params()
             fully_trainable_params = self._count_fully_trainable_params_excluding_lora()
 
-            flop_per_token = (
-                4 * active_mm_params + 2 * fully_trainable_params + 6 * lora_adapter_params + attention_flops
-            )
+            return 4 * active_mm_params + 2 * fully_trainable_params + 6 * lora_adapter_params
         else:
             # standard case: full fine-tuning, all params participate in forward (2×) and backward (4×)
-            flop_per_token = 6 * self.get_active_mm_params(model_config) + attention_flops
+            return 6 * self.get_active_mm_params(model_config)
 
-        return flop_per_token
+    def _get_num_flop_per_token(self, model_config: PretrainedConfig, seq_len: int) -> int:
+        return self.non_attention_flop_per_token + self.attention_flop_per_seq_sq * seq_len
 
     def _get_num_params(self, model: nn.Module, exclude_embedding: bool = False) -> int:
         num_params = sum(p.numel() for p in model.parameters())

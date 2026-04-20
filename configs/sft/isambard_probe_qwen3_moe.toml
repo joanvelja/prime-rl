@@ -1,0 +1,42 @@
+# 10-step MFU probe for qwen3-30b-a3b (MoE, 30B total / 3B active).
+# Arch constraints: _can_compile_fullgraph=False, compile unsupported.
+# Memory: 30B bf16 = 60GB per rank UNsharded — won't fit in 95GB. MUST keep
+# reshard=True. mbs=1 first (MoE memory is total-params-bound). If headroom
+# exists, try mbs=2 next.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-qwen3-30b"
+
+[model]
+attn = "flash_attention_3"
+# reshard=True (default) — required; model doesn't fit unsharded
+# bf16 load cleared step-0 OOM (72GB) but step-1 activations pushed over (OOM at
+# mbs=1+reshard=T). Adding full AC to cut activation memory.
+[model.ac]
+mode = "full"
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-qwen3-30b"
+
+[slurm]
+job_name = "probe-qwen3-30b"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

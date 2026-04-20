@@ -1,13 +1,30 @@
 # Override for marin-8b-base — the default base; listed here for launch uniformity.
 # Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/marin.toml
+#
+# MFU profile (4× GH200, seq_len=4096, 2026-04-18):
+#   Baseline (FA2, mbs=1, reshard=True, fp32 reduce):     ~34.3% MFU, 17.9s/step
+#   + FA3:                                                ~36.9% MFU  (attention kernel 1.69× faster; CollectiveMainloopFwdSm90)
+#   + mbs=2:                                              ~38.0% MFU, 16.5s/step, 83% mem
+#   + reshard_after_forward=false (+bf16 reduce already in baseline):  ~38.4-38.7%, 16.2s/step, 97% mem
+#   Compile: neutral at wall clock for this codebase (emits no Triton kernels for FA varlen dynamic shapes).
+#
+# Memory note: at mbs=2 + reshard_after_forward=false we're at 97.7%/95 GiB.
+# Close to OOM headroom; if you change anything memory-touching (seq_len,
+# lora, activation checkpointing off, etc.) drop reshard_after_forward=false
+# first or enable [model.ac] mode="selective".
 
 output_dir = "outputs/sft-baseline-marin"
 
 [model]
 name = "marin-community/marin-8b-base"
+attn = "flash_attention_3"             # 1.69× faster attention kernel vs FA2 on Hopper (sm_90) for marin's shape mix
+reshard_after_forward = false          # 8B bf16 (16 GB) fits unsharded per rank; eliminates backward all-gather (~+1 MFU)
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-marin"
+
+[data]
+micro_batch_size = 2                   # 85% mem at mbs=2 (97% with reshard=False); +3 MFU over mbs=1
 
 [wandb]
 name = "marin"

@@ -751,7 +751,7 @@ def setup_model(
 ) -> nn.Module:
     if config.attn == "flash_attention_3" and not is_flash_attn_3_available():
         raise ValueError(
-            "Flash attention 3 is only supported if the flash_attn_3 package is installed. Install with `uv pip install 'flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@main#subdirectory=hopper' --no-build-isolation`"
+            "Flash attention 3 is only supported if the flash_attn_3 package is installed. Install with `uv sync --extra flash-attn-3`."
         )
 
     if config.attn == "fa4":
@@ -840,6 +840,8 @@ def forward(
     model: nn.Module,
     input_ids: Int[Tensor, "batch seq"],
     position_ids: Int[Tensor, "batch seq"],
+    cu_seqlens: Int[Tensor, "num_sequences_plus_one"] | None = None,
+    max_seqlen: int | None = None,
     labels: Int[Tensor, "batch seq"] | None = None,
     temperature: Tensor | None = None,
     routed_experts: Int[Tensor, "batch seq layers topk"] | None = None,
@@ -862,6 +864,9 @@ def forward(
         kwargs["image_grid_thw"] = image_grid_thw
     else:
         kwargs["position_ids"] = position_ids
+        if cu_seqlens is not None:
+            kwargs["cu_seqlens"] = cu_seqlens
+            kwargs["max_seqlen"] = max_seqlen
 
     if routed_experts is not None:
         kwargs["routed_experts"] = routed_experts

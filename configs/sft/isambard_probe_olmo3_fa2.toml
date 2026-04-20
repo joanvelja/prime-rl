@@ -1,0 +1,36 @@
+# Diagnostic probe: olmo-3 + FA2. Companion to olmo3_sdpa. If FA2 also nans,
+# the bug is FA*-kernel vs HF-fallback in general. If FA2 works, FA3 alone
+# is broken on this path.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-olmo3-fa2"
+
+[model]
+attn = "flash_attention_2"
+reshard_after_forward = false
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-olmo3-fa2"
+
+[slurm]
+job_name = "probe-olmo3-fa2"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

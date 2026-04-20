@@ -1,0 +1,33 @@
+# rnj-1 (Gemma3) + SDPA. Sliding-window may still bite under SDPA.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-rnj-sdpa"
+
+[model]
+attn = "sdpa"
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-rnj-sdpa"
+
+[slurm]
+job_name = "probe-rnj-sdpa"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

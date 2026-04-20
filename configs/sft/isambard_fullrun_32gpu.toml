@@ -1,0 +1,39 @@
+# Shared multi-node deployment layer for 32-GPU SFT on Isambard-AI Phase 2
+# (8 nodes × 4 GH200).
+#
+# Compose with a base-specific override:
+#   uv run sft @ configs/sft/baseline.toml \
+#               @ configs/sft/overrides/marin.toml \
+#               @ configs/sft/isambard_fullrun_32gpu.toml
+
+[model]
+# reshard_after_forward=true is required at 32 ranks; the single-node
+# marin.toml sets false (NVLink absorbs AG cheaply), which degrades severely
+# across Slingshot. See docs/plans/sweep_storage_ckpt_policy.md.
+reshard_after_forward = true
+
+[ckpt]
+# 2500 matches the per-ckpt eval cadence. ~1% wall-clock save overhead,
+# ~100min job-kill exposure. See docs/plans/sweep_storage_ckpt_policy.md
+# for storage math and pruning policy.
+interval = 2500
+keep_last = 1
+keep_interval = 2500
+
+[deployment]
+type = "multi_node"
+num_nodes = 8
+gpus_per_node = 4
+num_gpus = 32
+
+[slurm]
+partition = "workq"
+account = "brics.a6r"
+time = "24:00:00"
+project_dir = "/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_multi_node_sft.sbatch.j2"
+
+# NCCL_DEBUG only — the comprehensive Slingshot/libfabric tuning (FI_CXI_*,
+# NCCL_CROSS_NIC, etc.) is set inside the multi-node sbatch template itself,
+# so every job picks it up without needing to be re-listed in every config.
+pre_run_command = """export NCCL_DEBUG=WARN"""

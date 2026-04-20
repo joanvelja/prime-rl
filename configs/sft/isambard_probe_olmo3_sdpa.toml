@@ -1,0 +1,39 @@
+# Diagnostic probe: olmo-3 with SDPA instead of FA3.
+# Hypothesis: nan grads at step 0 come from HF fallback ignoring cu_seqlens
+# (cross-seq attn across packed docs). SDPA should still bleed across seqs
+# (ignoring cu_seqlens is path-independent) but use standard softmax → if
+# this gives finite-but-wrong loss, the nan is FA3-kernel-specific. If it
+# also nans, the cross-seq attn itself is pathological (empty/masked rows).
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-olmo3-sdpa"
+
+[model]
+attn = "sdpa"
+reshard_after_forward = false
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-olmo3-sdpa"
+
+[slurm]
+job_name = "probe-olmo3-sdpa"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

@@ -1,0 +1,35 @@
+# 10-step MFU probe for trinity-mini (AfMoE, 128 experts top-8, 1 shared).
+# Weights 52GB → ~26B bf16 params total. Per-rank unsharded 26B = too big.
+# Keep reshard=True, start mbs=1.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-trinity"
+
+[model]
+attn = "flash_attention_3"
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-trinity"
+
+[slurm]
+job_name = "probe-trinity"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

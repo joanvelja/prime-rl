@@ -18,6 +18,7 @@ from prime_rl.trainer.models.base import PreTrainedModelPrimeRL
 from prime_rl.trainer.models.layers.lm_head import PrimeLmOutput
 from prime_rl.trainer.models.layers.moe import FeedForward, MoE, MoEArgs
 from prime_rl.trainer.models.layers.rotary_emb import RotaryEmbedding, RotaryEmbeddingConfig, apply_rotary_pos_emb
+from prime_rl.utils.sequence_packing import infer_cu_seqlens_from_position_ids
 
 from .configuration_qwen3_5_moe import Qwen3_5MoeConfig
 from .converting_qwen3_5_moe import (
@@ -725,6 +726,8 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         routed_experts: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> MoeModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -733,16 +736,8 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if self.config._attn_implementation in ("flash_attention_2", "flash_attention_3", "fa4"):
-            flat_position_ids = position_ids.view(-1)
-            seqlens = torch.cat(
-                [
-                    flat_position_ids[0:1],
-                    flat_position_ids[:-1][(flat_position_ids == 0)[1:]] + 1,
-                    flat_position_ids[-1:] + 1,
-                ]
-            )
-            max_seqlen = seqlens.max().item()
-            cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
+            if cu_seqlens is None or max_seqlen is None:
+                cu_seqlens, max_seqlen = infer_cu_seqlens_from_position_ids(position_ids)
             torch._dynamo.mark_dynamic(cu_seqlens, 0)
         else:
             max_seqlen = None
@@ -1000,6 +995,8 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
                 position_ids=position_ids,
                 inputs_embeds=inputs_embeds,
                 routed_experts=routed_experts,
+                cu_seqlens=kwargs.get("cu_seqlens"),
+                max_seqlen=kwargs.get("max_seqlen"),
             )
 
         hidden_states = outputs.last_hidden_state

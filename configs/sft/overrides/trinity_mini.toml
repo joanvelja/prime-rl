@@ -1,5 +1,10 @@
-# Override for Trinity-Mini-Base — MoE afmoe with 3B active / 26B total.
-# Same LR rationale as Qwen3-MoE (see qwen3_30b_a3b.toml).
+# Override for Trinity-Mini-Base — afmoe MoE, 26B total / 3B active, 128 experts top-8.
+#
+# LR=2e-6: empirical. 10-step probe (3908083) with baseline 5e-6 produced
+# grad_norm=2384 at step 3 (Max Vio=9.7). Partly warmup_steps=2 artifact but
+# without the missing expert_bias-update hook (src/prime_rl/trainer/models/
+# layers/moe.py:399 promises one; grep shows none exists), cut LR ~2.5× as
+# insurance. No published Trinity SFT recipe to anchor on.
 #
 # Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/trinity_mini.toml
 
@@ -10,6 +15,9 @@ name = "arcee-ai/Trinity-Mini-Base"
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-trinity-mini"
+
+[optim]
+lr = 2e-6
 
 [wandb]
 name = "trinity-mini"

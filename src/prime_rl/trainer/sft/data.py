@@ -3,7 +3,7 @@ import math
 import random
 import uuid
 from collections import defaultdict
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 import torch
 from datasets import Dataset, interleave_datasets, load_dataset
@@ -23,6 +23,7 @@ from prime_rl.utils.chat_template import (
     strip_message_content,
 )
 from prime_rl.utils.logger import get_logger
+from prime_rl.utils.sequence_packing import build_cu_seqlens
 
 STACKING_DATASET_BUCKET_TIMEOUT = 10
 
@@ -144,6 +145,7 @@ class Sample(TypedDict):
     position_ids: list[int]
     loss_mask: list[bool]
     target_ids: list[int]
+    sequence_lengths: NotRequired[list[int]]
 
 
 class Batch(TypedDict):
@@ -151,6 +153,9 @@ class Batch(TypedDict):
     position_ids: Int[Tensor, "batch seq"]
     target_ids: Int[Tensor, "batch seq"]
     loss_mask: Bool[Tensor, "batch seq"]
+    sequence_lengths: NotRequired[Int[Tensor, "num_sequences"]]
+    cu_seqlens: NotRequired[Int[Tensor, "num_sequences_plus_one"]]
+    max_seqlen: NotRequired[int]
 
 
 class StatefulIterableDataset(Stateful, IterableDataset):
@@ -220,6 +225,7 @@ class FakeDataset(StatefulIterableDataset):
                 "target_ids": input_ids[1:],
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
+                "sequence_lengths": [seq_len],
             }
             self.num_samples["fake"] += 1
             self.num_tokens["fake"] += len(input_ids)
@@ -377,6 +383,7 @@ class SFTDataset(StatefulIterableDataset):
             "target_ids": target_ids,
             "loss_mask": loss_mask,
             "position_ids": list(range(len(input_ids))),
+            "sequence_lengths": [len(input_ids)],
         }
 
     def __iter__(self):
@@ -433,31 +440,73 @@ class CatDataset(StatefulIterableDataset):
         self.logger = get_logger()
         self.dataset = dataset
         self.seq_len = seq_len
+        self.carry: dict[str, list] = defaultdict(list)
+        self.carry_sequence_lengths: list[int] = []
 
     def state_dict(self) -> dict:
-        return {"dataset": self.dataset.state_dict()}
+        state = {"dataset": self.dataset.state_dict()}
+        if any(self.carry.values()) or self.carry_sequence_lengths:
+            state["carry"] = dict(self.carry)
+            state["carry_sequence_lengths"] = self.carry_sequence_lengths
+        return state
 
     def load_state_dict(self, state_dict: dict):
         self.dataset.load_state_dict(state_dict["dataset"])
+        self.carry = defaultdict(list, state_dict.get("carry", {}))
+        self.carry_sequence_lengths = list(state_dict.get("carry_sequence_lengths", []))
+
+    @staticmethod
+    def _split_sequence_lengths(sequence_lengths: list[int], cutoff: int) -> tuple[list[int], list[int]]:
+        emitted, carry = [], []
+        remaining = cutoff
+        for idx, length in enumerate(sequence_lengths):
+            if remaining >= length:
+                emitted.append(length)
+                remaining -= length
+                continue
+            if remaining > 0:
+                emitted.append(remaining)
+            tail = length - remaining
+            if tail > 0:
+                carry.append(tail)
+            carry.extend(sequence_lengths[idx + 1 :])
+            break
+        return emitted, carry
 
     def __iter__(self):
-        packed_samples, seq_len = defaultdict(list), 0
+        packed_samples = defaultdict(list, self.carry)
+        sequence_lengths = list(self.carry_sequence_lengths)
+        seq_len = sum(sequence_lengths)
         for sample in self.dataset:
+            sample_sequence_lengths = sample.get("sequence_lengths", [len(sample["input_ids"])])
             # Add sample to packed samples
             for key, value in sample.items():
+                if key == "sequence_lengths":
+                    continue
                 assert isinstance(value, list), f"Value for key {key} must be a list"
                 packed_samples[key].extend(value)
 
             # Update sequence length
             seq_len += len(sample["input_ids"])
+            sequence_lengths.extend(sample_sequence_lengths)
 
-            # If batch is full, truncate and yield it
-            if seq_len >= self.seq_len:
+            while seq_len >= self.seq_len:
+                emitted = {}
+                carry = {}
                 for key, value in packed_samples.items():
                     assert isinstance(value, list), f"Value for key {key} must be a list"
-                    packed_samples[key] = value[: self.seq_len]
-                yield packed_samples
-                packed_samples, seq_len = defaultdict(list), 0
+                    emitted[key] = value[: self.seq_len]
+                    carry[key] = value[self.seq_len :]
+
+                emitted_lengths, carry_lengths = self._split_sequence_lengths(sequence_lengths, self.seq_len)
+                emitted["sequence_lengths"] = emitted_lengths
+
+                self.carry = defaultdict(list, carry)
+                self.carry_sequence_lengths = carry_lengths
+                packed_samples = self.carry
+                sequence_lengths = self.carry_sequence_lengths
+                seq_len = sum(sequence_lengths)
+                yield emitted
 
 
 class StackDataset(StatefulIterableDataset):
@@ -545,8 +594,10 @@ class StackDataset(StatefulIterableDataset):
 
                 packed_samples = defaultdict(list)
                 num_samples, num_tokens, num_trainable_tokens, num_pad_tokens = 0, 0, 0, 0
+                sequence_lengths = []
                 for bucket_item in self.buckets[bucket_idx]:
                     num_samples += 1
+                    sequence_lengths.append(len(bucket_item["input_ids"]))
                     for key, value in bucket_item.items():
                         pad_tokens = [0] * (self.bucket_sizes[bucket_idx] - len(value))
                         if key == "loss_mask":
@@ -554,6 +605,7 @@ class StackDataset(StatefulIterableDataset):
                             num_trainable_tokens += sum(value)
                             num_pad_tokens += len(pad_tokens)
                         packed_samples[key].append(value + pad_tokens)
+                packed_samples["sequence_lengths"] = sequence_lengths
                 reason = "bucket is full" if is_full else "because bucket timed out"
                 reason += " and " if is_full and hit_timeout else ""
                 reason += "bucket timed out" if hit_timeout else ""
@@ -570,22 +622,28 @@ class StackDataset(StatefulIterableDataset):
 
 
 def stack_collate(samples: list[Sample]) -> Batch:
+    sample = samples[0]
     return {
-        "input_ids": torch.tensor(samples[0]["input_ids"], dtype=torch.long, device="cuda"),
-        "position_ids": torch.tensor(samples[0]["position_ids"], dtype=torch.long, device="cuda"),
-        "loss_mask": torch.tensor(samples[0]["loss_mask"], dtype=torch.bool, device="cuda"),
-        "target_ids": torch.tensor(samples[0]["target_ids"], dtype=torch.long, device="cuda"),
+        "input_ids": torch.tensor(sample["input_ids"], dtype=torch.long, device="cuda"),
+        "position_ids": torch.tensor(sample["position_ids"], dtype=torch.long, device="cuda"),
+        "loss_mask": torch.tensor(sample["loss_mask"], dtype=torch.bool, device="cuda"),
+        "target_ids": torch.tensor(sample["target_ids"], dtype=torch.long, device="cuda"),
+        "sequence_lengths": torch.tensor(sample["sequence_lengths"], dtype=torch.int32, device="cuda"),
     }
 
 
 def cat_collate(samples: list[Sample]) -> Batch:
+    sample = samples[0]
+    sequence_lengths = sample.get("sequence_lengths", [len(sample["input_ids"])])
+    cu_seqlens, max_seqlen = build_cu_seqlens(sequence_lengths, device=torch.device("cuda"))
     return {
-        "input_ids": torch.stack([torch.tensor(sample["input_ids"]) for sample in samples], dim=0).long().to("cuda"),
-        "position_ids": torch.stack([torch.tensor(sample["position_ids"]) for sample in samples], dim=0)
-        .long()
-        .to("cuda"),
-        "loss_mask": torch.stack([torch.tensor(sample["loss_mask"]) for sample in samples], dim=0).bool().to("cuda"),
-        "target_ids": torch.stack([torch.tensor(sample["target_ids"]) for sample in samples], dim=0).long().to("cuda"),
+        "input_ids": torch.tensor(sample["input_ids"], dtype=torch.long, device="cuda").unsqueeze(0),
+        "position_ids": torch.tensor(sample["position_ids"], dtype=torch.long, device="cuda").unsqueeze(0),
+        "loss_mask": torch.tensor(sample["loss_mask"], dtype=torch.bool, device="cuda").unsqueeze(0),
+        "target_ids": torch.tensor(sample["target_ids"], dtype=torch.long, device="cuda").unsqueeze(0),
+        "sequence_lengths": torch.tensor(sequence_lengths, dtype=torch.int32, device="cuda"),
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": max_seqlen,
     }
 
 
