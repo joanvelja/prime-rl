@@ -127,7 +127,7 @@ override-dependencies = [
 torch = { index = "pytorch-cu128" }
 # Keep verifiers fetchable for fresh clones and CI; local sibling checkouts can
 # still be used ad hoc for fork development.
-verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "b723fda" }
+verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "42a965e" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "c1c3424" }
