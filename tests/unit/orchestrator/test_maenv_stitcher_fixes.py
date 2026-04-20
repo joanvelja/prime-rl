@@ -253,13 +253,16 @@ def test_num_rounds_is_per_member_under_simultaneous_schedule():
 def test_num_rounds_is_per_member_under_asymmetric_schedule():
     # A participates in 3 slots, B in 2. Global arithmetic would give
     # 5//2 = 2 for both. Per-member: A=3, B=2.
+    # All phases must be present in the selfplay pack (DebateEnv's
+    # init-time coverage check) — propose / critique are; "closing"
+    # would not be, so slot 4 reuses "critique" as a third A turn.
     schedule = StaticSchedule(
         slots=(
             TurnSlot(slot_id=0, agents=("debater_a",), phase="propose"),
             TurnSlot(slot_id=1, agents=("debater_b",), phase="propose"),
             TurnSlot(slot_id=2, agents=("debater_a",), phase="critique"),
             TurnSlot(slot_id=3, agents=("debater_b",), phase="critique"),
-            TurnSlot(slot_id=4, agents=("debater_a",), phase="closing"),
+            TurnSlot(slot_id=4, agents=("debater_a",), phase="critique"),
         )
     )
     env = _make_env(schedule)

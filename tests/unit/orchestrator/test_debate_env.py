@@ -221,20 +221,42 @@ DEBATE_PROMPTS = DebatePrompts(
     system={
         "prover": _je.from_string("You argue for the answer."),
         "verifier": _je.from_string("You argue against."),
+        # Opaque-label aliases — kernel-level cross-check tests construct
+        # DebateEnv with members=["A", "B"] / ["X", "Y"] to exercise OTHER
+        # invariants (members non-empty / no duplicates / matching schedule
+        # agents). The new schedule×prompts coverage check (verifiers) needs
+        # those member ids in the pack too; map them all to permissive
+        # placeholders so those tests don't have to vendor a separate pack.
+        "A": _je.from_string("placeholder system for opaque-label tests"),
+        "B": _je.from_string("placeholder system for opaque-label tests"),
+        "X": _je.from_string("placeholder system for opaque-label tests"),
+        "Y": _je.from_string("placeholder system for opaque-label tests"),
     },
     user={
         "prover": {
             "opening": _je.from_string("Make your opening argument."),
             "rebuttal": _je.from_string("Rebut."),
+            # 'default' fallback covers any phase the schedule may add
+            # (e.g. test_simultaneous_slot uses phase="simultaneous").
+            "default": _je.from_string("Continue the debate."),
         },
         "verifier": {
             "opening": _je.from_string("Make your opening argument."),
             "rebuttal": _je.from_string("Rebut."),
+            "default": _je.from_string("Continue the debate."),
         },
+        "A": {"default": _je.from_string("placeholder")},
+        "B": {"default": _je.from_string("placeholder")},
+        "X": {"default": _je.from_string("placeholder")},
+        "Y": {"default": _je.from_string("placeholder")},
     },
     question={
         "prover": _je.from_string("Question: {{ task_prompt }}"),
         "verifier": _je.from_string("Question: {{ task_prompt }}"),
+        "A": _je.from_string("Question: {{ task_prompt }}"),
+        "B": _je.from_string("Question: {{ task_prompt }}"),
+        "X": _je.from_string("Question: {{ task_prompt }}"),
+        "Y": _je.from_string("Question: {{ task_prompt }}"),
     },
     fields={},
     think_visibility={},
@@ -912,13 +934,22 @@ def test_debate_env_skips_schedule_cross_check_for_dynamic_program():
 
 
 def _make_think_prompts(think_visibility: dict[str, str]) -> DebatePrompts:
-    """Build DebatePrompts with specified think visibility."""
+    """Build DebatePrompts with specified think visibility.
+
+    user blocks include 'default' phase fallback so DebateEnv's init-time
+    schedule×prompts coverage check passes for any phase the test
+    schedule may use (these tests exercise format_history/visibility, not
+    user-instruction rendering, so a permissive default is fine).
+    """
     return DebatePrompts(
         system={
             "prover": _je.from_string("Prover system."),
             "verifier": _je.from_string("Verifier system."),
         },
-        user={},
+        user={
+            "prover": {"default": _je.from_string("placeholder")},
+            "verifier": {"default": _je.from_string("placeholder")},
+        },
         question={
             "prover": _je.from_string("Q"),
             "verifier": _je.from_string("Q"),
@@ -1036,7 +1067,14 @@ def test_format_history_attributes_both_debaters_distinctly():
             "verifier": _je.from_string("V system."),
             "judge": _je.from_string("J system."),
         },
-        user={},
+        # Default user templates per scheduled member — DebateEnv's init-
+        # time coverage check requires this; the test is about wrap-template
+        # attribution, not user-instruction rendering.
+        user={
+            "prover": {"default": _je.from_string("placeholder")},
+            "verifier": {"default": _je.from_string("placeholder")},
+            "judge": {"default": _je.from_string("placeholder")},
+        },
         question={
             "prover": _je.from_string("Q"),
             "verifier": _je.from_string("Q"),
@@ -1344,7 +1382,12 @@ def test_rollout_survives_benign_prose_with_bracket_words():
 
 
 def _make_field_prompts() -> DebatePrompts:
-    """Build DebatePrompts with field specs for extraction testing."""
+    """Build DebatePrompts with field specs for extraction testing.
+
+    Includes user templates for both members + a 'default' phase fallback
+    so DebateEnv's init-time schedule×prompts coverage check passes
+    regardless of which schedule the test uses.
+    """
     from verifiers.envs.debate.fields import FieldSpec
 
     return DebatePrompts(
@@ -1353,7 +1396,8 @@ def _make_field_prompts() -> DebatePrompts:
             "verifier": _je.from_string("System."),
         },
         user={
-            "prover": {"opening": _je.from_string("Argue.")},
+            "prover": {"opening": _je.from_string("Argue."), "default": _je.from_string("Continue.")},
+            "verifier": {"default": _je.from_string("Continue.")},
         },
         question={
             "prover": _je.from_string("Q"),
@@ -1716,14 +1760,22 @@ def _open_ended_prompts() -> DebatePrompts:
         system={
             "debater_a": _je.from_string("Argue."),
             "debater_b": _je.from_string("Argue."),
+            # Judge keys required by DebateEnv's init-time check whenever
+            # the schedule includes a 'judge' agent (the canonical
+            # _SCHEDULE_SLOTS does). The pack-level judge templates here
+            # are minimal placeholders — the open-ended tests exercise
+            # rubric / verdict / score paths, not judge-prompt rendering.
+            "judge": _je.from_string("Decide."),
         },
         user={
             "debater_a": {"propose": _je.from_string("State your answer.")},
             "debater_b": {"propose": _je.from_string("State your answer.")},
+            "judge": {"final": _je.from_string("Pick a winner.")},
         },
         question={
             "debater_a": _je.from_string("Q"),
             "debater_b": _je.from_string("Q"),
+            "judge": _je.from_string("Q"),
         },
         fields={
             "debater_a": {
@@ -1756,19 +1808,29 @@ def _open_ended_prompts() -> DebatePrompts:
 def _judgeless_prompts() -> DebatePrompts:
     """Minimal prompt pack that declares debater answer fields but no
     judge key at all. Used to verify the G-fallback still fires for
-    genuinely judgeless protocols."""
+    genuinely judgeless protocols.
+
+    Includes 'judge' templates because the canonical _SCHEDULE_SLOTS
+    *does* include a judge agent — DebateEnv's init-time check requires
+    every scheduled member to be in the pack. The "judgeless" name
+    refers to the absence of a judges= dict (no LLM-judge rubric), not
+    the absence of a judge participant in the schedule.
+    """
     return DebatePrompts(
         system={
             "debater_a": _je.from_string("Argue."),
             "debater_b": _je.from_string("Argue."),
+            "judge": _je.from_string("Decide."),
         },
         user={
             "debater_a": {"propose": _je.from_string("State your answer.")},
             "debater_b": {"propose": _je.from_string("State your answer.")},
+            "judge": {"final": _je.from_string("Pick a winner.")},
         },
         question={
             "debater_a": _je.from_string("Q"),
             "debater_b": _je.from_string("Q"),
+            "judge": _je.from_string("Q"),
         },
         fields={
             "debater_a": {
