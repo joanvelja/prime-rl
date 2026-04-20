@@ -84,7 +84,10 @@ def train(config: SFTConfig):
     setup_torch_distributed(
         timeout=timedelta(seconds=config.dist_timeout_seconds), enable_gloo=config.model.fsdp_cpu_offload
     )
-    torch.set_float32_matmul_precision("high")
+    # Configurable to support ROCm/AMD GPUs where reduced precision
+    # matmul corrupts softmax over large vocabularies. Override via config
+    # (e.g. matmul_precision = "highest") on ROCm.
+    torch.set_float32_matmul_precision(config.matmul_precision)
 
     if config.model.lora is not None:
         setup_multi_run_manager(config.output_dir, 1, torch.device("cuda", world.local_rank), config.model.lora)
@@ -106,7 +109,7 @@ def train(config: SFTConfig):
         cp_rank = parallel_dims.world_mesh["cp"].get_local_rank()
         substitute_hf_flash_attn(cp_group, heads_k_stride=1)
         substitute_ring_attn(cp_group, heads_k_stride=1, attn_impl=config.model.attn)
-        from prime_rl.utils.cp import setup_hybrid_cp, setup_sparse_mla_cp
+        from prime_rl.utils.cp import setup_hybrid_cp, setup_nemotron_h_cp, setup_sparse_mla_cp
 
     # Set up checkpoint manager
     logger.info(f"Initializing checkpoint managers ({config.ckpt})")
@@ -128,6 +131,7 @@ def train(config: SFTConfig):
     if parallel_dims.cp_enabled:
         setup_hybrid_cp(model, cp_group, cp_rank, parallel_dims.cp)
         setup_sparse_mla_cp(model, cp_group, cp_rank, parallel_dims.cp)
+        setup_nemotron_h_cp(model, cp_group, cp_rank, parallel_dims.cp)
 
     if config.model.lora is not None:
         multi_run_manager = get_multi_run_manager()
@@ -396,12 +400,14 @@ def train(config: SFTConfig):
             batch_loss = 0.0
         nan_loss_count = nan_loss_count.item()
 
-        logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
-        grad_norm = clip_grad_norm_(
-            model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
-        )
-        if grad_norm.device.type == "cpu":
-            grad_norm = grad_norm.to(torch.device("cuda"))
+        grad_norm: torch.Tensor | None = None
+        if config.optim.max_norm is not None:
+            logger.debug(f"Clipping gradients with max norm {config.optim.max_norm}")
+            grad_norm = clip_grad_norm_(
+                model.parameters(), max_norm=config.optim.max_norm, ep_enabled=parallel_dims.ep_enabled
+            )
+            if grad_norm.device.type == "cpu":
+                grad_norm = grad_norm.to(torch.device("cuda"))
         zero_grad_ratio = get_zero_gradient_ratio(model.parameters(), parallel_dims.dp_replicate)
 
         logger.debug("Optimizer step")
@@ -429,7 +435,10 @@ def train(config: SFTConfig):
 
         # Log step metrics
         step_time = time.perf_counter() - step_start_time
-        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f} | Grad. Norm: {grad_norm:.4f} | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
+        step_message = f"Step {progress.step} | Time: {step_time:.2f}s | Loss: {batch_loss:.4f}"
+        if grad_norm is not None:
+            step_message += f" | Grad. Norm: {grad_norm:.4f}"
+        step_message += f" | LR: {current_lr:.2e} | Throughput: {throughput:.0f} tokens/s | MFU: {mfu:.1f}% | Peak Mem.: {peak_memory:.1f}/{max_memory:.1f} GiB ({peak_memory / max_memory * 100:.1f}%)"
         if is_tt_moe_model(model) and batch_max_vio.item() > 0:
             step_message += f" | Max Vio: {batch_max_vio.item():.4f}"
         logger.success(step_message)
@@ -470,10 +479,11 @@ def train(config: SFTConfig):
         # Log optimizer metrics
         optim_metrics = {
             "optim/lr": current_lr,
-            "optim/grad_norm": grad_norm.item(),
             "optim/zero_grad_ratio": zero_grad_ratio,
             "step": progress.step,
         }
+        if grad_norm is not None:
+            optim_metrics["optim/grad_norm"] = grad_norm.item()
         monitor.log(optim_metrics, step=progress.step)
 
         loss_log_metrics = {

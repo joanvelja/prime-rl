@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from prime_rl.orchestrator.scheduler import GroupState, InflightRolloutInfo, Scheduler
+from prime_rl.orchestrator.scheduler import GroupState, InflightRequest, Scheduler
 from prime_rl.utils.async_utils import safe_cancel
 
 
@@ -46,8 +46,8 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
         interleaved_task = None
 
         scheduler.inflight_requests = {
-            stale_task: InflightRolloutInfo(off_policy_steps=1, client_config=client, task="test", group_id=1),
-            survivor_task: InflightRolloutInfo(off_policy_steps=0, client_config=client, task="test", group_id=2),
+            stale_task: InflightRequest(off_policy_steps=1, client_config=client, env_name="test", group_id=1),
+            survivor_task: InflightRequest(off_policy_steps=0, client_config=client, env_name="test", group_id=2),
         }
 
         async def drop_group(group_id: int) -> int:
@@ -63,10 +63,10 @@ def test_update_off_policy_does_not_increment_interleaved_on_policy_tasks():
             nonlocal interleaved_task
             if interleaved_task is None:
                 interleaved_task = asyncio.create_task(asyncio.sleep(60))
-                scheduler.inflight_requests[interleaved_task] = InflightRolloutInfo(
+                scheduler.inflight_requests[interleaved_task] = InflightRequest(
                     off_policy_steps=0,
                     client_config=client,
-                    task="test",
+                    env_name="test",
                     group_id=3,
                 )
             return len(tasks_to_remove)
@@ -195,12 +195,12 @@ def test_generate_batch_drops_timeout_error_and_continues():
         success_task = asyncio.create_task(return_rollout())
 
         scheduler.groups = {
-            1: GroupState(example={"task": "debate"}, rollouts_to_schedule=0),
-            2: GroupState(example={"task": "debate"}, rollouts_to_schedule=0),
+            1: GroupState(example={"env_name": "debate"}, rollouts_to_schedule=0),
+            2: GroupState(example={"env_name": "debate"}, rollouts_to_schedule=0),
         }
         scheduler.inflight_requests = {
-            timeout_task: InflightRolloutInfo(off_policy_steps=0, client_config=client, task="debate", group_id=1),
-            success_task: InflightRolloutInfo(off_policy_steps=0, client_config=client, task="debate", group_id=2),
+            timeout_task: InflightRequest(off_policy_steps=0, client_config=client, env_name="debate", group_id=1),
+            success_task: InflightRequest(off_policy_steps=0, client_config=client, env_name="debate", group_id=2),
         }
         scheduler.buffer.sample_rollouts.return_value = [success_rollout]
 

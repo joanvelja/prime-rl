@@ -33,11 +33,11 @@ name = "Qwen/Qwen3-4B-Instruct-2507"
 batch_size = 256
 rollouts_per_example = 8
 
-[orchestrator.sampling]
+[orchestrator.train.sampling]
 temperature = 1.0
-max_tokens = 1024
+max_completion_tokens = 1024
 
-[[orchestrator.env]]
+[[orchestrator.train.env]]
 id = "gpqa-consultancy"
 name = "gpqa-consultancy"
 args = { subset = "gpqa_diamond", judge_model = "gpt-4.1-mini", assignment_balance = 0.5 }
@@ -58,10 +58,6 @@ hard_threshold = 0.0
 
 [ckpt]
 interval = 25
-
-[orchestrator.val]
-interval = 10
-num_examples = 32
 
 [orchestrator.eval]
 interval = 25

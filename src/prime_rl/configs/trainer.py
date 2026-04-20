@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -16,7 +17,7 @@ from prime_rl.utils.config import BaseConfig
 
 # -- Shared trainer configs (used by both SFT and RL trainers) --
 
-AttnImplementation: TypeAlias = Literal["sdpa", "flash_attention_2", "flash_attention_3", "fa4"]
+AttnImplementation: TypeAlias = Literal["eager", "sdpa", "flash_attention_2", "flash_attention_3", "fa4"]
 EPCommBackend: TypeAlias = Literal["torch", "deepep"]
 
 # User-facing name -> internal name. Users set `flash_attention_4` in configs,
@@ -183,7 +184,7 @@ class ModelConfig(BaseModelConfig):
     attn: Annotated[
         AttnImplementation,
         Field(
-            description="The attention implementation to use. When CP is enabled, ring attention uses the matching kernel family (FA2 for flash_attention_2, FA3 for flash_attention_3).",
+            description="The attention implementation to use. When CP is enabled, ring attention uses the matching kernel family (FA2 for flash_attention_2, FA3 for flash_attention_3, FA4 for fa4).",
         ),
     ] = "flash_attention_2"
 
@@ -367,12 +368,12 @@ class ModelConfig(BaseModelConfig):
 
     @model_validator(mode="after")
     def cp_only_with_flash_attn(self):
-        if self.cp > 1 and self.attn not in ["flash_attention_2", "flash_attention_3"]:
-            raise ValueError("CP is only supported with flash attention 2 or flash attention 3")
-        if self.cp > 1 and self.attn == "flash_attention_3" and self.impl != "custom":
+        if self.cp > 1 and self.attn not in ["flash_attention_2", "flash_attention_3", "fa4"]:
+            raise ValueError("CP is only supported with flash attention 2, flash attention 3, or fa4")
+        if self.cp > 1 and self.attn in ("flash_attention_3", "fa4") and self.impl != "custom":
             raise ValueError(
-                "CP with flash_attention_3 requires model.impl='custom' "
-                "(the FA3 ring-attention kernel is only implemented for the custom model path)"
+                f"CP with {self.attn} requires model.impl='custom' "
+                "(the ring-attention kernel is only implemented for the custom model path)"
             )
         return self
 
@@ -430,7 +431,7 @@ class TokenizerConfig(BaseConfig):
     chat_template: Annotated[
         str | None,
         Field(
-            description="The chat template to use for the tokenizer. If None, will use the tokenizer's default chat template."
+            description="The chat template to use for the tokenizer. Can be a Jinja2 template string or a path to a template file. If None, will use the tokenizer's default chat template."
         ),
     ] = None
 
@@ -481,7 +482,9 @@ SchedulerConfig: TypeAlias = Annotated[
 class BaseOptimizerConfig(BaseModel):
     lr: Annotated[float, Field(ge=0)] = 1e-6
     weight_decay: Annotated[float, Field(ge=0)] = 0.01
-    max_norm: Annotated[float, Field(ge=0, description="Maximum gradient norm to clip.")] = 1.0
+    max_norm: Annotated[
+        float | None, Field(ge=0, description="Maximum gradient norm to clip. If None, gradient clipping is disabled.")
+    ] = 1.0
 
 
 class SGDConfig(BaseOptimizerConfig):
@@ -635,8 +638,8 @@ class DefaultLossConfig(BaseModel):
 
     type: Literal["default"] = "default"
 
-    ipo_mask_low: Annotated[float, Field(ge=0, description="The low threshold for masking tokens.")] = 0.2
-    ipo_mask_high: Annotated[float, Field(ge=0, description="The high threshold for masking tokens.")] = 0.2
+    dppo_mask_low: Annotated[float, Field(ge=0, description="The low threshold for masking tokens.")] = 0.2
+    dppo_mask_high: Annotated[float, Field(ge=0, description="The high threshold for masking tokens.")] = 0.2
     adv_tau: Annotated[float, Field(ge=0, description="The tau for advantages.")] = 1.0
     teacher_tau: Annotated[float, Field(ge=0, description="The tau for teacher logprobs.")] = 0.0
     kl_tau: Annotated[float, Field(ge=0, description="The tau for KL divergence.")] = 1e-3
@@ -716,6 +719,10 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 ]
 
 
+class TrainerExperimentalConfig(BaseConfig):
+    """Experimental features for the trainer."""
+
+
 class TrainerConfig(BaseConfig):
     """Configures the RL trainer"""
 
@@ -756,6 +763,19 @@ class TrainerConfig(BaseConfig):
             description="Directory to write outputs to. Will be populated with checkpoints, weights, rollouts and logs as subdirectories. Should be set to a persistent directory with enough disk space. This value should be distinct across experiments running on a single node. See the README for more details."
         ),
     ] = Path("outputs")
+
+    matmul_precision: Annotated[
+        Literal["highest", "high", "medium"],
+        Field(
+            description=(
+                "Precision for float32 matrix multiplications. "
+                "Use 'highest' for full FP32 (required on ROCm/AMD GPUs to avoid "
+                "catastrophic precision loss in softmax over large vocabularies). "
+                "Use 'high' to enable TF32 on NVIDIA GPUs for a speedup with minor "
+                "precision tradeoff. See torch.set_float32_matmul_precision docs."
+            ),
+        ),
+    ] = "high"
 
     max_steps: Annotated[
         int | None,
@@ -820,6 +840,22 @@ class TrainerConfig(BaseConfig):
             description="The maximum number of concurrent runs to allow. If 1, then only one run will be allowed at a time.",
         ),
     ] = 1
+
+    experimental: Annotated[
+        TrainerExperimentalConfig,
+        Field(description="Experimental features for the trainer."),
+    ] = TrainerExperimentalConfig()
+
+    @model_validator(mode="after")
+    def deepep_disables_grad_clipping(self):
+        if self.model.ep_comm_backend == "deepep" and self.optim.max_norm is not None:
+            warnings.warn(
+                "Gradient clipping is not compatible with DeepEP. "
+                "Automatically setting optim.max_norm to None (disabled).",
+                stacklevel=1,
+            )
+            self.optim.max_norm = None
+        return self
 
     @model_validator(mode="after")
     def vlms_require_bfloat16(self):
