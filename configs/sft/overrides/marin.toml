@@ -1,0 +1,13 @@
+# Override for marin-8b-base — the default base; listed here for launch uniformity.
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/marin.toml
+
+output_dir = "outputs/sft-baseline-marin"
+
+[model]
+name = "marin-community/marin-8b-base"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-marin"
+
+[wandb]
+name = "marin"

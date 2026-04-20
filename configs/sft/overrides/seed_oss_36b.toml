@@ -1,0 +1,23 @@
+# Override for Seed-OSS-36B — scale LR down for 36B dense.
+#
+# Rationale: Tülu 3 measured 5e-6@8B and 2e-6@70B, implying ~1/√N scaling.
+# Interpolating at 36B: 5e-6 / √(36/8) = 5e-6 / 2.12 ≈ 2.36e-6, round to 3e-6.
+#
+# Note: HF fallback path (SeedOssConfig is not in prime-rl's custom impls).
+# Expect ~1.5× slower per step than custom-path models.
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/seed_oss_36b.toml
+
+output_dir = "outputs/sft-baseline-seed-oss-36b"
+
+[model]
+name = "ByteDance-Seed/Seed-OSS-36B-Base-woSyn"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-seed-oss-36b-wosyn"
+
+[optim]
+lr = 3e-6                               # √N interp between Tülu 5e-6@8B and 2e-6@70B
+
+[wandb]
+name = "seed-oss-36b-wosyn"

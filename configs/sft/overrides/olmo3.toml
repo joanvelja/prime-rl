@@ -1,0 +1,32 @@
+# Override for Olmo-3-7B — use OLMo-core's directly-calibrated SFT hparams.
+#
+# Rationale: OLMo-core's `src/scripts/train/sft/Olmo-3-7B-SFT.py` lines 312-376
+# specifies 8e-5 LR at 1M-token global batch for 3 epochs. We scale down for
+# our 2× smaller batch (524K tokens) using √-scaling of Adam LR:
+#   8e-5 × √(524K / 1M) ≈ 8e-5 × 0.72 ≈ 5.8e-5
+# Further down-weighted to 1e-5 because:
+#   (a) 5.8e-5 assumes OLMo's midtrained checkpoint; we start from a vanilla
+#       context-extended base that's NOT midtrained → need more conservative LR
+#   (b) √-scaling alone doesn't fully close the measured gap (see plan §7b)
+#   (c) 1e-5 is 2× Tülu's 5e-6 — middle ground, lets smoke test disambiguate
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/olmo3.toml
+
+max_steps = 19782                       # 3 epochs × (843960 / 128) = 19,781.25
+output_dir = "outputs/sft-baseline-olmo-3-7b"
+
+[model]
+name = "allenai/Olmo-3-1025-7B"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-olmo-3-7b"
+
+[optim]
+lr = 1e-5                               # see rationale above
+
+[scheduler]
+warmup_steps = 594                      # 3% × 19782
+decay_steps = 19188                     # max_steps - warmup_steps
+
+[wandb]
+name = "olmo-3-7b"

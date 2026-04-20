@@ -1,0 +1,15 @@
+# Override for Trinity-Mini-Base — MoE afmoe with 3B active / 26B total.
+# Same LR rationale as Qwen3-MoE (see qwen3_30b_a3b.toml).
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/trinity_mini.toml
+
+output_dir = "outputs/sft-baseline-trinity-mini"
+
+[model]
+name = "arcee-ai/Trinity-Mini-Base"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-trinity-mini"
+
+[wandb]
+name = "trinity-mini"

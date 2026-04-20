@@ -1,0 +1,18 @@
+# Override for Nemotron-H-8B-Base-8K — Mamba/Transformer hybrid.
+#
+# Caveat: Mamba-hybrid optimizer dynamics may differ from pure transformer.
+# No public SFT recipe for this arch. 5e-6 is our best prior; monitor the
+# first 500 smoke steps carefully for instability.
+#
+# Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/nemotron_h_8b.toml
+
+output_dir = "outputs/sft-baseline-nemotron-h-8b"
+
+[model]
+name = "nvidia/Nemotron-H-8B-Base-8K"
+
+[tokenizer]
+name = "joanvelja/sft-tokenizer-nemotron-h-8b"
+
+[wandb]
+name = "nemotron-h-8b"

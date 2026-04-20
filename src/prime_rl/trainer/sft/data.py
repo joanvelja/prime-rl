@@ -1,4 +1,6 @@
 import json
+import math
+import random
 import uuid
 from collections import defaultdict
 from typing import Literal, TypedDict, cast
@@ -24,6 +26,118 @@ from prime_rl.utils.chat_template import (
 from prime_rl.utils.logger import get_logger
 
 STACKING_DATASET_BUCKET_TIMEOUT = 10
+
+# Profile definitions: map HF config names → dimension weights for system prompt sampling.
+# Each profile assigns importance weights to prompt dimensions (tags).
+SYSTEM_PROMPT_PROFILES: dict[str, dict[str, float]] = {
+    "chat": {"natural": 2.0, "pragmatic": 1.0},
+    "math": {"analytic": 2.0, "calibrated": 1.0},
+    "coding-bare": {"concise": 2.0, "literal": 1.0},
+    "coding-explained": {"explanatory": 2.0, "pragmatic": 1.0},
+    "precise-short": {"literal": 2.0, "concise": 1.0},
+    "science": {"analytic": 1.0, "explanatory": 1.0},
+}
+
+# Map HF config (subset) names to profiles.
+SUBSET_TO_PROFILE: dict[str, str] = {
+    "wildchat": "chat",
+    "openassistant": "chat",
+    "tulu-3-persona-math": "math",
+    "openmathinstruct-2": "math",
+    "tulu-3-persona-algebra": "math",
+    "dolci-python-algo": "coding-bare",
+    "evol-codealpaca": "coding-explained",
+    "dolci-precise-if": "precise-short",
+    "flan": "precise-short",
+    "tablegpt": "precise-short",
+    "dolci-openthoughts-sci": "science",
+    "sciriff": "science",
+}
+
+# Smoothing constant for profile weights to ensure non-zero probability for all prompts.
+_PROFILE_EPSILON = 0.01
+
+
+class SystemPromptSampler:
+    """Loads a pool of tagged system prompts and samples from it using profile-weighted distributions.
+
+    `pool_path` accepts either:
+      - A local file path to `system_prompts_final.json` (expects a sibling
+        `system_prompts_expanded.json` for tags); or
+      - A HuggingFace Hub dataset repo ID (e.g. `joanvelja/sft-system-prompts-v1`)
+        containing `system_prompts_final.json` + `system_prompts_expanded.json`.
+
+    A string is treated as a local path if the file exists on disk, otherwise it
+    is treated as an HF repo ID.
+    """
+
+    _FINAL_FILENAME = "system_prompts_final.json"
+    _EXPANDED_FILENAME = "system_prompts_expanded.json"
+
+    def __init__(self, pool_path: str):
+        final_path, expanded_path = self._resolve_paths(pool_path)
+
+        with open(final_path) as f:
+            self.prompts: list[str] = json.load(f)
+        if not self.prompts:
+            raise ValueError(f"System prompt pool at {pool_path} is empty")
+
+        # Try loading the expanded file for tags (covers all prompts, not just seeds).
+        # Fall back to uniform tagging if unavailable.
+        self.tags_per_prompt: list[list[str]] = []
+        try:
+            with open(expanded_path) as f:
+                raw = json.load(f)
+            # Handle both formats: list-of-dicts or {"prompts": list-of-dicts}
+            if isinstance(raw, dict):
+                raw = raw.get("prompts", [])
+            prompt_to_tags = {item["prompt"]: item.get("tags", []) for item in raw}
+            for prompt in self.prompts:
+                self.tags_per_prompt.append(prompt_to_tags.get(prompt, []))
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+            self.tags_per_prompt = [[] for _ in self.prompts]
+
+    @classmethod
+    def _resolve_paths(cls, pool_path: str) -> tuple[str, str]:
+        """Return (final_path, expanded_path) as local filesystem paths.
+
+        Downloads from HF Hub if `pool_path` looks like a repo ID.
+        """
+        from pathlib import Path
+
+        p = Path(pool_path)
+        if p.is_file():
+            final_path = str(p)
+            expanded_path = pool_path.replace("_final.json", "_expanded.json")
+            return final_path, expanded_path
+
+        # Treat as HF Hub dataset repo ID (e.g. "joanvelja/sft-system-prompts-v1")
+        from huggingface_hub import hf_hub_download
+
+        final_path = hf_hub_download(
+            repo_id=pool_path, filename=cls._FINAL_FILENAME, repo_type="dataset"
+        )
+        expanded_path = hf_hub_download(
+            repo_id=pool_path, filename=cls._EXPANDED_FILENAME, repo_type="dataset"
+        )
+        return final_path, expanded_path
+
+    def sample(self, profile_name: str | None, seed: int) -> str:
+        """Sample a system prompt using profile-weighted distribution with deterministic seed."""
+        rng = random.Random(seed)
+
+        if profile_name is None or profile_name not in SYSTEM_PROMPT_PROFILES:
+            # Uniform sampling when no profile matches
+            return rng.choice(self.prompts)
+
+        dim_weights = SYSTEM_PROMPT_PROFILES[profile_name]
+        weights = []
+        for tags in self.tags_per_prompt:
+            score = sum(dim_weights.get(tag, 0.0) for tag in tags)
+            weights.append(_PROFILE_EPSILON + math.exp(score))
+
+        # Weighted sample
+        return rng.choices(self.prompts, weights=weights, k=1)[0]
 
 
 class Sample(TypedDict):
@@ -127,6 +241,7 @@ class SFTDataset(StatefulIterableDataset):
         loss_mask_config: LossMaskConfig = LossMaskConfig(),
         max_examples: int | None = None,
         max_epochs: int | None = None,
+        system_prompt_sampler: SystemPromptSampler | None = None,
     ):
         super().__init__()
         self.logger = get_logger()
@@ -139,6 +254,7 @@ class SFTDataset(StatefulIterableDataset):
         self.loss_mask_config = loss_mask_config
         self.max_examples = max_examples
         self.max_epochs = max_epochs
+        self.system_prompt_sampler = system_prompt_sampler
 
         if self.tokenizer is None:
             self.logger.warning("No tokenizer provided, will not process examples")
@@ -187,6 +303,22 @@ class SFTDataset(StatefulIterableDataset):
             return strip_message_content(messages)
 
         messages = resolve_messages(example)
+
+        # Multi-turn filter: skip samples with >2 messages (before injection)
+        if self.system_prompt_sampler is not None and len(messages) > 2:
+            self.logger.debug(
+                f"Skipping multi-turn example {example.get('__index', '')} "
+                f"({len(messages)} messages) — system prompt injection requires single-turn"
+            )
+            return None
+
+        # System prompt injection: prepend a profile-weighted system prompt
+        if self.system_prompt_sampler is not None:
+            subset = example.get("__subset")
+            profile = SUBSET_TO_PROFILE.get(subset) if subset else None
+            sample_index = example.get("__index", 0)
+            prompt = self.system_prompt_sampler.sample(profile, seed=self.seed + sample_index)
+            messages = [{"role": "system", "content": prompt}] + messages
 
         # Parse available tools, if present - assumes OAI format
         # Reference: https://platform.openai.com/docs/guides/function-calling#function-tool-example
@@ -545,6 +677,7 @@ def setup_dataset(
     elif config.type == "sft":
         if raw_dataset is None:
             raw_dataset = load_sft_dataset(config)
+        sampler = SystemPromptSampler(config.system_prompt_pool_path) if config.system_prompt_pool_path else None
         return SFTDataset(
             raw_dataset,
             tokenizer,
@@ -554,6 +687,7 @@ def setup_dataset(
             loss_mask_config=config.loss_mask,
             non_dp_size=non_dp_size,
             max_epochs=max_epochs,
+            system_prompt_sampler=sampler,
         )
     else:
         raise ValueError(f"Invalid dataset type: {config.type}")
