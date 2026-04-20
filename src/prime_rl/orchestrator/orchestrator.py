@@ -222,11 +222,13 @@ async def orchestrate(config: OrchestratorConfig):
     is_ma = bool(ma_env_names)
 
     advantage_type = config.advantage.type if config.advantage else None
-    if is_ma and advantage_type == "default":
+    if is_ma and advantage_type != "ema_per_member":
         raise ValueError(
-            "advantage.type='default' is not implemented for multi-agent envs; "
-            "fan-out makes samples_per_problem grouping ambiguous. Use "
-            "type='ema_per_member' or type='custom' for multi-agent training."
+            f"advantage.type={advantage_type!r} is not supported for "
+            "multi-agent envs; fan-out interleaves members per episode so "
+            "compute_advantages' samples_per_problem reshape would mix "
+            "seats/episodes and silently corrupt gradients. Use "
+            "type='ema_per_member' for multi-agent training."
         )
     if (not is_ma) and advantage_type == "ema_per_member":
         raise ValueError(
@@ -485,13 +487,10 @@ async def orchestrate(config: OrchestratorConfig):
                     drop_judge=config.multi_agent.drop_judge,
                     filter_by_learner_seat=config.multi_agent.filter_by_learner_seat,
                 )
-                if advantage_type == "ema_per_member":
-                    assert advantage_state is not None
-                    advantages = compute_rae_advantages(training_units, advantage_state)
-                    for unit, advantage in zip(training_units, advantages):
-                        unit["advantage"] = advantage
-                else:
-                    compute_advantages(training_units, config.rollouts_per_example, config.advantage)
+                assert advantage_state is not None  # gated by MA validation above
+                advantages = compute_rae_advantages(training_units, advantage_state)
+                for unit, advantage in zip(training_units, advantages):
+                    unit["advantage"] = advantage
 
                 apply_filters(rollout_filters, training_units)
                 for rollout, unit_idxs in zip(train_rollouts, rollout_to_unit_idxs):
@@ -612,6 +611,12 @@ async def orchestrate(config: OrchestratorConfig):
                 samples = results[unit_idx] or []
                 unit = training_units[unit_idx]
                 rollout_total_samples += len(samples)
+                if unit["is_filtered"]:
+                    # Filtered units never reach the trainer, so their tokens
+                    # don't belong in training-usage accounting -- otherwise
+                    # report_training_usage (usage_type="training") over-bills
+                    # by the filtered slice.
+                    continue
                 for sample in samples:
                     sample.advantage = unit["advantage"]
                     sample.reward = unit["reward"]
@@ -619,8 +624,7 @@ async def orchestrate(config: OrchestratorConfig):
                     sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
                     rollout_decode_tokens += sample_decode_tokens
                     rollout_prefill_tokens += sample_prefill_tokens
-                    if not unit["is_filtered"]:
-                        train_examples.append(sample)
+                    train_examples.append(sample)
             rollout_samples_per_rollout.append(rollout_total_samples)
             rollout_prefill_lens.append(rollout_prefill_tokens)
             rollout_decode_lens.append(rollout_decode_tokens)
