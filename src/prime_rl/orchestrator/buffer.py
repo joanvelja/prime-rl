@@ -37,7 +37,7 @@ class _EnvBuffer:
         assert "example_id" in dataset.column_names, f"Dataset for {env.name} must contain an `example_id` column."
         assert "prompt" in dataset.column_names, f"Dataset for {env.name} must contain a `prompt` column."
 
-        self.examples: dict[int, dict] = {}
+        self.examples: dict[int | str, dict] = {}
         for example in map(partial(cast, dict), dataset):
             example["env_name"] = env.name
             self.examples[example["example_id"]] = example
@@ -64,7 +64,7 @@ class _EnvBuffer:
         assert hash_keys, "No hashable keys found in example."
         return hashlib.sha256(json.dumps([example[key] for key in hash_keys]).encode()).hexdigest()
 
-    def update_pools(self, example_id: int, avg_reward: float) -> str:
+    def update_pools(self, example_id: int | str, avg_reward: float) -> str:
         """Assign example to pool based on reward. Returns pool name."""
         if self.config.easy_threshold is not None and avg_reward >= self.config.easy_threshold:
             pool = "easy"

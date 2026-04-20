@@ -9,6 +9,11 @@ from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
+from prime_rl.orchestrator.multi_agent_advantage import (
+    RAEState,
+    compute_rae_advantages,
+    fan_out_for_multi_agent,
+)
 from prime_rl.orchestrator.patches import monkey_patch_chat_completion_logprobs, monkey_patch_oai_iterable_types
 from prime_rl.orchestrator.trajectories import (
     build_vlm_image_cache,
@@ -32,6 +37,7 @@ monkey_patch_chat_completion_logprobs()
 import pandas as pd
 import verifiers as vf
 from transformers import AutoProcessor
+from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.orchestrator.buffer import Buffer
@@ -75,6 +81,11 @@ from prime_rl.utils.utils import (
 # pod terminates instead of sitting wedged forever. The training checkpoint
 # and artifacts are persisted *before* this point, so a forced exit is safe.
 SHUTDOWN_TIMEOUT_S = 300
+
+# Maximum number of times to attempt generating a training batch when all
+# rollouts are filtered out. After this many attempts, the orchestrator crashes
+# rather than silently skipping training steps.
+MAX_EMPTY_BATCH_ATTEMPTS = 3
 
 
 @clean_exit
@@ -196,6 +207,48 @@ async def orchestrate(config: OrchestratorConfig):
     )
     logger.success("Train environment(s) ready")
 
+    ma_env_names = {
+        env.name
+        for env in train_envs
+        if isinstance(env.env.rubric, MultiAgentRubric)
+    }
+    non_ma_env_names = set(train_envs.names) - ma_env_names
+    if ma_env_names and non_ma_env_names:
+        raise NotImplementedError(
+            f"Mixed multi-agent and single-agent envs in the same group are not supported. "
+            f"MA: {sorted(ma_env_names)}, single-agent: {sorted(non_ma_env_names)}. "
+            "Run them in separate orchestrator processes."
+        )
+    is_ma = bool(ma_env_names)
+
+    advantage_type = config.advantage.type if config.advantage else None
+    if is_ma and advantage_type != "ema_per_member":
+        raise ValueError(
+            f"advantage.type={advantage_type!r} is not supported for "
+            "multi-agent envs; fan-out interleaves members per episode so "
+            "compute_advantages' samples_per_problem reshape would mix "
+            "seats/episodes and silently corrupt gradients. Use "
+            "type='ema_per_member' for multi-agent training."
+        )
+    if (not is_ma) and advantage_type == "ema_per_member":
+        raise ValueError(
+            "advantage.type='ema_per_member' requires a MultiAgentRubric env. "
+            "Use type='default' or type='custom' for single-agent training."
+        )
+
+    if is_ma:
+        logger.info(
+            f"Multi-agent envs={sorted(ma_env_names)}. Routing through per-member fan-out "
+            f"(drop_judge={config.multi_agent.drop_judge}, "
+            f"filter_by_learner_seat={config.multi_agent.filter_by_learner_seat}); "
+            f"advantage estimator={advantage_type}."
+        )
+        if is_vlm:
+            raise NotImplementedError(
+                "VLM + multi-agent training is not yet supported; image cache fan-out "
+                "across per-member rollouts is unimplemented."
+            )
+
     eval_envs: EvalEnvs | None = None
     if config.eval:
         logger.info("Loading eval environment(s)")
@@ -236,7 +289,6 @@ async def orchestrate(config: OrchestratorConfig):
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
         config=config,
-        use_prefix_cache_salt=config.experimental.use_prefix_cache_salt,
     )
     scheduler.model_name = rollout_model_name
 
@@ -286,11 +338,17 @@ async def orchestrate(config: OrchestratorConfig):
     # Track previous ckpt_step to detect when ckpt_step jumps over eval interval boundaries
     prev_ckpt_step = -1
 
-    # Reset weights to base model if starting from scratch
+    # Reset weights to base model if starting from scratch. RAE is stateful and
+    # must resume with progress/buffer for multi-agent runs.
     progress = Progress()
+    advantage_state: RAEState | None = (
+        RAEState(momentum=config.advantage.momentum)
+        if advantage_type == "ema_per_member"
+        else None
+    )
 
     if checkpoint_step is not None and ckpt_manager is not None:
-        ckpt_manager.load(progress, buffer, step=checkpoint_step)
+        ckpt_manager.load(progress, buffer, step=checkpoint_step, rae_state=advantage_state)
         logger.info(f"Resuming training from checkpoint step {checkpoint_step}")
         scheduler.ckpt_step = progress.step  # Always resume from the latest checkpoint
         if config.eval and config.eval.skip_eval_on_resume:
@@ -339,7 +397,7 @@ async def orchestrate(config: OrchestratorConfig):
         ):
             logger.info(f"Saving checkpoint at step {progress.step}")
             save_ckpt_start_time = time.perf_counter()
-            ckpt_manager.save(progress, buffer, step=progress.step)
+            ckpt_manager.save(progress, buffer, step=progress.step, rae_state=advantage_state)
             save_ckpt_time = time.perf_counter() - save_ckpt_start_time
 
         # Break if we have reached the maximum number of steps
@@ -380,7 +438,6 @@ async def orchestrate(config: OrchestratorConfig):
                 logger.info("Cancelling in-flight training rollouts before starting evals to avoid congestion.")
                 await scheduler.cancel_inflight_rollouts()
 
-            eval_cache_salt = str(ckpt_step) if config.experimental.use_prefix_cache_salt else None
             eval_results = await asyncio.gather(
                 *[
                     eval_env.evaluate(
@@ -388,7 +445,7 @@ async def orchestrate(config: OrchestratorConfig):
                         get_client=inference_pool.get_eval_client,
                         ckpt_step=ckpt_step,
                         step=progress.step,
-                        cache_salt=eval_cache_salt,
+                        cache_salt=str(ckpt_step),
                     )
                     for eval_env in envs_to_eval
                 ]
@@ -408,13 +465,81 @@ async def orchestrate(config: OrchestratorConfig):
         # Update prev_ckpt_step for next iteration
         prev_ckpt_step = ckpt_step
 
-        # Schedule generating the training batch
-        train_task = asyncio.create_task(scheduler.generate_batch(step=progress.step))
+        # Schedule generating the training batch. Retry on empty-after-filter
+        # batches so the trainer never receives an empty batch.
+        generate_completions_time = 0.0
+        train_rollouts: list[vf.RolloutOutput] = []
+        num_rollouts = 0
+        num_unique_examples = 0
+        n_trainable = 0
+        training_units = []
+        rollout_to_unit_idxs: list[list[int]] = []
+        for attempt in range(MAX_EMPTY_BATCH_ATTEMPTS):
+            train_rollouts = await scheduler.generate_batch(step=progress.step)
+            generate_completions_time += scheduler.last_batch_generation_time
 
-        # Await train rollouts
-        await train_task
-        generate_completions_time = scheduler.last_batch_generation_time
-        train_rollouts = train_task.result()
+            num_rollouts = len(train_rollouts)
+            num_unique_examples = len({r["example_id"] for r in train_rollouts})
+
+            if is_ma:
+                training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
+                    train_rollouts,
+                    drop_judge=config.multi_agent.drop_judge,
+                    filter_by_learner_seat=config.multi_agent.filter_by_learner_seat,
+                )
+                assert advantage_state is not None  # gated by MA validation above
+                advantages = compute_rae_advantages(training_units, advantage_state)
+                for unit, advantage in zip(training_units, advantages):
+                    unit["advantage"] = advantage
+
+                apply_filters(rollout_filters, training_units)
+                for rollout, unit_idxs in zip(train_rollouts, rollout_to_unit_idxs):
+                    unit_filters = [training_units[i]["filters"] for i in unit_idxs]
+                    rollout["filters"] = {
+                        name: any(flags.get(name, False) for flags in unit_filters)
+                        for name in (unit_filters[0].keys() if unit_filters else [f.name for f in rollout_filters])
+                    }
+                    rollout["is_filtered"] = bool(unit_idxs) and all(
+                        training_units[i]["is_filtered"] for i in unit_idxs
+                    )
+                    unit_advantages = [training_units[i]["advantage"] for i in unit_idxs]
+                    rollout["advantage"] = sum(unit_advantages) / len(unit_advantages) if unit_advantages else 0.0
+            else:
+                training_units = list(train_rollouts)
+                rollout_to_unit_idxs = [[i] for i in range(num_rollouts)]
+                compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
+                apply_filters(rollout_filters, train_rollouts)
+
+            n_trainable = sum(1 for u in training_units if not u["is_filtered"])
+            if n_trainable > 0:
+                break
+
+            if attempt == MAX_EMPTY_BATCH_ATTEMPTS - 1:
+                logger.error(
+                    f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
+                    f"filtered out all {num_rollouts} rollouts - crashing orchestrator"
+                )
+                reason = (
+                    f"All {num_rollouts} rollouts were filtered out on "
+                    f"{MAX_EMPTY_BATCH_ATTEMPTS} consecutive attempts at step {progress.step}"
+                )
+                evicted_path = config.output_dir / "control" / "evicted.txt"
+                evicted_path.parent.mkdir(parents=True, exist_ok=True)
+                evicted_path.write_text(reason)
+                raise RuntimeError(reason)
+
+            logger.warning(
+                f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
+                f"filtered out all {num_rollouts} rollouts - retrying batch generation"
+            )
+
+        trainable_ratio = n_trainable / num_rollouts
+        if trainable_ratio <= 0.1:
+            logger.warning(
+                f"Only {n_trainable}/{num_rollouts} rollouts in the batch are trainable "
+                f"({trainable_ratio:.1%}) - this can mean the tasks are too easy or too hard for the "
+                "model, consider reviewing the task difficulty of your environment(s)"
+            )
 
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
@@ -431,21 +556,12 @@ async def orchestrate(config: OrchestratorConfig):
                     f"VLM offloaded {num_offloaded} unique images to disk in {time.perf_counter() - offload_start:.2f}s"
                 )
 
-        # Compute advantages (in-place)
-        example_ids = [r["example_id"] for r in train_rollouts]
-        num_rollouts = len(train_rollouts)
-        num_unique_examples = len(set(example_ids))
-        compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
-
-        # Apply rollout filters (zeros reward/mask for degenerate generations)
-        filter_metrics = apply_filters(rollout_filters, train_rollouts)
-
-        # Convert rollouts to training samples
+        # Convert training units to training samples
         parallel_preprocess_start = time.perf_counter()
 
         # Pretokenize before VLM image cache build (which strips image data from messages)
-        for rollout in train_rollouts:
-            pretokenize_rollout_trajectory(rollout, tokenizer, processor=processor)
+        for unit in training_units:
+            pretokenize_rollout_trajectory(unit, tokenizer, processor=processor)
 
         # VLM: build image cache in a thread so it doesn't block the event loop.
         # This lets the scheduler continue servicing inflight rollout requests
@@ -466,38 +582,50 @@ async def orchestrate(config: OrchestratorConfig):
             vlm_cache = None
             mm_token_type_ids_mapping = None
 
-        # Process rollouts in parallel
-        def process_rollout(rollout: vf.RolloutOutput, rollout_idx: int) -> list[TrainingSample] | None:
+        # Process training units in parallel
+        def process_unit(unit: vf.RolloutOutput, unit_idx: int) -> list[TrainingSample] | None:
             return interleave_rollout(
-                rollout, vlm_cache=vlm_cache, cache_key=rollout_idx, mm_token_type_ids_mapping=mm_token_type_ids_mapping
+                unit,
+                vlm_cache=vlm_cache,
+                cache_key=unit_idx,
+                mm_token_type_ids_mapping=mm_token_type_ids_mapping,
             )
 
         results = await asyncio.gather(
-            *(asyncio.to_thread(process_rollout, r, rollout_idx) for rollout_idx, r in enumerate(train_rollouts))
+            *(asyncio.to_thread(process_unit, unit, unit_idx) for unit_idx, unit in enumerate(training_units))
         )
 
-        # Collect results and assign advantages
+        # Collect results and assign advantages. Metrics stay per rollout;
+        # training examples are per unit after optional multi-agent fan-out.
         train_examples: list[TrainingSample] = []
         rollout_prefill_lens: list[int] = []
         rollout_decode_lens: list[int] = []
         rollout_samples_per_rollout: list[int] = []
         num_prefill_tokens = 0
         num_decode_tokens = 0
-        for rollout, samples in zip(train_rollouts, results):
+        for unit_idxs in rollout_to_unit_idxs:
             rollout_prefill_tokens = 0
             rollout_decode_tokens = 0
-            if samples is not None:
-                rollout_samples_per_rollout.append(len(samples))
+            rollout_total_samples = 0
+            for unit_idx in unit_idxs:
+                samples = results[unit_idx] or []
+                unit = training_units[unit_idx]
+                rollout_total_samples += len(samples)
+                if unit["is_filtered"]:
+                    # Filtered units never reach the trainer, so their tokens
+                    # don't belong in training-usage accounting -- otherwise
+                    # report_training_usage (usage_type="training") over-bills
+                    # by the filtered slice.
+                    continue
                 for sample in samples:
-                    sample.advantage = rollout["advantage"]
-                    sample.reward = rollout["reward"]
+                    sample.advantage = unit["advantage"]
+                    sample.reward = unit["reward"]
                     sample_decode_tokens = sum(sample.completion_mask)
                     sample_prefill_tokens = len(sample.prompt_ids) + len(sample.completion_mask) - sample_decode_tokens
                     rollout_decode_tokens += sample_decode_tokens
                     rollout_prefill_tokens += sample_prefill_tokens
                     train_examples.append(sample)
-            else:
-                rollout_samples_per_rollout.append(0)
+            rollout_samples_per_rollout.append(rollout_total_samples)
             rollout_prefill_lens.append(rollout_prefill_tokens)
             rollout_decode_lens.append(rollout_decode_tokens)
             num_prefill_tokens += rollout_prefill_tokens
@@ -540,6 +668,7 @@ async def orchestrate(config: OrchestratorConfig):
                 "env_name": [rollout["env_name"] for rollout in train_rollouts],
                 "reward": [rollout["reward"] for rollout in train_rollouts],
                 "is_truncated": [rollout["is_truncated"] for rollout in train_rollouts],
+                "is_filtered": [rollout["is_filtered"] for rollout in train_rollouts],
                 "stop_condition": [rollout.get("stop_condition") for rollout in train_rollouts],
                 "seq_len": [get_seq_len(rollout) for rollout in train_rollouts],
                 "prefill_len": rollout_prefill_lens,
@@ -551,8 +680,9 @@ async def orchestrate(config: OrchestratorConfig):
             }
         )
 
-        # Separate DataFrame for env reward function metrics to avoid column name collisions
+        # Separate DataFrames for env reward function metrics and filter flags to avoid column name collisions
         metrics_df = pd.DataFrame([rollout["metrics"] for rollout in train_rollouts])
+        filter_df = pd.DataFrame([rollout["filters"] for rollout in train_rollouts])
 
         # Update progress metrics
         num_tokens = int(results_df.seq_len.sum())
@@ -634,8 +764,9 @@ async def orchestrate(config: OrchestratorConfig):
             **buffer.get_metrics(),
             # Event loop lag metrics
             **event_loop_lag_monitor.get_metrics(),
-            # Rollout filter metrics
-            **filter_metrics,
+            # Rollout filter metrics (detection rate per filter + overall drop rate)
+            "filters/all/is_filtered": results_df.is_filtered.astype(float).mean(),
+            **{f"filters/all/{name}": filter_df[name].astype(float).mean() for name in filter_df.columns},
             # W&B axis
             "step": progress.step,
         }
@@ -674,6 +805,10 @@ async def orchestrate(config: OrchestratorConfig):
             env_metrics_df = metrics_df.loc[env_df.index]
             for metric in metrics_df.columns:
                 to_log[f"metrics/{env}/{metric}"] = env_metrics_df.groupby(env_df["example_id"])[metric].mean().mean()
+            to_log[f"filters/{env}/is_filtered"] = env_df.is_filtered.astype(float).mean()
+            env_filter_df = filter_df.loc[env_df.index]
+            for name in filter_df.columns:
+                to_log[f"filters/{env}/{name}"] = env_filter_df[name].astype(float).mean()
 
         # Log metrics to monitor(s)
         monitor.log(to_log, step=progress.step)
@@ -718,7 +853,6 @@ async def orchestrate(config: OrchestratorConfig):
 
     if config.eval and eval_envs is not None:
         logger.info("Running final evals")
-        final_cache_salt = str(ckpt_step) if config.experimental.use_prefix_cache_salt else None
         eval_results = await asyncio.gather(
             *[
                 eval_env.evaluate(
@@ -726,7 +860,7 @@ async def orchestrate(config: OrchestratorConfig):
                     get_client=inference_pool.get_eval_client,
                     ckpt_step=ckpt_step,
                     step=progress.step,
-                    cache_salt=final_cache_salt,
+                    cache_salt=str(ckpt_step),
                 )
                 for eval_env in eval_envs
             ]
@@ -747,7 +881,7 @@ async def orchestrate(config: OrchestratorConfig):
     # Write final checkpoint
     if ckpt_manager is not None:
         logger.info("Writing final checkpoint")
-        ckpt_manager.save(progress, buffer, step=progress.step)
+        ckpt_manager.save(progress, buffer, step=progress.step, rae_state=advantage_state)
 
     # Bounded best-effort cleanup. Each await below may block on a remote peer
     # (env-server ZMQ recv, inference admin httpx aclose, etc.). The outer

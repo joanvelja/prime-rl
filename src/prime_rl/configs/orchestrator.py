@@ -700,10 +700,75 @@ class CustomAdvantageConfig(BaseModel):
     ]
 
 
+class EMAPerMemberAdvantageConfig(BaseModel):
+    """Per-(task, example_id, member_id) EMA baseline subtraction (SPIRAL Alg.1).
+
+    A baseline-subtraction estimator — same family as the within-batch
+    group-mean baseline used by ``DefaultAdvantageConfig``, just with a
+    different baseline aggregation (cross-batch EMA keyed by member_id
+    instead of within-batch mean keyed by example_id). Composes with any
+    loss function in the trainer; the advantage produced is just a scalar.
+
+    Requires the env's rubric to be a ``MultiAgentRubric`` so the
+    ``member_id`` key has a meaningful value (validated at orchestrator
+    startup, not at pydantic load time — config can't see the rubric).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["ema_per_member"] = "ema_per_member"
+    momentum: Annotated[
+        float,
+        Field(
+            ge=0.0,
+            le=1.0,
+            description="EMA decay rate α for baseline updates (Alg.1, line 20). "
+            "Higher α → slower baseline drift; SPIRAL paper specifies α∈[0,1] without "
+            "pinning a value, 0.9 is the conventional default.",
+        ),
+    ] = 0.9
+
+
 AdvantageConfig: TypeAlias = Annotated[
-    DefaultAdvantageConfig | CustomAdvantageConfig,
+    DefaultAdvantageConfig | EMAPerMemberAdvantageConfig | CustomAdvantageConfig,
     Field(discriminator="type"),
 ]
+
+
+class MultiAgentConfig(BaseModel):
+    """Multi-agent routing knobs — orthogonal to the advantage estimator.
+
+    These control how per-rollout episodes get fanned out into per-member
+    training units (stage 2 of the pipeline). The baseline / advantage
+    computation (stage 3) lives in ``AdvantageConfig`` and is independent.
+
+    Activates automatically when the env's rubric is a ``MultiAgentRubric``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    drop_judge: Annotated[
+        bool,
+        Field(
+            description="Drop member_id == 'judge' units from the training batch. "
+            "The judge gets reward 0 by zero_sum_reward construction, so its "
+            "advantage is policy-neutral noise — training on those tokens only "
+            "burns gradient compute. Set to False only for diagnostic SFT-on-judge runs.",
+        ),
+    ] = True
+
+    filter_by_learner_seat: Annotated[
+        bool,
+        Field(
+            description="Keep only the member matching rollout.info['learner_seat'] "
+            "in the training batch. Enables external-opponent training: the frozen "
+            "opponent's and judge's trajectories are projected out before RAE / the "
+            "trainer see them, avoiding wasted gradient compute on tokens whose "
+            "parameters don't update. Requires the env-pack to stamp info.learner_seat "
+            "per row (e.g. gpqa_debate with opponent_model set). Leave False for "
+            "self-play envs — enabling it raises at fan-out time when the key is absent.",
+        ),
+    ] = False
 
 
 class GibberishFilterConfig(BaseModel):
@@ -715,7 +780,7 @@ class GibberishFilterConfig(BaseModel):
     enforce: Annotated[
         bool,
         Field(
-            description="If True, mask detected rollouts so they don't contribute to training. If False, only track detection metrics."
+            description="If True, skip detected rollouts entirely so they are not sent to the trainer. If False, only track detection metrics."
         ),
     ] = False
     token_id_threshold: Annotated[
@@ -739,7 +804,7 @@ class RepetitionFilterConfig(BaseModel):
     enforce: Annotated[
         bool,
         Field(
-            description="If True, mask detected rollouts so they don't contribute to training. If False, only track detection metrics."
+            description="If True, skip detected rollouts entirely so they are not sent to the trainer. If False, only track detection metrics."
         ),
     ] = False
     window: Annotated[
@@ -765,7 +830,7 @@ class ZeroAdvantageFilterConfig(BaseModel):
     enforce: Annotated[
         bool,
         Field(
-            description="If True, mask detected rollouts so they don't contribute to training. If False, only track detection metrics."
+            description="If True, skip detected rollouts entirely so they are not sent to the trainer. If False, only track detection metrics."
         ),
     ] = True
 
@@ -811,15 +876,6 @@ WeightBroadcastConfig: TypeAlias = Annotated[
 
 class OrchestratorExperimentalConfig(BaseConfig):
     """Experimental features for the orchestrator."""
-
-    use_prefix_cache_salt: Annotated[
-        bool,
-        Field(
-            description="Whether to set a cache_salt on inference requests that changes with each weight update. "
-            "This invalidates prefix-cached KV states from previous policies without resetting the entire cache, "
-            "while preserving cache hits for in-flight off-policy rollouts.",
-        ),
-    ] = True
 
 
 class TeacherModelConfig(BaseConfig):
@@ -895,8 +951,14 @@ class OrchestratorConfig(BaseConfig):
     # Data buffer configuration
     buffer: BufferConfig = BufferConfig()
 
-    # The advantage configuration
+    # The advantage configuration (stage 3 of the pipeline; see AdvantageConfig
+    # docstring). For multi-agent envs, set type="ema_per_member" or "custom";
+    # for single-agent envs, set type="default" or "custom".
     advantage: AdvantageConfig | None = DefaultAdvantageConfig()
+
+    # Multi-agent routing knobs (stage 2 — fan-out). Ignored when the env's
+    # rubric is a single-agent Rubric.
+    multi_agent: MultiAgentConfig = MultiAgentConfig()
 
     # Rollout filters (monitor by default, enforce optionally)
     filters: list[FilterConfig] = [GibberishFilterConfig(), RepetitionFilterConfig(), ZeroAdvantageFilterConfig()]

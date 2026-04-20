@@ -201,6 +201,7 @@ debug_I2_zero_band
 .idea
 
 outputs/
+.red-team/
 
 # Ad-hoc scratch (bottleneck analysis, codex handoff, raw core dumps)
 .bottleneck-analysis/

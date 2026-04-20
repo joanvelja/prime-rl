@@ -1,0 +1,55 @@
+# RLVR (single-agent) GPQA — vanilla GRPO + boxed-answer rubric.
+#
+# Status: requires the env package `gpqa-rlvr` to exist in verifiers.
+# Sketch in environments/gpqa_rlvr/ (see this PR's accompanying patch).
+# Until then, pip install the local env: uv pip install -e ../verifiers/environments/gpqa_rlvr
+#
+# Launch: uv run rl @ configs/gpqa_rlvr/rl.toml
+
+max_steps = 500
+seq_len = 4096
+
+[wandb]
+project = "gpqa-rlvr"
+name = "qwen3-4b-gpqa-rlvr"
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[orchestrator]
+batch_size = 256
+rollouts_per_example = 8
+
+[orchestrator.train.sampling]
+temperature = 1.0
+max_completion_tokens = 2048
+
+[[orchestrator.train.env]]
+id = "gpqa-rlvr"
+name = "gpqa-rlvr"
+args = { subset = "gpqa_diamond" }
+
+# [orchestrator.advantage] omitted → DefaultAdvantageConfig (group-mean baseline)
+# [orchestrator.multi_agent] omitted → inert (no MA detection at startup)
+
+[orchestrator.buffer]
+easy_threshold = 1.0   # drop trivially-solved problems
+hard_threshold = 0.0   # drop unsolvable problems
+
+[orchestrator.eval]
+interval = 50
+
+[[orchestrator.eval.env]]
+id = "gpqa-rlvr"
+name = "gpqa-rlvr-eval"
+num_examples = 198     # gpqa_diamond size
+rollouts_per_example = 4
+args = { subset = "gpqa_diamond" }
+
+[trainer] # Default trainer config (DPPO+KL loss)
+
+[inference]
+gpu_memory_utilization = 0.85
+
+[inference.model]
+max_model_len = 4096

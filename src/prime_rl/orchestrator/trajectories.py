@@ -271,6 +271,15 @@ def interleave_rollout(
     # this field should be guaranteed because we set temperature in get_sampling_args
     temperature = output["sampling_args"]["temperature"]
 
+    def _step_is_quarantined(step: vf.TrajectoryStep) -> bool:
+        """A multi-agent step is quarantined when the kernel rejected the
+        raw model output as malformed (parse_channels raised). The raw
+        completion is still attached to the step (kernel keeps it for
+        transcript replay), but training MUST mask those tokens — otherwise
+        we gradient-train against garbage and reward-shape the model toward
+        producing more invalid output."""
+        return bool(step.get("extras", {}).get("parse_error"))
+
     def prepare_step_tokens(step: vf.TrajectoryStep, step_idx: int) -> dict[str, Any] | None:
         tokens = step["tokens"]
         if tokens is not None:
@@ -281,6 +290,7 @@ def interleave_rollout(
                 "completion_mask": [bool(i) for i in tokens["completion_mask"]],
                 "completion_logprobs": list(tokens["completion_logprobs"]),
                 "routed_experts": tokens.get("routed_experts"),
+                "_quarantined": _step_is_quarantined(step),
             }
 
         logger.warning(f"Missing rollout tokens for example {output['example_id']} step {step_idx}.")
@@ -295,7 +305,7 @@ def interleave_rollout(
 
     def make_sample(tokens: dict[str, Any]) -> TrainingSample:
         """Create a new TrainingSample from a trajectory step."""
-        if has_error:
+        if has_error or tokens["_quarantined"]:
             completion_mask = [False] * len(tokens["completion_mask"])
         else:
             completion_mask = [bool(i) for i in tokens["completion_mask"]]
@@ -333,7 +343,7 @@ def interleave_rollout(
         # Extend with new completion tokens
         completion_ids = tokens["completion_ids"]
         sample.completion_ids.extend(completion_ids)
-        if has_error:
+        if has_error or tokens["_quarantined"]:
             sample.completion_mask.extend([False] * len(tokens["completion_mask"]))
         else:
             sample.completion_mask.extend(bool(i) for i in tokens["completion_mask"])
