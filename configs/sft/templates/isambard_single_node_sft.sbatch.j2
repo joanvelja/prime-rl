@@ -1,0 +1,53 @@
+#!/bin/bash
+
+#SBATCH --job-name={{ job_name }}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:{{ gpus_per_node }}
+#SBATCH --exclusive
+#SBATCH --partition={{ partition }}
+{%- if account %}
+#SBATCH --account={{ account }}
+{%- endif %}
+{%- if time %}
+#SBATCH --time={{ time }}
+{%- endif %}
+{%- if nodelist %}
+#SBATCH --nodelist={{ nodelist }}
+{%- endif %}
+{%- if exclude %}
+#SBATCH --exclude={{ exclude }}
+{%- endif %}
+#SBATCH --output={{ output_dir }}/job_%j.log
+#SBATCH --error={{ output_dir }}/job_%j.log
+
+# Isambard variant — venv is the source of truth.
+#
+# This template assumes the venv has already been bootstrapped:
+#   1. uv sync --all-extras
+#   2. (aarch64 only) build flash-attn from source for sm_90 and install into the venv
+#      see: scripts/docker-arm64-post-install.sh (adjust TORCH_CUDA_ARCH_LIST=9.0 for GH200)
+# Per-job we just activate the venv and launch — no `uv sync`, no reinstalls.
+# This avoids (a) re-resolving the lockfile every job and
+# (b) uv sync uninstalling our hand-built aarch64 flash-attn wheel.
+
+set -euo pipefail
+
+export PROJECT_DIR={{ project_dir }}
+
+cd "$PROJECT_DIR"
+[ -f .env ] && source .env
+source .venv/bin/activate
+
+# Fail-fast venv sanity check — broken venv should crash loudly, not mid-training.
+python - <<'PY'
+import sys, torch, flash_attn  # noqa: F401
+assert torch.cuda.is_available(), "CUDA not available"
+print(f"venv OK: torch={torch.__version__} cuda={torch.version.cuda} gpus={torch.cuda.device_count()}", file=sys.stderr)
+PY
+
+{% if pre_run_command %}
+# Pre-run command
+{{ pre_run_command }}
+{% endif %}
+uv run sft @ {{ config_path }}

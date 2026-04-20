@@ -1,7 +1,17 @@
-# Override for Qwen3-30B-A3B — MoE with 3B active / 30B total.
-# LR kept at baseline 5e-6: for MoE, scaling by active params (3B) suggests
-# ≈ 5e-6 × √(8/3) ≈ 8e-6, but we stick with 5e-6 for conservatism and
-# cross-model comparability. Revisit if smoke shows underfitting.
+# Override for Qwen3-30B-A3B — qwen3_moe, 30.5B total / 3.3B active, 128 experts top-8.
+#
+# Pretrain stack (from Qwen3 TR arxiv:2505.09388): AdamW, QK-LayerNorm on all
+# models, global-batch auxiliary-loss load balancing for MoE. We inherit AdamW
+# (matching pretrain) but prime-rl does NOT emit either (a) an aux load-balance
+# loss or (b) the DSV3 aux-free expert_bias update hook
+# (src/prime_rl/trainer/models/layers/moe.py:399 promises the latter; grep
+# shows none exists in tree) — so our MoE has no active balance signal beyond
+# the main-loss gradient. Double reason to run conservative.
+#
+# LR=2e-6: probe 3909045 (10 steps + full AC) was stable at baseline 5e-6
+# (loss 0.95→0.87, grad_norm 1.0-1.6) with Max Vio 2.6-2.9 — that imbalance
+# is consistent with top-8/128 routing under frozen expert_bias=0. Cut to 2e-6
+# to keep margin at 13k steps; matches trinity for cross-MoE comparability.
 #
 # Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/qwen3_30b_a3b.toml
 
@@ -12,6 +22,9 @@ name = "PrimeIntellect/Qwen3-30B-A3B-Base-Fast"
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-qwen3-30b-a3b"
+
+[optim]
+lr = 2e-6
 
 [wandb]
 name = "qwen3-30b-a3b"

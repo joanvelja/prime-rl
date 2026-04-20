@@ -1,0 +1,47 @@
+# One-off: can we torch.compile marin on aarch64+GH200? If yes, +10-15% MFU.
+# Triton 3.6 + Torch 2.10 toy-compile works; this tests the real path
+# (Llama fullgraph, Liger cross-entropy, FSDP2 shards, FA2).
+#
+# Compose:
+#   uv run sft @ configs/sft/baseline.toml \
+#       @ configs/sft/overrides/marin.toml \
+#       @ configs/sft/isambard_compile_test.toml
+#
+# NOT for committing. Local scratch only.
+
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-compile-test-marin"
+
+[model]
+[model.compile]
+fullgraph = true   # marin (Llama arch) has _can_compile_fullgraph = True
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100    # > max_steps, so no ckpt writes
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-compile-test"
+
+[slurm]
+job_name = "sft-compile-test"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"
+# Override the global aarch64 "Triton-is-broken" hammer. If compile works,
+# we'll unset these permanently in primerl_env.sh.
+pre_run_command = """unset TORCHDYNAMO_DISABLE
+unset TORCH_COMPILE_DISABLE
+echo "TORCHDYNAMO_DISABLE after unset: '${TORCHDYNAMO_DISABLE:-unset}'"
+echo "TORCH_COMPILE_DISABLE after unset: '${TORCH_COMPILE_DISABLE:-unset}'" """

@@ -40,6 +40,7 @@ from prime_rl.trainer.models.qwen3_moe.converting_qwen3_moe import (
     convert_tt_layer_to_hf,
     convert_tt_to_hf_moe,
 )
+from prime_rl.utils.sequence_packing import infer_cu_seqlens_from_position_ids
 
 logger = logging.get_logger(__name__)
 
@@ -204,10 +205,16 @@ class Qwen3MoeModel(Qwen3MoePreTrainedModel):
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         routed_experts: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> MoeModelOutputWithPast:
         """
         routed_experts (`torch.LongTensor` of shape `(batch_size, sequence_length, num_hidden_layers, num_experts_per_tok)`, *optional*):
             Routed experts for each token in the sequence. Only used for router replay.
+        cu_seqlens (`torch.LongTensor`, *optional*):
+            Explicit packed-sequence cumulative lengths for FlashAttention varlen kernels.
+        max_seqlen (`int`, *optional*):
+            Maximum packed subsequence length corresponding to `cu_seqlens`.
         """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -216,16 +223,8 @@ class Qwen3MoeModel(Qwen3MoePreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if self.config._attn_implementation in ("flash_attention_2", "flash_attention_3", "fa4"):
-            flat_position_ids = position_ids.view(-1)
-            seqlens = torch.cat(
-                [
-                    flat_position_ids[0:1],
-                    flat_position_ids[:-1][(flat_position_ids == 0)[1:]] + 1,
-                    flat_position_ids[-1:] + 1,
-                ]
-            )
-            max_seqlen = seqlens.max().item()
-            cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
+            if cu_seqlens is None or max_seqlen is None:
+                cu_seqlens, max_seqlen = infer_cu_seqlens_from_position_ids(position_ids)
             torch._dynamo.mark_dynamic(cu_seqlens, 0)
         else:
             max_seqlen = None
@@ -417,6 +416,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             routed_experts=routed_experts,
+            cu_seqlens=kwargs.get("cu_seqlens"),
+            max_seqlen=kwargs.get("max_seqlen"),
         )
 
         hidden_states = outputs.last_hidden_state

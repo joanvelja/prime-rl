@@ -80,6 +80,12 @@ main() {
     log_info "Syncing virtual environment..."
     uv sync --all-extras
 
+    # FA2 and FA4 both ship `flash_attn/cute/` — uv's install order can clobber
+    # FA4 with FA2's stub. fix-flash-attn-cute.sh is idempotent: no-op if FA4
+    # is intact, reinstalls FA4 otherwise. Safe to call unconditionally.
+    log_info "Repairing flash-attn-cute if clobbered by FA2..."
+    bash scripts/fix-flash-attn-cute.sh
+
     log_info "Installing pre-commit hooks..."
     uv run pre-commit install
 

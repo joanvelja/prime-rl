@@ -1,0 +1,59 @@
+# Max-MFU stack on marin. All exposed cheap levers on simultaneously:
+#   - micro_batch_size = 2 (proven +8pp)
+#   - model.compile.fullgraph = true (proven +2pp, works on aarch64+sm_90)
+#   - model.attn = flash_attention_3 (FA3 installed + varlen-wired)
+#   - model.reshard_after_forward = false (keep params gathered; 8B fits in 95GB)
+#   - reduce_dtype = bfloat16 (halves grad-reduce bw; default is fp32)
+#   - fused=True on AdamW (applied via optim.py edit)
+#
+# Baseline for comparison: mbs=2 no-compile FA2 = 38.7% MFU, 29.7k tok/s aggregate
+# Target: ~50-55% based on torchtitan/IBM 8B-class reports.
+#
+# Compose:
+#   uv run sft @ configs/sft/baseline.toml \
+#       @ configs/sft/overrides/marin.toml \
+#       @ configs/sft/isambard_maxmfu_test.toml
+
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-maxmfu-test-marin"
+
+[model]
+attn = "flash_attention_3"
+reshard_after_forward = false
+reduce_dtype = "bfloat16"
+[model.compile]
+fullgraph = true
+
+[data]
+micro_batch_size = 2
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-maxmfu-test"
+
+[slurm]
+job_name = "sft-maxmfu"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"
+# NCCL tuning for intra-node NVLink on 4× GH200. No IB, pure NVLink-C2C.
+# NVLS reported to hurt on small collectives; keep it off. Ring+LL128 standard.
+pre_run_command = """export NCCL_ALGO=Ring
+export NCCL_PROTO=LL128
+export NCCL_NVLS_ENABLE=0
+export NCCL_MIN_NCHANNELS=4
+export TORCH_NCCL_HIGH_PRIORITY=1"""

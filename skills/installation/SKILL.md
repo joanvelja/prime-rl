@@ -9,8 +9,24 @@ description: How to install prime-rl and its optional dependencies. Use when set
 ```bash
 uv sync              # core dependencies only
 uv sync --group dev  # dev tools: pytest, ruff, pre-commit
-uv sync --all-extras # recommended: includes flash-attn, flash-attn-cute, etc.
+uv sync --all-extras # x86_64 convenience path
 ```
+
+On `aarch64` Hopper hosts, prefer targeted extras so you only pay for the source builds you actually need:
+
+```bash
+uv sync --extra flash-attn-3
+```
+
+`flash-attn-3` is now declared in `pyproject.toml` for both `x86_64` and `aarch64`. On `aarch64`, uv builds it from the pinned Hopper source tree.
+
+If you also install `flash-attn` (FA2) and `flash-attn-cute` (FA4) together, upstream ships colliding `flash_attn/cute/` directories and uv's install order can clobber FA4 with FA2's stub. `scripts/install.sh` already runs `scripts/fix-flash-attn-cute.sh` for you. If you invoke `uv sync` manually, chain it:
+
+```bash
+uv sync --all-extras && bash scripts/fix-flash-attn-cute.sh
+```
+
+The fix script is **idempotent**: it no-ops when FA4 is intact and only reinstalls when clobbered. Safe to call unconditionally.
 
 ## Advanced
 
@@ -67,7 +83,17 @@ uv sync --group dev
 
 Installs pytest, ruff, pre-commit, and other development tools.
 
+## Eval harness (olmes + lm-eval)
+
+For the SFT sweep eval harness (`scripts/evals/`), olmes and lm-eval need to coexist with prime-rl in the same venv despite their old dep pins (`transformers<5`, `vllm==0.11.0`, `numpy<2`, etc.). The runtime code is compatible with our newer versions; we just install with `--no-deps` and fill in leaf deps.
+
+```bash
+bash scripts/install_evals.sh
+```
+
+Idempotent — safe to re-run after any `uv sync`. Also applies a local patch to `oe_eval/utilities/model_utils.py` to lazy-import the unused `olmo_core` backend (the eager import pulls in the full `ai2-olmo-core` transitive tree).
+
 ## Key files
 
 - `pyproject.toml` — all dependencies, extras, and dependency groups
-- `uv.lock` — pinned lockfile (update with `uv sync --all-extras`)
+- `uv.lock` — pinned lockfile (update with `uv lock`)

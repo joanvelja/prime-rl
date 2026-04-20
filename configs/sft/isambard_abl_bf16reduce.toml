@@ -1,0 +1,36 @@
+# Ablation: base (fa3+compile+mbs=2) + reduce_dtype=bf16 ONLY. Isolates bf16 reduce.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-abl-bf16reduce"
+
+[model]
+attn = "flash_attention_3"
+reduce_dtype = "bfloat16"
+[model.compile]
+fullgraph = true
+
+[data]
+micro_batch_size = 2
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "abl-bf16reduce"
+
+[slurm]
+job_name = "abl-bf16reduce"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

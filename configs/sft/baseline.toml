@@ -30,6 +30,17 @@ name = "marin-community/marin-8b-base"
 impl = "auto"                 # prime-rl auto-selects custom (Llama) for marin
 seq_len = 4096
 attn = "flash_attention_2"
+# MFU profile (measured on marin-8b, 4× GH200, mbs=2, 2026-04-18):
+#   reduce_dtype="bfloat16" gives +1 MFU (13.7% ReduceScatter-kernel time cut)
+#   vs the float32 default — safe for all bases (grads are already bf16 in the
+#   fwd; reducing in bf16 is the norm for modern LLM training).
+reduce_dtype = "bfloat16"
+# optimization_dtype=bfloat16 loads weights in bf16 (matching on-disk torch_dtype)
+# instead of upcasting to fp32. FSDP2 MixedPrecisionPolicy already casts to bf16
+# at compute time (see model.py:345), so fp32 master weights gain no numerical
+# stability — they just DOUBLE load memory and cause OOM on >8B bases.
+# Measured 2026-04-18: seed-oss/qwen3-30b/rnj/trinity/olmo-3 all OOM'd with fp32 default.
+optimization_dtype = "bfloat16"
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-marin"  # prepared tokenizer (private HF repo; template + pad_token)
@@ -46,8 +57,9 @@ seed = 0
 system_prompt_pool_path = "joanvelja/sft-system-prompts-v1"  # private HF dataset repo; SystemPromptSampler resolves via hf_hub_download
 
 # 12 HF configs, probabilities proportional to §6 effective views per epoch.
-# Sum = 1.000001 (rounding). With first_exhausted, stream ends at ~843,960 samples
-# per epoch, with each subset contributing ≈ effective[i] rows.
+# Sum = 1.0 exactly (np.random.choice is strict; wildchat absorbs the 1e-6 rounding).
+# With first_exhausted, stream ends at ~843,960 samples per epoch, with each
+# subset contributing ≈ effective[i] rows.
 subsets = [
     "wildchat",
     "tulu-3-persona-math",
@@ -63,7 +75,7 @@ subsets = [
     "sciriff",
 ]
 probabilities = [
-    0.358319,   # wildchat             raw=302406  w=1.00  eff=302406
+    0.358318,   # wildchat             raw=302406  w=1.00  eff=302406 (absorbs 1e-6 rounding so sum == 1.0)
     0.177684,   # tulu-3-persona-math  raw=149958  w=1.00  eff=149958
     0.162132,   # dolci-precise-if     raw=136833  w=1.00  eff=136833
     0.117622,   # dolci-openthoughts-sci raw=99268 w=1.00  eff=99268

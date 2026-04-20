@@ -12,6 +12,14 @@ output_dir = "outputs/sft-baseline-seed-oss-36b"
 
 [model]
 name = "ByteDance-Seed/Seed-OSS-36B-Base-woSyn"
+attn = "sdpa"                           # HF fallback path. FA2/FA3 both nan at
+                                        # step 0 (probes 3908173, 3909044); SDPA
+                                        # pending validation via probe 3909205.
+                                        # Full AC already required for 36B dense
+                                        # — see [model.ac] below.
+
+[model.ac]
+mode = "full"                           # 36B dense needs full AC under mbs=1+reshard=T
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-seed-oss-36b-wosyn"

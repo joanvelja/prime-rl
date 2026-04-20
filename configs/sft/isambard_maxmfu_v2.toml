@@ -1,0 +1,47 @@
+# v2: same as maxmfu minus `torch.compile` (subagent confirmed compile emits ZERO Triton
+# kernels for this codebase — pays overhead, causes HBM bw contention, +14s NCCL time).
+# Plus: this runs on the patched train.py with the branchless isnan (saves ~2.5s/step).
+#
+# Baseline to beat: maxmfu (with compile) at 38.7% MFU, 16.20s/step.
+# Prediction: with no compile + isnan fix, expect ~42-45% MFU, ~13-14s/step.
+
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-maxmfu-v2"
+
+[model]
+attn = "flash_attention_3"
+reshard_after_forward = false
+reduce_dtype = "bfloat16"
+# NO compile — confirmed regression on prime-rl + FSDP2 + FA varlen
+
+[data]
+micro_batch_size = 2
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-maxmfu-v2"
+
+[slurm]
+job_name = "maxmfu-v2"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"
+pre_run_command = """export NCCL_ALGO=Ring
+export NCCL_PROTO=LL128
+export NCCL_NVLS_ENABLE=0
+export NCCL_MIN_NCHANNELS=4
+export TORCH_NCCL_HIGH_PRIORITY=1"""

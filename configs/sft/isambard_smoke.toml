@@ -1,0 +1,38 @@
+# Isambard Phase-2 GH200 smoke overlay (Rung 3, marin-8b, 500 steps, 1 node × 4 GPUs).
+# Local-only — do NOT commit.
+# Compose:
+#   uv run sft @ configs/sft/baseline.toml \
+#       @ configs/sft/overrides/marin.toml \
+#       @ configs/sft/isambard_smoke.toml
+
+max_steps = 500
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-smoke-marin"
+
+# Scheduler must be re-scaled when max_steps shrinks — baseline values
+# (warmup=396, decay=12792) are sized for the full 13188-step run and fail
+# `decay_start = max_steps - decay_steps >= warmup_steps`. Keep 3% warmup of 500.
+[scheduler]
+warmup_steps = 15
+decay_steps = 485
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[ckpt]
+interval = 500
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-smoke"
+
+[slurm]
+job_name = "sft-smoke-marin"
+partition = "workq"
+account = "brics.a6r"
+time = "24:00:00"   # cluster max; max_steps=500 terminates earlier — this is just the safety net
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+# Custom template — venv is source of truth on Isambard (bootstrap once, run many).
+# Fail-fast import check inside; no `uv sync`, no per-job reinstalls.
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

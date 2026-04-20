@@ -1,0 +1,35 @@
+# Grid cell: mbs=2 + FA2 + compile. Suspected best given FA3-alone regression (24.9% vs 30.8% FA2).
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-grid-fa2-compile"
+
+[model]
+attn = "flash_attention_2"
+[model.compile]
+fullgraph = true
+
+[data]
+micro_batch_size = 2
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-grid-fa2-compile"
+
+[slurm]
+job_name = "grid-fa2-compile"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

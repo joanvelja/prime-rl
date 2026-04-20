@@ -6,6 +6,8 @@ import torch.distributed.nn as dist_nn
 import torch.nn as nn
 from ring_flash_attn import update_ring_flash_attn_params
 
+from prime_rl.utils.sequence_packing import infer_cu_seqlens_from_position_ids
+
 
 def setup_hybrid_cp(model: nn.Module, cp_group: dist.ProcessGroup, cp_rank: int, cp_world_size: int) -> None:
     """Configure DeltaNet modules in Qwen3.5 hybrid models for native fla CP."""
@@ -139,15 +141,7 @@ def get_padding_logit_from_prev_cp_rank(
 
 
 def _get_cu_seqlens_for_cp(position_ids: torch.Tensor) -> torch.Tensor:
-    flat_position_ids = position_ids.view(-1)
-    seqlens = torch.cat(
-        [
-            flat_position_ids[0:1],
-            flat_position_ids[:-1][(flat_position_ids == 0)[1:]] + 1,
-            flat_position_ids[-1:] + 1,
-        ]
-    )
-    cu_seqlens = seqlens.cumsum(dim=0, dtype=torch.int32)
+    cu_seqlens, _ = infer_cu_seqlens_from_position_ids(position_ids)
     return cu_seqlens
 
 
@@ -157,6 +151,7 @@ def setup_cp_params(
     cp_rank: int,
     cp_world_size: int,
     cp_group: dist.ProcessGroup,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Prepare the input for context parallelism and sets required parameters for ring flash attention.
@@ -171,7 +166,7 @@ def setup_cp_params(
     """
     input_ids = shard_for_cp(input_ids, cp_rank=cp_rank, cp_world_size=cp_world_size)
 
-    cu_seqlens = _get_cu_seqlens_for_cp(position_ids)
+    cu_seqlens = cu_seqlens if cu_seqlens is not None else _get_cu_seqlens_for_cp(position_ids)
     update_ring_flash_attn_params(cu_seqlens, cp_group)
     position_ids = shard_for_cp(position_ids, cp_rank=cp_rank, cp_world_size=cp_world_size)
     return (

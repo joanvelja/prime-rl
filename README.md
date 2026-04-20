@@ -105,11 +105,11 @@ uv sync --all-extras
 
 3.1. Optional: Install Flash Attention 3 (on Hopper GPUs only, for flash_attention_3 attention backend)
 
-> *NOTE*: This step will take a while, as it builds the Flash Attention 3 extension from source, as it has no wheels prebuilt.
-> *NOTE*: After this step, you can't run `uv sync --all-extras` or `uv run` as it will uninstall the package, you can avoid it by running `uv sync --inexact` or `uv run --no-sync`
+> *NOTE*: On `x86_64`, this installs a prebuilt wheel. On `aarch64` Hopper, this builds the FA3 extension from source, so expect it to take a while.
+> *NOTE*: Extras are still opt-in. Use `uv sync --extra flash-attn-3` or `uv run --extra flash-attn-3 ...` when you need FA3 in a fresh environment.
 
 ```bash
-uv pip install "flash-attn-3 @ git+https://github.com/Dao-AILab/flash-attention.git@main#subdirectory=hopper" --no-build-isolation
+uv sync --extra flash-attn-3
 ```
 
 </details>

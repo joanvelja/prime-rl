@@ -1,0 +1,42 @@
+# One-off: measure MFU delta from micro_batch_size 1 -> 2 (no compile).
+# Baseline smoke showed 59/95 GiB peak memory at mbs=1 so there's headroom.
+# Per-GPU batch is mbs × grad_accum; keep grad_accum implicit so effective
+# batch stays at 128 (32 per GPU × 4 GPUs × mbs 1 = 128 currently; with
+# mbs 2 we need grad_accum = 16 to hold effective batch at 128).
+#
+# Compose:
+#   uv run sft @ configs/sft/baseline.toml \
+#       @ configs/sft/overrides/marin.toml \
+#       @ configs/sft/isambard_mbs2_test.toml
+#
+# Local scratch only, do NOT commit.
+
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/sft-mbs2-test-marin"
+
+[data]
+micro_batch_size = 2
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100    # > max_steps, so no ckpt writes
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "marin-mbs2-test"
+
+[slurm]
+job_name = "sft-mbs2-test"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

@@ -1,4 +1,20 @@
-# Override for EssentialAI/rnj-1 — 8B dense, Gemma3Text arch, Muon-pretrained.
+# Override for EssentialAI/rnj-1 — 8.3B dense, Gemma3Text arch (gemma3_text),
+# 32L/4096d/GQA(32/8), sliding_window=32768 (≫ seq_len so effectively global),
+# final_logit_softcapping=30.0, MUON-PRETRAINED (Muon across all phases).
+#
+# Optimizer: Muon @ 2e-5. Matches EssentialAI's published SFT recipe exactly:
+# https://huggingface.co/EssentialAI/rnj-1 — "We used the Muon optimizer
+# throughout all phases" (pretrain, midtrain, SFT). Their SFT used fixed 2e-5.
+#
+# Why this matters: Muon's spectrally-normalized updates produce a different
+# parameter geometry than AdamW. SFT-ing with AdamW@5e-6 (the 10-step probe
+# baseline) showed grad_norm ≈ 2.3-4.6 vs ~1.0 for olmo-3-sdpa at similar size
+# — classic regime-switch signature. Matching Muon should restore clean dynamics.
+#
+# LR=2e-5 (Muon) not LR=5e-6 (AdamW): Muon's "adjust_lr=rms_norm" rescales LR
+# by matrix RMS-norm, so absolute values aren't directly comparable to AdamW.
+# 2e-5 is the EssentialAI-validated value.
+#
 # rnj-1 ships chat_template on base; our template was copied verbatim at Rung 2.
 #
 # Compose: uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/rnj_1.toml
@@ -7,9 +23,23 @@ output_dir = "outputs/sft-baseline-rnj-1"
 
 [model]
 name = "EssentialAI/rnj-1"
+attn = "sdpa"                           # HF fallback path (no prime-rl custom gemma3 impl).
+                                        # FA2/FA3 both nan at step 0 (probes
+                                        # 3908039, 3909039). SDPA verified clean
+                                        # (probe 3909204): loss 1.01→0.89,
+                                        # grad_norm 4.6→2.3, MFU 22.8%.
 
 [tokenizer]
 name = "joanvelja/sft-tokenizer-rnj-1"
+
+[optim]
+type = "muon"
+lr = 2e-5                               # EssentialAI-published SFT LR (fixed)
+mu = 0.95                               # Muon momentum (default)
+betas1 = 0.9                            # AdamW sub-optimizer (embed/lm_head/norms)
+betas2 = 0.95                           # ported from OLMo-core (matches SFT convention)
+weight_decay = 0.0                      # SFT convention (Tülu 3 / OLMo-core)
+max_norm = 1.0
 
 [wandb]
 name = "rnj-1"

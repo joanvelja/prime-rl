@@ -1,0 +1,31 @@
+# 10-step probe: rnj-1 with Muon optimizer (matches pretrain regime).
+# Validates that Muon@2e-5 gives cleaner dynamics than AdamW@5e-6.
+max_steps = 10
+output_dir = "/scratch/a6r/joanv.a6r/outputs/probe-rnj-muon"
+
+[data]
+micro_batch_size = 1
+
+[scheduler]
+warmup_steps = 2
+decay_steps = 8
+
+[ckpt]
+interval = 100
+
+[deployment]
+type = "single_node"
+gpus_per_node = 4
+num_gpus = 4
+
+[wandb]
+project = "prime-rl-sft-smoke"
+name = "probe-rnj-muon"
+
+[slurm]
+job_name = "probe-rnj-muon"
+partition = "workq"
+account = "brics.a6r"
+time = "01:00:00"
+project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
+template_path = "/projects/a6r/joanv.a6r/work/prime-rl/configs/sft/templates/isambard_single_node_sft.sbatch.j2"

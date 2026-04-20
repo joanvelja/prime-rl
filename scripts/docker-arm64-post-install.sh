@@ -2,9 +2,9 @@
 # arm64 post-install fixups for Docker builds.
 set -e
 
-echo "=== building flash-attn from source (sm_100 / GB200) ==="
-# Run from /tmp so uv doesn't read pyproject.toml's [tool.uv.extra-build-variables]
-# which sets FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE and prevents CUDA kernel compilation.
+echo "=== building flash-attn from source on aarch64 ==="
+# Run from /tmp so uv does not treat this as a project sync. This script is for
+# explicit arm64 post-install fixups in Docker images.
 export TORCH_CUDA_ARCH_LIST="10.0"
 export MAX_JOBS=4
 export FLASH_ATTENTION_FORCE_BUILD=TRUE
@@ -14,7 +14,7 @@ export FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE
 
 echo "=== reinstalling flash-attn-cute (flash-attn overwrites it with a stub) ==="
 uv pip install --reinstall --no-deps \
-    "flash-attn-cute @ git+https://github.com/Dao-AILab/flash-attention.git@2b5db43#subdirectory=flash_attn/cute"
+    "flash-attn-cute @ git+https://github.com/Dao-AILab/flash-attention.git@abd9943b#subdirectory=flash_attn/cute"
 
 # TODO: remove once flash-attn gates the ampere_helpers import or cutlass-dsl re-adds it.
 echo "=== copying ampere_helpers.py from flashinfer vendor ==="

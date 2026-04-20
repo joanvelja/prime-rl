@@ -30,21 +30,20 @@ attributable to the RL training method, not to pretraining or post-training cont
    argumentative prose. The SFT prior should not be rigid (`Answer: X` terminators,
    `\boxed{}`, bare one-word answers) in ways that lock the response length distribution.
 
-### Candidate base models — 7 locked (2026-04-15 after full 2026 landscape search)
-
-After a 4-agent research swarm covering (a) HF API direct crawling, (b) 2026 community-consensus blog/leaderboard synthesis, (c) Chinese ecosystem deep dive, and (d) named-model investigation, plus an additional swarm on small-MoE landscape with 8×H100 memory-footprint analysis, the final locked sweep is:
+### Candidate base models — 6 locked (2026-04-15 after landscape search; Nemotron-H dropped 2026-04-19)
 
 | # | Repo | Params | prime-rl path | Role in sweep |
 |---|---|---|---|---|
-| 1 | `marin-community/marin-8b-base` | 8B dense | **custom (Llama)** | Stanford CRFM fully open, 12.7T tokens, Llama-compat drop-in, beats Llama-3.1-8B on 14/19 evals |
-| 2 | `Qwen/Qwen3-30B-A3B-Base` | 30.5B/3.3B MoE | **custom (qwen3_moe)** | Small MoE experimentation slot — Apache, 128E/top-8, dense-MoE (no hybrid complexity), ~61 GB bf16 |
-| 3 | `arcee-ai/Trinity-Mini-Base` | 26B/3B MoE | **custom (afmoe)** | Arcee Trinity, custom `AfmoeForCausalLM`, **trained on Prime Intellect infrastructure** (2048 B300 GPUs), 10T tokens |
-| 4 | `nvidia/Nemotron-H-8B-Base-8K` | 8B dense | **custom (nemotron_h)** | **Mamba/Transformer hybrid** — unique architectural datapoint, 8K ctx, NVIDIA Open license |
-| 5 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | 36B dense | HF fallback (`SeedOssConfig`) | **⭐ Cleanest pre-instruct prior** — explicitly released without synthetic instruction data in pretrain, Apache-2.0, 512K ctx, 12T tokens |
-| 6 | `allenai/Olmo-3-1025-7B` | 7.3B dense | HF fallback (`Olmo3Config`) | Fully open reference (data + code + logs), Apache-2.0, cleanest Option B case (chat tokens pre-reserved) |
-| 7 | `EssentialAI/rnj-1` | 8.3B dense | HF fallback (`Gemma3TextConfig`) | Essential AI research model, **global-attention-only** (no sliding window) + **Muon optimizer** + YaRN context extension. "Designed to be extended" by community post-training. Ships with chat_template on base. |
+| 1 | `marin-community/marin-8b-base` | 8B dense | **custom (Llama)** | Stanford CRFM fully open, 12.7T tokens, Llama-compat drop-in |
+| 2 | `Qwen/Qwen3-30B-A3B-Base` | 30.5B/3.3B MoE | **custom (qwen3_moe)** | Small MoE slot — Apache, 128E/top-8 |
+| 3 | `arcee-ai/Trinity-Mini-Base` | 26B/3B MoE | **custom (afmoe)** | Arcee Trinity, `AfmoeForCausalLM` |
+| 4 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | 36B dense | HF fallback (`SeedOssConfig`) | ⭐ Cleanest pre-instruct prior (no synthetic instruct in pretrain) |
+| 5 | `allenai/Olmo-3-1025-7B` | 7.3B dense | HF fallback (`Olmo3Config`) | Fully open reference (data + code + logs) |
+| 6 | `EssentialAI/rnj-1` | 8.3B dense | HF fallback (`Gemma3TextConfig`) | Essential AI, Muon-pretrained across all phases |
 
-**Final split**: 4 custom-path / 3 HF-fallback.
+**Final split**: 3 custom-path / 3 HF-fallback.
+
+**Nemotron-H dropped (2026-04-19)**: hybrid Mamba+attention arch kept failing every 10-step probe (3907992, 3908018, 3908053). Complex-arch debugging cost exceeds the "unique architectural datapoint" value for this sweep. Config + probe files deleted.
 
 ### Dropped after 2026 landscape research
 
@@ -546,7 +545,7 @@ in `allenai/open-instruct`), corrected for the effective-batch-size comment inco
 
 | Parameter | Value | Source / justification |
 |---|---|---|
-| Base model | One of the 7 in the locked sweep (Section 1): `marin-8b-base`, `Qwen3-30B-A3B-Base`, `Trinity-Mini-Base`, `Nemotron-H-8B-Base-8K`, `Seed-OSS-36B-Base-woSyn`, `Olmo-3-1025-7B`, `rnj-1` | Section 1 |
+| Base model | One of the 6 in the locked sweep (Section 1): `marin-8b-base`, `Qwen3-30B-A3B-Base`, `Trinity-Mini-Base`, `Seed-OSS-36B-Base-woSyn`, `Olmo-3-1025-7B`, `rnj-1` | Section 1 |
 | `model.impl` | `auto` (prime-rl selects `custom` if supported else `hf`) | Section 7.1 below |
 | `model.dtype` | bf16 | Standard |
 | `loss_impl` | `liger_fused` | Saves ~40% memory on lm_head projection |
@@ -580,10 +579,9 @@ Per-model path (verified against pinned transformers commit `c1c3424` dated 2026
 | 1 | `marin-community/marin-8b-base` | `LlamaConfig` | **custom (Llama)** | ~baseline (optimized) |
 | 2 | `Qwen/Qwen3-30B-A3B-Base` | `Qwen3MoeConfig` | **custom (qwen3_moe)** | ~baseline (custom grouped-GEMM MoE kernels) |
 | 3 | `arcee-ai/Trinity-Mini-Base` | `AfmoeConfig` | **custom (afmoe)** | ~baseline (custom AFMoE impl) |
-| 4 | `nvidia/Nemotron-H-8B-Base-8K` | `NemotronHConfig` | **custom (nemotron_h)** | ~baseline (custom Mamba-hybrid impl) |
-| 5 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | `SeedOssConfig` | HF fallback | ~1.5× slower |
-| 6 | `allenai/Olmo-3-1025-7B` | `Olmo3Config` | HF fallback | ~1.5× slower |
-| 7 | `EssentialAI/rnj-1` | `Gemma3TextConfig` | HF fallback | ~1.5× slower |
+| 4 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | `SeedOssConfig` | HF fallback | ~1.5× slower |
+| 5 | `allenai/Olmo-3-1025-7B` | `Olmo3Config` | HF fallback | ~1.5× slower |
+| 6 | `EssentialAI/rnj-1` | `Gemma3TextConfig` | HF fallback | ~1.5× slower |
 
 **HF fallback works for SFT** — verified by reading prime-rl source (2026-04-15):
 
@@ -716,10 +714,9 @@ Three models ship with `chat_template` already on the base tokenizer — Option 
 | 1 | `marin-community/marin-8b-base` | **YES** (`stanford-crfm/marin-tokenizer` bundles it) | n/a | use as-is |
 | 2 | `Qwen/Qwen3-30B-A3B-Base` | **YES** (ChatML native, Qwen ships template on base) | n/a | use as-is |
 | 3 | `arcee-ai/Trinity-Mini-Base` | TBD — verify at Rung 2 | `arcee-ai/Trinity-Mini` (if exists) OR `Trinity-Mini-Preview` | inspect tokenizer_config.json; copy from sibling if missing; note `AfmoeForCausalLM` may need `trust_remote_code=True` for non-custom path but prime-rl's `afmoe/` custom impl bypasses this |
-| 4 | `nvidia/Nemotron-H-8B-Base-8K` | **⚠ no instruct sibling** (base-only release per NVIDIA) | n/a | fallback: (a) hand-write a ChatML-style template targeting Nemotron-H's native special tokens, (b) borrow template from another NVIDIA instruct model if vocabs are compatible, or (c) drop this model if Rung 2 golden test fails. **Critical blocker candidate.** |
-| 5 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | Verify at Rung 2 | `ByteDance-Seed/Seed-OSS-36B-Instruct` | copy template from instruct sibling if missing |
-| 6 | `allenai/Olmo-3-1025-7B` | Verify at Rung 2 | `allenai/Olmo-3-7B-Instruct` | cleanest Option B case: `<\|im_start\|>`=100264, `<\|im_end\|>`=100265 pre-reserved in base vocab (per Agent 3 verification); copy template from instruct sibling |
-| 7 | `EssentialAI/rnj-1` | **YES** (ships chat_template on base — same as instruct sibling) | n/a | use as-is |
+| 4 | `ByteDance-Seed/Seed-OSS-36B-Base-woSyn` | Verify at Rung 2 | `ByteDance-Seed/Seed-OSS-36B-Instruct` | copy template from instruct sibling if missing |
+| 5 | `allenai/Olmo-3-1025-7B` | Verify at Rung 2 | `allenai/Olmo-3-7B-Instruct` | cleanest Option B case: `<\|im_start\|>`=100264, `<\|im_end\|>`=100265 pre-reserved in base vocab (per Agent 3 verification); copy template from instruct sibling |
+| 6 | `EssentialAI/rnj-1` | **YES** (ships chat_template on base — same as instruct sibling) | n/a | use as-is |
 
 These are priors (3 confirmed, 4 TBD). Rung 2's inspection script verifies each row empirically before we commit.
 
@@ -1071,7 +1068,6 @@ Adding a system prompt changes the message format from `[user, assistant]` to
 | Model | Issue | Patch |
 |---|---|---|
 | Trinity-Mini-Base | BPE merge: `\n` (230) vs `\n\n` (327) at generation-prompt boundary | `'\n' → '\n\n'` in `add_generation_prompt` branch |
-| Nemotron-H-8B-Base-8K | Duplicate `<SPECIAL_11>Assistant\n` emission in user block + generation prompt | Template D: `<SPECIAL_11>Assistant\n` only as assistant turn header, not in user block |
 
 Both patches are applied in `tmp/prepare_tokenizers.py` and saved to
 `tmp/tokenizers/{slug}/`. Template D was discovered by the auditor during
@@ -1187,8 +1183,8 @@ we stop, diagnose, fix. The ladder is the contract.
     ported from OLMo-core, linear WSD, 4096 seq_len, 2 epochs, batch 128 via
     grad_accum 16 on 8 GPUs, `liger_fused` CE, `first_exhausted` interleave,
     system-prompt injection via `tmp/system_prompts_final.json`)
-  - `configs/sft/overrides/{marin,qwen3_30b_a3b,trinity_mini,nemotron_h_8b,seed_oss_36b,olmo3,rnj_1}.toml`
-    — per-base overrides. All 7 validate against `SFTConfig`.
+  - `configs/sft/overrides/{marin,qwen3_30b_a3b,trinity_mini,seed_oss_36b,olmo3,rnj_1}.toml`
+    — per-base overrides. All 6 validate against `SFTConfig`.
   - `tmp/swa_average.py` — post-hoc stochastic weight averaging (emulates
     OLMo-core's `ModelMergeCallback`; run after each base finishes)
   - Launch pattern: `uv run sft @ configs/sft/baseline.toml @ configs/sft/overrides/<base>.toml`
@@ -1197,13 +1193,12 @@ we stop, diagnose, fix. The ladder is the contract.
 
   | Base | LR | Epochs | max_steps | Notes |
   |---|---|---|---|---|
-  | marin-8b | 5e-6 | 2 | 13,188 | baseline |
-  | Qwen3-30B-A3B | 5e-6 | 2 | 13,188 | MoE, active-param scaling considered but not applied |
-  | Trinity-Mini | 5e-6 | 2 | 13,188 | MoE, same rationale |
-  | Nemotron-H-8B | 5e-6 | 2 | 13,188 | Mamba hybrid — monitor first 500 steps |
-  | Seed-OSS-36B | 3e-6 | 2 | 13,188 | √N interp (Tülu 5e-6@8B, 2e-6@70B) |
-  | Olmo-3-7B | 1e-5 | 3 | 19,782 | OLMo-core-flavored override |
-  | rnj-1 | 5e-6 | 2 | 13,188 | ships chat_template on base |
+  | marin-8b | 5e-6 (AdamW) | 2 | 13,188 | baseline |
+  | Qwen3-30B-A3B | 2e-6 (AdamW) | 2 | 13,188 | MoE cut — no aux-free bias hook in tree + frozen expert_bias=0 |
+  | Trinity-Mini | 2e-6 (AdamW) | 2 | 13,188 | MoE — empirical blow-up at 5e-6 during probe 3908083 |
+  | Seed-OSS-36B | 3e-6 (AdamW) | 2 | 13,188 | √N interp (Tülu 5e-6@8B, 2e-6@70B) — SDPA + full AC |
+  | Olmo-3-7B | 1e-5 (AdamW) | 3 | 19,782 | OLMo-core-flavored override — SDPA |
+  | rnj-1 | 2e-5 (Muon) | 2 | 13,188 | EssentialAI Muon-pretrained across all phases — SDPA |
 
 - **GO** (per base, evaluated on 500-step smoke before committing to full run):
   1. Run completes without crash
