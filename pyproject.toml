@@ -20,7 +20,7 @@ dependencies = [
     "torchdata>=0.11.0",
     "transformers",
     "vllm>=0.19.0",
-    "wandb>=0.24.2",
+    "wandb>=0.26.0",
     "ring-flash-attn>=0.1.8",
     "prime>=0.5.63",
     "pyzmq>=27.1.0",
@@ -123,6 +123,9 @@ override-dependencies = [
     "nvidia-cudnn-cu12>=9.15",
     "nvidia-cutlass-dsl>=4.4.1",
     "transformers>=5.1.0.dev0",
+    # fastapi < 0.136 passes `on_startup` to starlette Router, which starlette
+    # 1.0 removed. vllm 0.19 pulls in a transitive fastapi that trips this.
+    "fastapi>=0.136.0",
 ]
 
 [tool.uv.sources]
@@ -131,7 +134,7 @@ torch = { index = "pytorch-cu128" }
 # still be used ad hoc for fork development.
 # Joan fork carries the multi-actor debate env (tmp/verifiers/envs/debate*) that
 # PR #1 orchestrator code depends on — do not swap to upstream.
-verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "35826af" }
+verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "b0857b0a" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "c1c3424" }
