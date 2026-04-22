@@ -57,6 +57,7 @@ from prime_rl.orchestrator.vf_utils import (
     intercept_vf_logging,
     save_rollouts,
 )
+from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
 from prime_rl.trainer.model import setup_tokenizer
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -461,6 +462,14 @@ async def orchestrate(config: OrchestratorConfig):
                     step_path / "eval_rollouts.jsonl",
                     exclude_keys=None if config.dump_trajectory else {"trajectory"},
                 )
+                await asyncio.to_thread(
+                    write_debate_step_metrics,
+                    eval_rollouts,
+                    step_path / "eval_debate_metrics.jsonl",
+                    progress.step,
+                    monitor,
+                    "debate_eval",
+                )
 
             # Resume weight updates
             scheduler.checkpoint_ready.set()
@@ -551,6 +560,14 @@ async def orchestrate(config: OrchestratorConfig):
             train_rollouts,
             step_path / "train_rollouts.jsonl",
             exclude_keys=None if config.dump_trajectory else {"trajectory"},
+        )
+        await asyncio.to_thread(
+            write_debate_step_metrics,
+            train_rollouts,
+            step_path / "train_debate_metrics.jsonl",
+            progress.step,
+            monitor,
+            "debate_train",
         )
 
         # VLM: offload base64 images to disk immediately to free memory
@@ -881,6 +898,14 @@ async def orchestrate(config: OrchestratorConfig):
                 eval_rollouts,
                 step_path / "eval_rollouts.jsonl",
                 exclude_keys=None if config.dump_trajectory else {"trajectory"},
+            )
+            await asyncio.to_thread(
+                write_debate_step_metrics,
+                eval_rollouts,
+                step_path / "eval_debate_metrics.jsonl",
+                progress.step,
+                monitor,
+                "debate_eval",
             )
 
     # Log final (immutable) samples and distributions to monitor(s)
