@@ -456,7 +456,10 @@ async def orchestrate(config: OrchestratorConfig):
             if eval_rollouts:
                 step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
                 await asyncio.to_thread(
-                    save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl", exclude_keys={"trajectory"}
+                    save_rollouts,
+                    eval_rollouts,
+                    step_path / "eval_rollouts.jsonl",
+                    exclude_keys=None if config.dump_trajectory else {"trajectory"},
                 )
 
             # Resume weight updates
@@ -544,7 +547,10 @@ async def orchestrate(config: OrchestratorConfig):
         # Save train rollouts to disk (fire-and-forget background thread)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
         await asyncio.to_thread(
-            save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl", exclude_keys={"trajectory"}
+            save_rollouts,
+            train_rollouts,
+            step_path / "train_rollouts.jsonl",
+            exclude_keys=None if config.dump_trajectory else {"trajectory"},
         )
 
         # VLM: offload base64 images to disk immediately to free memory
@@ -871,7 +877,10 @@ async def orchestrate(config: OrchestratorConfig):
         if eval_rollouts:
             step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
             await asyncio.to_thread(
-                save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl", exclude_keys={"trajectory"}
+                save_rollouts,
+                eval_rollouts,
+                step_path / "eval_rollouts.jsonl",
+                exclude_keys=None if config.dump_trajectory else {"trajectory"},
             )
 
     # Log final (immutable) samples and distributions to monitor(s)

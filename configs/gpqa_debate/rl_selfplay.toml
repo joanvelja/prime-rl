@@ -1,4 +1,5 @@
-# Debate (self-play) GPQA — both debaters are the learner; judge is gpt-4.1-mini.
+# Debate (self-play) GPQA — both debaters are the learner; judge is a
+# smaller Qwen via OpenRouter (qwen/qwen-2.5-7b-instruct).
 #
 # Status: works today. The `gpqa-debate` env exists in verifiers (
 # environments/gpqa_debate/). truth_member="debater_a" assigns the truth
@@ -11,8 +12,8 @@
 #
 # Pre-flight:
 #   uv pip install -e ../verifiers/environments/gpqa_debate
-#   export HF_TOKEN=...     # GPQA is gated
-#   export OPENAI_API_KEY=  # for gpt-4.1-mini judge
+#   export HF_TOKEN=...           # GPQA is gated
+#   export OPENROUTER_API_KEY=... # for qwen-2.5-7b judge
 #
 # Launch: uv run rl @ configs/gpqa_debate/rl_selfplay.toml
 
@@ -21,7 +22,7 @@ seq_len = 8192       # debate transcripts grow
 
 [wandb]
 project = "gpqa-debate"
-name = "qwen3-4b-selfplay-mom09"
+name = "qwen3-4b-selfplay-qwen7b-judge"
 
 [model]
 name = "Qwen/Qwen3-4B-Instruct-2507"
@@ -30,15 +31,22 @@ name = "Qwen/Qwen3-4B-Instruct-2507"
 batch_size = 128
 rollouts_per_example = 4
 oversampling_factor = 1.5  # drop degenerate transcripts (judge-tie or non-parsable)
+# Persist full per-step I/O (each role's input + output, per turn) to
+# outputs/<run>/rollouts/<step>/{train,eval}_rollouts.jsonl. Disk cost:
+# ~MB/rollout × 128 × 200 steps ≈ tens of GB. Worth it for audit.
+dump_trajectory = true
 
 [orchestrator.train.sampling]
 temperature = 1.0          # SPIRAL spec
-max_completion_tokens = 1024          # per turn; 4 turns × 1024 ≈ 4k completion budget
+# 8192 per-turn cap: previous 1024 truncated 79% of rollouts before the
+# closing <answer>X</answer> tag, hiding mind-changes in the rebuttal turn
+# (extraction_failed for ~22% of debater-a outputs in the smoke v7 run).
+max_completion_tokens = 8192
 
 [[orchestrator.train.env]]
 id = "gpqa-debate"
 name = "gpqa-debate-selfplay"
-args = { prompts_ref = "selfplay", subset = "gpqa_diamond", judge_model = "gpt-4.1-mini", truth_member = "debater_a" }
+args = { prompts_ref = "selfplay", subset = "gpqa_diamond", truth_member = "debater_a", judge_model = "qwen/qwen-2.5-7b-instruct", judge_base_url = "https://openrouter.ai/api/v1", judge_api_key_var = "OPENROUTER_API_KEY" }
 # debater_model omitted → both debaters use the orchestrator's learner model
 
 [orchestrator.advantage]   # ← MA marker: SPIRAL Alg.1 EMA-per-(task,ex,member_id)
@@ -63,7 +71,7 @@ id = "gpqa-debate"
 name = "gpqa-debate-eval"
 num_examples = 32
 rollouts_per_example = 2
-args = { prompts_ref = "selfplay", subset = "gpqa_diamond", judge_model = "gpt-4.1-mini" }
+args = { prompts_ref = "selfplay", subset = "gpqa_diamond", judge_model = "qwen/qwen-2.5-7b-instruct", judge_base_url = "https://openrouter.ai/api/v1", judge_api_key_var = "OPENROUTER_API_KEY" }
 
 [trainer] # Default trainer config (DPPO+KL loss)
 

@@ -975,6 +975,21 @@ class OrchestratorConfig(BaseConfig):
     # Whether to collect inference server metrics (requires wandb)
     collect_inference_metrics: bool = True
 
+    # Dump full per-step trajectory (per-agent prompts + completions) into the
+    # rollouts JSONL. Default off: trajectories are order(MB) per rollout in
+    # multi-turn/multi-agent envs, and most runs only need aggregate rewards.
+    # Turn on to audit history/context build or debug prompt assembly.
+    dump_trajectory: Annotated[
+        bool,
+        Field(
+            description=(
+                "If True, include the full per-step trajectory (each agent's input prompt + output "
+                "completion, per turn) in outputs/<run>/rollouts/<step>/*_rollouts.jsonl. "
+                "Off by default — trajectories are large in multi-agent envs. Turn on for debugging."
+            ),
+        ),
+    ] = False
+
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
 

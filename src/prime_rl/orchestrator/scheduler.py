@@ -449,6 +449,7 @@ class Scheduler:
                             )
                         else:
                             rollout["env_name"] = env_name
+                            rollout["group_id"] = group_id
                             valid_rollouts.append(rollout)
 
                     if has_failures and env.requires_group_scoring:
