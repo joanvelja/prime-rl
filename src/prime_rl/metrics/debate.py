@@ -44,13 +44,14 @@ def _mar_categorical(rollout: vf.RolloutOutput) -> dict[str, Any]:
     return mar.get("episode_categorical") or {}
 
 
-def _is_debate_rollout(rollout: vf.RolloutOutput) -> bool:
-    """A rollout is debate-shaped iff it carries a judge decision.
-
-    We accept 'winner' in episode_categorical as the authoritative marker;
-    absence = single-agent env = silently skip.
-    """
-    return "winner" in _mar_categorical(rollout)
+def _debate_winner(rollout: vf.RolloutOutput) -> tuple[bool, str | None]:
+    """Return (is_debate_rollout, winner). Single lookup for the two
+    facts every downstream loop needs — 'winner' in episode_categorical
+    is the authoritative marker; absence = single-agent env."""
+    cats = _mar_categorical(rollout)
+    if "winner" not in cats:
+        return False, None
+    return True, cats["winner"]
 
 
 def _truth_member(rollout: vf.RolloutOutput) -> str | None:
@@ -75,27 +76,19 @@ def _truth_member(rollout: vf.RolloutOutput) -> str | None:
     return "debater_a" if a > b else "debater_b"
 
 
-def _winner(rollout: vf.RolloutOutput) -> str | None:
-    """Judge's decision: 'debater_a' | 'debater_b' | 'tie' | None."""
-    return _mar_categorical(rollout).get("winner")
-
-
 def _completion_tokens_by_member(rollout: vf.RolloutOutput) -> dict[str, int]:
     """Sum of completion token lengths per member across the trajectory.
 
-    Requires ``trajectory`` in the rollout. Returns {} when trajectory
-    is stripped (dump_trajectory=False). Callers should guard on empty.
+    Returns {} when trajectory is stripped (dump_trajectory=False) or
+    when no step has tokens attached (externally-authored turns).
     """
     out: dict[str, int] = {}
     for step in rollout.get("trajectory") or []:
-        extras = step.get("extras") or {}
-        mid = extras.get("member_id")
-        if not mid:
+        mid = step["extras"]["member_id"]
+        tokens = step["tokens"]
+        if tokens is None:
             continue
-        tokens = step.get("tokens") or {}
-        completion_ids = tokens.get("completion_ids") if tokens else None
-        if completion_ids is not None:
-            out[mid] = out.get(mid, 0) + len(completion_ids)
+        out[mid] = out.get(mid, 0) + len(tokens["completion_ids"])
     return out
 
 
@@ -158,16 +151,16 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
       - n_rollouts, n_resolvable: sample-size diagnostics
     """
     # One pre-pass: filter to debate-shaped rollouts and memoize the
-    # derivations each downstream loop would otherwise recompute (winner,
-    # truth_member, trajectory-walked token counts).
+    # derivations each downstream loop would otherwise recompute.
     rows: list[dict[str, Any]] = []
     for r in rollouts:
-        if not _is_debate_rollout(r):
+        is_debate, winner = _debate_winner(r)
+        if not is_debate:
             continue
         rows.append(
             {
                 "r": r,
-                "winner": _winner(r),
+                "winner": winner,
                 "truth": _truth_member(r),
                 "tokens": _completion_tokens_by_member(r),
             }
@@ -234,8 +227,8 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
             metrics[f"mind_change_bad_rate/{member}"] = bad / total
 
     # ---- Parse-fail + truncation + per-member turns/tokens/flips -----
-    metrics["error_rate"] = sum(1 for row in rows if row["r"].get("error") is not None) / n
-    metrics["truncation_rate"] = sum(1 for row in rows if row["r"].get("is_truncated")) / n
+    metrics["error_rate"] = sum(1 for row in rows if row["r"]["error"] is not None) / n
+    metrics["truncation_rate"] = sum(1 for row in rows if row["r"]["is_truncated"]) / n
 
     for member in ("debater_a", "debater_b", "judge"):
         turns = [row["r"][f"turns/{member}"] for row in rows if f"turns/{member}" in row["r"]]
