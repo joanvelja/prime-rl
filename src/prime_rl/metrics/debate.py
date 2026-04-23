@@ -26,29 +26,18 @@ from typing import Any
 
 import verifiers as vf
 
-from prime_rl.orchestrator.vf_utils import get_model_completion_len
 from prime_rl.utils.monitor.base import Monitor
-
-
-DebateRollout = dict[str, Any]  # a RolloutOutput that carries debate fields
-
-
-def _mar_categorical(rollout: vf.RolloutOutput) -> dict[str, Any]:
-    """Return mar_score.episode_categorical or {} if absent.
-
-    Assumes ``mar_score`` is already a dict — the orchestrator's
-    ``save_rollouts`` serialization and test fixtures both pass dicts.
-    Callers outside that path should serialize first.
-    """
-    mar = rollout.get("mar_score") or {}
-    return mar.get("episode_categorical") or {}
 
 
 def _debate_winner(rollout: vf.RolloutOutput) -> tuple[bool, str | None]:
     """Return (is_debate_rollout, winner). Single lookup for the two
     facts every downstream loop needs — 'winner' in episode_categorical
-    is the authoritative marker; absence = single-agent env."""
-    cats = _mar_categorical(rollout)
+    is the authoritative marker; absence = single-agent env.
+
+    Assumes ``mar_score`` is already a dict (orchestrator serializes via
+    save_rollouts; test fixtures pass dicts directly).
+    """
+    cats = (rollout.get("mar_score") or {}).get("episode_categorical") or {}
     if "winner" not in cats:
         return False, None
     return True, cats["winner"]
@@ -97,11 +86,12 @@ def _safe_mean(xs: list[float]) -> float:
 
 
 def _spearman(xs: list[float], ys: list[float]) -> float:
-    """Spearman rank correlation. Returns 0 when either list is
-    constant-valued (undefined) or empty. Dependency-free rank with
+    """Spearman rank correlation. Returns 0 when input has fewer than 2
+    samples or either variable is constant-valued (undefined). Callers
+    pass paired lists of the same length. Dependency-free rank with
     average-rank tie handling."""
     n = len(xs)
-    if n < 2 or len(ys) != n:
+    if n < 2:
         return 0.0
 
     def _ranks(vs: list[float]) -> list[float]:
@@ -150,18 +140,21 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
       - completion_tokens_mean/{member}: mean model-generated token length
       - n_rollouts, n_resolvable: sample-size diagnostics
     """
-    # One pre-pass: filter to debate-shaped rollouts and memoize the
-    # derivations each downstream loop would otherwise recompute.
+    # One pre-pass: filter to debate-shaped rollouts and memoize every
+    # derivation downstream loops would otherwise recompute (winner, truth,
+    # per-member token counts, and the W==truth correctness indicator).
     rows: list[dict[str, Any]] = []
     for r in rollouts:
         is_debate, winner = _debate_winner(r)
         if not is_debate:
             continue
+        truth = _truth_member(r)
         rows.append(
             {
                 "r": r,
                 "winner": winner,
-                "truth": _truth_member(r),
+                "truth": truth,
+                "correct": truth is not None and winner == truth,
                 "tokens": _completion_tokens_by_member(r),
             }
         )
@@ -183,25 +176,23 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
 
     # ---- TWC family --------------------------------------------------
     if n_resolvable > 0:
-        correct_any = [1.0 if row["winner"] == row["truth"] else 0.0 for row in resolvable]
-        metrics["twc_3way"] = _safe_mean(correct_any)
+        metrics["twc_3way"] = _safe_mean([float(row["correct"]) for row in resolvable])
         metrics["twc_3way_null"] = 1.0 / 3.0  # reference line for plots
 
         non_tie = [row for row in resolvable if row["winner"] != "tie"]
         if non_tie:
-            correct_2 = [1.0 if row["winner"] == row["truth"] else 0.0 for row in non_tie]
-            metrics["twc_2way_cond"] = _safe_mean(correct_2)
+            metrics["twc_2way_cond"] = _safe_mean([float(row["correct"]) for row in non_tie])
             metrics["twc_2way_cond_null"] = 0.5
             metrics["n_non_tie"] = float(len(non_tie))
 
-        tie_cnt = sum(1 for row in resolvable if row["winner"] == "tie")
-        metrics["tie_rate"] = tie_cnt / n_resolvable
+        # Partition complement: tie count is the residual after non_tie.
+        metrics["tie_rate"] = (n_resolvable - len(non_tie)) / n_resolvable
 
         by_seat: dict[str, list[float]] = {"a": [], "b": []}
         for row in resolvable:
-            seat = row["truth"].split("_")[1] if row["truth"] else None
+            seat = row["truth"].split("_")[1]  # resolvable guarantees truth is not None
             if seat in by_seat:
-                by_seat[seat].append(1.0 if row["winner"] == row["truth"] else 0.0)
+                by_seat[seat].append(float(row["correct"]))
         if by_seat["a"] and by_seat["b"]:
             twc_a, twc_b = _safe_mean(by_seat["a"]), _safe_mean(by_seat["b"])
             metrics["twc_by_seat_a"] = twc_a
@@ -270,7 +261,7 @@ def write_step_metrics(
     path: Path,
     step: int,
     monitor: Monitor,
-    prefix: str = "debate",
+    prefix: str,
 ) -> None:
     """Compute + persist tier-2 step metrics.
 
