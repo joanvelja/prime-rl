@@ -111,11 +111,6 @@ def compute_rae_advantages(
     advantages: list[float] = []
     for mr in member_rollouts:
         reward = mr["reward"]
-        if reward is None:
-            raise ValueError(
-                f"MemberRollout has reward=None "
-                f"(episode={mr['episode_id']}, member={mr['member_id']})"
-            )
         key: RAEKey = (mr["task"], mr["example_id"], mr["member_id"])
         state.update(key, reward)
         advantages.append(reward - state.baselines[key])

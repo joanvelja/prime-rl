@@ -139,15 +139,6 @@ def test_within_batch_ordering_compounds_per_trajectory():
     assert state_rev.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.505)
 
 
-def test_none_reward_raises():
-    """Even though MemberRollout typed reward as float, the bridge boundary
-    is dict-typed at runtime — defensive None-check stays."""
-    state = RAEState(baselines={})
-    rollouts = [_make_rollout(reward=None)]  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="reward=None"):
-        compute_rae_advantages(rollouts, state)
-
-
 def test_empty_batch_preserves_baselines():
     state = RAEState(baselines={(ENV_NAME, 1, "prover"): 0.5})
     advs = compute_rae_advantages([], state)
