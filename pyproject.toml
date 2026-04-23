@@ -134,7 +134,7 @@ torch = { index = "pytorch-cu128" }
 # still be used ad hoc for fork development.
 # Joan fork carries the multi-actor debate env (tmp/verifiers/envs/debate*) that
 # PR #1 orchestrator code depends on — do not swap to upstream.
-verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "1980c5de" }
+verifiers = { git = "https://github.com/joanvelja/verifiers.git", rev = "a0645364" }
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 dion = { git = "https://github.com/samsja/dion.git", rev = "d891eeb" }
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "c1c3424" }
