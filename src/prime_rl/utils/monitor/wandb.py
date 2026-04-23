@@ -153,10 +153,16 @@ class WandbMonitor(Monitor):
         start_time = time.perf_counter()
 
         for rollout in rollouts:
-            trajectory = rollout["trajectory"]
-            if not trajectory:
+            # Only learner-authored steps carry token IDs: parse_response_tokens
+            # returns None for external (non-token-returning) clients, so
+            # TrajectoryStep.tokens being None is the type-level signal for
+            # "not a trainable step" in multi-agent envs. Filter by that
+            # declared Optional, then take the last learner turn to mirror
+            # the single-agent contract (where every step was learner-authored).
+            learner_steps = [s for s in rollout["trajectory"] if s.get("tokens") is not None]
+            if not learner_steps:
                 continue
-            last_step = trajectory[-1]
+            last_step = learner_steps[-1]
             tokens = last_step["tokens"]
             full_ids = tokens["prompt_ids"] + tokens["completion_ids"]
             messages_text = self.tokenizer.decode(full_ids)

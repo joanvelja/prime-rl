@@ -975,6 +975,21 @@ class OrchestratorConfig(BaseConfig):
     # Whether to collect inference server metrics (requires wandb)
     collect_inference_metrics: bool = True
 
+    # Dump full per-step trajectory (per-agent prompts + completions) into the
+    # rollouts JSONL. Default off: trajectories are order(MB) per rollout in
+    # multi-turn/multi-agent envs, and most runs only need aggregate rewards.
+    # Turn on to audit history/context build or debug prompt assembly.
+    dump_trajectory: Annotated[
+        bool,
+        Field(
+            description=(
+                "If True, include the full per-step trajectory (each agent's input prompt + output "
+                "completion, per turn) in outputs/<run>/rollouts/<step>/*_rollouts.jsonl. "
+                "Off by default — trajectories are large in multi-agent envs. Turn on for debugging."
+            ),
+        ),
+    ] = False
+
     # The checkpoint configuration
     ckpt: CheckpointConfig | None = None
 
@@ -1220,12 +1235,19 @@ class OrchestratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_config(self):
-        """Populate extra_env_kwargs and vLLM sampling defaults from top-level fields."""
-        is_vllm = self.teacher_rollout_model is None
+        """Populate extra_env_kwargs from top-level fields.
+
+        vLLM-specific sampling extras (top_k=-1, min_p=0.0, return_token_ids)
+        are intentionally NOT injected globally here:
+        - top_k=-1 and min_p=0.0 are vLLM's server-side defaults, so setting
+          them was redundant for the learner.
+        - return_token_ids is self-added by OpenAIChatCompletionsTokenClient
+          in its own normalize_sampling_args (verifiers), so the learner
+          picks it up automatically.
+        Globally injecting into env.sampling.extra_body forced these onto
+        every client the env talks to — including external opponent/judge
+        endpoints that reject unknown kwargs (api.openai.com returns 400).
+        """
         for env in self.train.env:
             env.extra_env_kwargs.update(max_seq_len=self.seq_len)
-            if is_vllm:
-                env.sampling.extra_body.setdefault("top_k", -1)
-                env.sampling.extra_body.setdefault("min_p", 0.0)
-                env.sampling.extra_body.setdefault("return_token_ids", True)
         return self

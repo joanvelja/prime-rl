@@ -2,6 +2,7 @@ import asyncio
 import gc
 import os
 import time
+from pathlib import Path
 
 import tomli_w
 
@@ -57,6 +58,7 @@ from prime_rl.orchestrator.vf_utils import (
     intercept_vf_logging,
     save_rollouts,
 )
+from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
 from prime_rl.trainer.model import setup_tokenizer
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -86,6 +88,38 @@ SHUTDOWN_TIMEOUT_S = 300
 # rollouts are filtered out. After this many attempts, the orchestrator crashes
 # rather than silently skipping training steps.
 MAX_EMPTY_BATCH_ATTEMPTS = 3
+
+
+async def _persist_rollouts_and_metrics(
+    rollouts: list[vf.RolloutOutput],
+    step_path: Path,
+    kind: str,  # "train" or "eval"
+    *,
+    step: int,
+    dump_trajectory: bool,
+    monitor,
+) -> None:
+    """Fire-and-forget disk write for rollouts + tier-2 debate metrics.
+
+    Bundles the two side-effects that every save-site performs: the
+    full ``*_rollouts.jsonl`` (trajectory optionally included) and the
+    sidecar ``*_debate_metrics.json`` scalar aggregate. Both run on
+    background threads so the main orchestration loop isn't blocked.
+    """
+    await asyncio.to_thread(
+        save_rollouts,
+        rollouts,
+        step_path / f"{kind}_rollouts.jsonl",
+        exclude_keys=None if dump_trajectory else {"trajectory"},
+    )
+    await asyncio.to_thread(
+        write_debate_step_metrics,
+        rollouts,
+        path=step_path / f"{kind}_debate_metrics.json",
+        step=step,
+        monitor=monitor,
+        prefix=f"debate_{kind}",
+    )
 
 
 @clean_exit
@@ -455,8 +489,13 @@ async def orchestrate(config: OrchestratorConfig):
             eval_rollouts = [o for outputs in eval_results for o in outputs]
             if eval_rollouts:
                 step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-                await asyncio.to_thread(
-                    save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl", exclude_keys={"trajectory"}
+                await _persist_rollouts_and_metrics(
+                    eval_rollouts,
+                    step_path,
+                    "eval",
+                    step=progress.step,
+                    dump_trajectory=config.dump_trajectory,
+                    monitor=monitor,
                 )
 
             # Resume weight updates
@@ -541,10 +580,15 @@ async def orchestrate(config: OrchestratorConfig):
                 "model, consider reviewing the task difficulty of your environment(s)"
             )
 
-        # Save train rollouts to disk (fire-and-forget background thread)
+        # Save train rollouts + tier-2 metrics to disk (background threads)
         step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-        await asyncio.to_thread(
-            save_rollouts, train_rollouts, step_path / "train_rollouts.jsonl", exclude_keys={"trajectory"}
+        await _persist_rollouts_and_metrics(
+            train_rollouts,
+            step_path,
+            "train",
+            step=progress.step,
+            dump_trajectory=config.dump_trajectory,
+            monitor=monitor,
         )
 
         # VLM: offload base64 images to disk immediately to free memory
@@ -870,8 +914,13 @@ async def orchestrate(config: OrchestratorConfig):
         eval_rollouts = [o for outputs in eval_results for o in outputs]
         if eval_rollouts:
             step_path = get_step_path(get_rollout_dir(config.output_dir), progress.step)
-            await asyncio.to_thread(
-                save_rollouts, eval_rollouts, step_path / "eval_rollouts.jsonl", exclude_keys={"trajectory"}
+            await _persist_rollouts_and_metrics(
+                eval_rollouts,
+                step_path,
+                "eval",
+                step=progress.step,
+                dump_trajectory=config.dump_trajectory,
+                monitor=monitor,
             )
 
     # Log final (immutable) samples and distributions to monitor(s)

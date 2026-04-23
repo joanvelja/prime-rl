@@ -105,6 +105,10 @@ class Env:
         return address
 
     def _sampling_args_with_salt(self, cache_salt: str) -> dict:
+        """Thread cache_salt through the shared sampling_args. vLLM prefix-cache
+        invalidation lives in extra_body; verifiers' endpoint-aware OpenAI
+        client strips vLLM-only keys when talking to strict OpenAI endpoints
+        (opponent/judge), so cache_salt stays local to the learner call."""
         sampling_args = {**self.sampling_args}
         extra_body = {**sampling_args.get("extra_body", {}), "cache_salt": cache_salt}
         sampling_args["extra_body"] = extra_body
