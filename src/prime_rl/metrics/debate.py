@@ -288,4 +288,8 @@ def write_step_metrics(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump({"step": step, **scalars}, f)
-    monitor.log({f"{prefix}/{k}": v for k, v in scalars.items()}, step)
+    # Inject "step" into the payload — PrimeMonitor.log ignores its step
+    # kwarg (forwards only metrics to the API), so backends that consume
+    # the payload directly would otherwise have no step axis to index on.
+    payload = {f"{prefix}/{k}": v for k, v in scalars.items()} | {"step": step}
+    monitor.log(payload, step)
