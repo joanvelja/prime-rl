@@ -190,9 +190,10 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
 
         by_seat: dict[str, list[float]] = {"a": [], "b": []}
         for row in resolvable:
-            seat = row["truth"].split("_")[1]  # resolvable guarantees truth is not None
-            if seat in by_seat:
-                by_seat[seat].append(float(row["correct"]))
+            # _truth_member returns only debater_{a,b} or None; resolvable
+            # filtered None, so the suffix is always 'a' or 'b'.
+            seat = row["truth"].split("_")[1]
+            by_seat[seat].append(float(row["correct"]))
         if by_seat["a"] and by_seat["b"]:
             twc_a, twc_b = _safe_mean(by_seat["a"]), _safe_mean(by_seat["b"])
             metrics["twc_by_seat_a"] = twc_a
