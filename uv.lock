@@ -2778,7 +2778,7 @@ requires-dist = [
     { name = "torchtitan", git = "https://github.com/pytorch/torchtitan?rev=a1fdd7e" },
     { name = "transformers", git = "https://github.com/huggingface/transformers.git?rev=c1c3424" },
     { name = "uvloop", specifier = ">=0.21.0" },
-    { name = "verifiers", git = "https://github.com/joanvelja/verifiers.git?rev=20aa0243" },
+    { name = "verifiers", git = "https://github.com/joanvelja/verifiers.git?rev=0f89de8" },
     { name = "vllm", specifier = ">=0.19.0" },
     { name = "vllm-router", marker = "platform_machine == 'x86_64' and extra == 'disagg'", url = "https://github.com/PrimeIntellect-ai/router/releases/download/v0.1.22/vllm_router-0.1.22-cp38-abi3-manylinux_2_28_x86_64.whl" },
     { name = "wandb", specifier = ">=0.26.0" },
@@ -3994,7 +3994,7 @@ wheels = [
 [[package]]
 name = "verifiers"
 version = "0.1.12"
-source = { git = "https://github.com/joanvelja/verifiers.git?rev=20aa0243#20aa024322deeb15107559549ff612a240d9c570" }
+source = { git = "https://github.com/joanvelja/verifiers.git?rev=0f89de8#0f89de8b6cea8c61fcf228fd72f64dddb36dc797" }
 dependencies = [
     { name = "aiolimiter", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "anthropic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
