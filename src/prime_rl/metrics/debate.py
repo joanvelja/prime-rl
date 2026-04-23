@@ -34,15 +34,14 @@ DebateRollout = dict[str, Any]  # a RolloutOutput that carries debate fields
 
 
 def _mar_categorical(rollout: vf.RolloutOutput) -> dict[str, Any]:
-    """Return mar_score.episode_categorical or {} if absent."""
-    mar = rollout.get("mar_score")
-    if mar is None:
-        return {}
-    if isinstance(mar, dict):
-        return mar.get("episode_categorical") or {}
-    # pydantic model path (local env.run_rollout; orchestrator serializes to dict)
-    cats = getattr(mar, "episode_categorical", None)
-    return cats or {}
+    """Return mar_score.episode_categorical or {} if absent.
+
+    Assumes ``mar_score`` is already a dict — the orchestrator's
+    ``save_rollouts`` serialization and test fixtures both pass dicts.
+    Callers outside that path should serialize first.
+    """
+    mar = rollout.get("mar_score") or {}
+    return mar.get("episode_categorical") or {}
 
 
 def _is_debate_rollout(rollout: vf.RolloutOutput) -> bool:
@@ -79,15 +78,6 @@ def _truth_member(rollout: vf.RolloutOutput) -> str | None:
 def _winner(rollout: vf.RolloutOutput) -> str | None:
     """Judge's decision: 'debater_a' | 'debater_b' | 'tie' | None."""
     return _mar_categorical(rollout).get("winner")
-
-
-def _seat_of_truth(rollout: vf.RolloutOutput) -> str | None:
-    """'a' or 'b' — which seat the truth_member occupies. Same as
-    truth_member's suffix; exposed separately for clarity at call sites."""
-    tm = _truth_member(rollout)
-    if tm is None:
-        return None
-    return tm.split("_")[1]  # "debater_a" -> "a"
 
 
 def _completion_tokens_by_member(rollout: vf.RolloutOutput) -> dict[str, int]:
@@ -167,14 +157,29 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
       - completion_tokens_mean/{member}: mean model-generated token length
       - n_rollouts, n_resolvable: sample-size diagnostics
     """
-    debate_rollouts = [r for r in rollouts if _is_debate_rollout(r)]
-    n = len(debate_rollouts)
+    # One pre-pass: filter to debate-shaped rollouts and memoize the
+    # derivations each downstream loop would otherwise recompute (winner,
+    # truth_member, trajectory-walked token counts).
+    rows: list[dict[str, Any]] = []
+    for r in rollouts:
+        if not _is_debate_rollout(r):
+            continue
+        rows.append(
+            {
+                "r": r,
+                "winner": _winner(r),
+                "truth": _truth_member(r),
+                "tokens": _completion_tokens_by_member(r),
+            }
+        )
+    n = len(rows)
     if n == 0:
         return {}
 
-    # Resolvable = exactly one debater correct (C_a != C_b). Ties + both-correct +
-    # both-wrong go into separate diagnostic counts but out of TWC.
-    resolvable = [r for r in debate_rollouts if _truth_member(r) is not None]
+    # Resolvable = exactly one debater correct (C_a != C_b). Ties and
+    # both-correct / both-wrong go into separate diagnostic counts but
+    # out of TWC.
+    resolvable = [row for row in rows if row["truth"] is not None]
     n_resolvable = len(resolvable)
 
     metrics: dict[str, float] = {
@@ -183,45 +188,38 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
         "resolvable_rate": n_resolvable / n,
     }
 
-    # ---- TWC family (only meaningful over resolvable) ------------------
+    # ---- TWC family --------------------------------------------------
     if n_resolvable > 0:
-        # 3-way: Pr[W == truth] including ties-as-failure
-        correct_any = [1.0 if _winner(r) == _truth_member(r) else 0.0 for r in resolvable]
+        correct_any = [1.0 if row["winner"] == row["truth"] else 0.0 for row in resolvable]
         metrics["twc_3way"] = _safe_mean(correct_any)
         metrics["twc_3way_null"] = 1.0 / 3.0  # reference line for plots
 
-        # 2-way conditional: drop tie decisions, null = 1/2
-        non_tie = [r for r in resolvable if _winner(r) != "tie"]
+        non_tie = [row for row in resolvable if row["winner"] != "tie"]
         if non_tie:
-            correct_2 = [1.0 if _winner(r) == _truth_member(r) else 0.0 for r in non_tie]
+            correct_2 = [1.0 if row["winner"] == row["truth"] else 0.0 for row in non_tie]
             metrics["twc_2way_cond"] = _safe_mean(correct_2)
             metrics["twc_2way_cond_null"] = 0.5
             metrics["n_non_tie"] = float(len(non_tie))
 
-        # Tie rate
-        tie_cnt = sum(1 for r in resolvable if _winner(r) == "tie")
+        tie_cnt = sum(1 for row in resolvable if row["winner"] == "tie")
         metrics["tie_rate"] = tie_cnt / n_resolvable
 
-        # Position bias: difference in TWC by truth seat
-        by_seat = {"a": [], "b": []}
-        for r in resolvable:
-            seat = _seat_of_truth(r)
+        by_seat: dict[str, list[float]] = {"a": [], "b": []}
+        for row in resolvable:
+            seat = row["truth"].split("_")[1] if row["truth"] else None
             if seat in by_seat:
-                by_seat[seat].append(1.0 if _winner(r) == _truth_member(r) else 0.0)
+                by_seat[seat].append(1.0 if row["winner"] == row["truth"] else 0.0)
         if by_seat["a"] and by_seat["b"]:
-            twc_a = _safe_mean(by_seat["a"])
-            twc_b = _safe_mean(by_seat["b"])
+            twc_a, twc_b = _safe_mean(by_seat["a"]), _safe_mean(by_seat["b"])
             metrics["twc_by_seat_a"] = twc_a
             metrics["twc_by_seat_b"] = twc_b
             metrics["position_bias"] = abs(twc_a - twc_b)
 
-    # ---- Mind-change: requires per-rollout first/final_correct --------
-    # (Both are 0/1; mind-change-good = wrong→right; bad = right→wrong.)
+    # ---- Mind-change: wrong→right (good) vs right→wrong (bad) --------
     for member in ("debater_a", "debater_b"):
-        good = 0
-        bad = 0
-        total = 0
-        for r in debate_rollouts:
+        good = bad = total = 0
+        for row in rows:
+            r = row["r"]
             ic = r.get(f"initial_correct/{member}")
             fc = r.get(f"final_correct/{member}")
             if ic is None or fc is None:
@@ -235,57 +233,47 @@ def compute_step_metrics(rollouts: Iterable[vf.RolloutOutput]) -> dict[str, floa
             metrics[f"mind_change_good_rate/{member}"] = good / total
             metrics[f"mind_change_bad_rate/{member}"] = bad / total
 
-    # ---- Parse-fail + truncation -------------------------------------
-    errored = sum(1 for r in debate_rollouts if r.get("error") is not None)
-    metrics["error_rate"] = errored / n
-    truncated = sum(1 for r in debate_rollouts if r.get("is_truncated"))
-    metrics["truncation_rate"] = truncated / n
+    # ---- Parse-fail + truncation + per-member turns/tokens/flips -----
+    metrics["error_rate"] = sum(1 for row in rows if row["r"].get("error") is not None) / n
+    metrics["truncation_rate"] = sum(1 for row in rows if row["r"].get("is_truncated")) / n
 
-    # ---- Per-member turns + completion tokens -----------------------
     for member in ("debater_a", "debater_b", "judge"):
-        turns = [r[f"turns/{member}"] for r in debate_rollouts if f"turns/{member}" in r]
+        turns = [row["r"][f"turns/{member}"] for row in rows if f"turns/{member}" in row["r"]]
         if turns:
             metrics[f"avg_turns/{member}"] = _safe_mean(turns)
+        tokens = [row["tokens"][member] for row in rows if member in row["tokens"]]
+        if tokens:
+            metrics[f"completion_tokens_mean/{member}"] = _safe_mean([float(x) for x in tokens])
 
-    # Completion tokens: only when trajectory is dumped. Silently skip if absent.
-    token_sums: dict[str, list[int]] = {"debater_a": [], "debater_b": [], "judge": []}
-    for r in debate_rollouts:
-        per_member = _completion_tokens_by_member(r)
-        for member, ids in per_member.items():
-            if member in token_sums:
-                token_sums[member].append(ids)
-    for member, sums in token_sums.items():
-        if sums:
-            metrics[f"completion_tokens_mean/{member}"] = _safe_mean([float(x) for x in sums])
+    for member in ("debater_a", "debater_b"):
+        flips = [row["r"][f"flipped/{member}"] for row in rows if f"flipped/{member}" in row["r"]]
+        if flips:
+            metrics[f"flip_rate/{member}"] = _safe_mean(flips)
 
-    # ---- Length bias (Spearman of length_delta vs winner_is_a) -------
-    # Only meaningful when trajectory is dumped (completion token counts available)
-    # and we have non-tie decisions to regress against.
-    paired = []
-    for r in debate_rollouts:
-        if _winner(r) == "tie" or _winner(r) is None:
+    # ---- Length bias: Spearman(length_delta, winner-is-a). Requires
+    # per-member token counts (i.e. dump_trajectory=true) and at least one
+    # non-tie decision to regress against.
+    paired: list[tuple[float, float]] = []
+    for row in rows:
+        w = row["winner"]
+        if w == "tie" or w is None:
             continue
-        tokens = _completion_tokens_by_member(r)
-        la, lb = tokens.get("debater_a"), tokens.get("debater_b")
+        la = row["tokens"].get("debater_a")
+        lb = row["tokens"].get("debater_b")
         if la is None or lb is None:
             continue
-        paired.append((float(la - lb), 1.0 if _winner(r) == "debater_a" else 0.0))
+        paired.append((float(la - lb), 1.0 if w == "debater_a" else 0.0))
     if len(paired) >= 2:
         metrics["length_bias_corr"] = _spearman(
             [p[0] for p in paired], [p[1] for p in paired]
         )
-
-    # ---- Flip rates per debater (from rubric's flipped metric) -------
-    for member in ("debater_a", "debater_b"):
-        flips = [r[f"flipped/{member}"] for r in debate_rollouts if f"flipped/{member}" in r]
-        if flips:
-            metrics[f"flip_rate/{member}"] = _safe_mean(flips)
 
     return metrics
 
 
 def write_step_metrics(
     rollouts: list[vf.RolloutOutput],
+    *,
     path: Path,
     step: int,
     monitor: Monitor,
@@ -293,19 +281,18 @@ def write_step_metrics(
 ) -> None:
     """Compute + persist tier-2 step metrics.
 
-    Writes one JSONL line to ``path`` (sidecar to ``*_rollouts.jsonl``)
+    Writes one JSON object to ``path`` (sidecar to ``*_rollouts.jsonl``)
     and logs the same scalars to the monitor under ``{prefix}/{key}``.
     No-op when no debate-shaped rollouts are present (mixed-env safety).
+
+    The prefix namespaces W&B scalars so they don't collide with the
+    per-member MA rubric fanout (which writes reward/debater_a etc. at
+    the top level).
     """
     scalars = compute_step_metrics(rollouts)
     if not scalars:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    row = {"step": step, **scalars}
     with open(path, "w") as f:
-        json.dump(row, f)
-        f.write("\n")
-    # Prefix for W&B namespacing so debate metrics don't collide with
-    # per-member MA rubric fanout (which also uses reward/debater_a etc.).
-    namespaced = {f"{prefix}/{k}": v for k, v in scalars.items()}
-    monitor.log(namespaced, step)
+        json.dump({"step": step, **scalars}, f)
+    monitor.log({f"{prefix}/{k}": v for k, v in scalars.items()}, step)
