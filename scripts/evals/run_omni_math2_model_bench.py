@@ -25,6 +25,7 @@ QWEN_HF_NONTHINKING_TEXT_SAMPLING = {
     "top_p": 0.95,
     "top_k": 20,
     "min_p": 0.0,
+    "max_completion_tokens": 16_384,
     "presence_penalty": 2.0,
     "repetition_penalty": 1.0,
 }
@@ -32,6 +33,7 @@ GEMMA_HF_SAMPLING = {
     "temperature": 1.0,
     "top_p": 0.95,
     "top_k": 64,
+    "max_completion_tokens": 16_384,
 }
 TRINITY_MINI_SAMPLING = {
     "temperature": 0.15,
