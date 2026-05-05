@@ -87,6 +87,15 @@ For long-rollout Omni-MATH RLVR canaries using token-budget batching, size
 inference. Keep the cap explicit because higher values improve throughput by
 accepting more stale samples.
 
+Before increasing `max_off_policy_steps` further, prefer a larger
+`token_batch_size` when memory allows. Token-budget batching creates more packed
+micro-batches per optimizer step without raising the 16k per-sequence activation
+footprint, amortizes NCCL weight-update pauses, and usually reduces stale
+rollout cancellations without accepting older policies. For OLMo3 DPO canaries
+on 2 train + 2 infer GH200 topology, use `token_batch_size = 262144` as the
+current MFU-oriented default and keep vLLM request defaults pinned with
+`generation_config = "vllm"` in `vllm_extra`.
+
 CUDA/NCCL package versions must be locked, not only manually installed into the
 live venv. If upgrading NCCL, update `uv.lock` so `uv run` does not sync back to
 the older wheel. The exact `ctypes.CDLL("libnccl.so.2")` check also requires the

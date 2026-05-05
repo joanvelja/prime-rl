@@ -54,7 +54,7 @@ import_path = "prime_rl.trainer.rl.loss.dppo_kl_loss_fn"
 kwargs = { dppo_mask_low = 0.2, dppo_mask_high = 0.2, adv_tau = 1.0, teacher_tau = 0.0, kl_tau = 0.005, kl_level = "sequence" }
 
 [orchestrator]
-token_batch_size = 196608
+token_batch_size = 262144
 max_inflight_rollouts = 192
 rollouts_per_example = 8
 max_off_policy_steps = 4
@@ -100,7 +100,7 @@ args = { dataset_name = "json", data_files = "benchmarks/datasets/omni_math2/omn
 
 [inference]
 gpu_memory_utilization = 0.93
-vllm_extra = { max_num_seqs = 192, max_num_batched_tokens = 131072, performance_mode = "throughput" }
+vllm_extra = { max_num_seqs = 192, max_num_batched_tokens = 131072, performance_mode = "throughput", generation_config = "vllm" }
 
 [inference.model]
 max_model_len = 16384
