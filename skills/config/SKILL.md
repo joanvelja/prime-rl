@@ -96,6 +96,11 @@ on 2 train + 2 infer GH200 topology, use `token_batch_size = 262144` as the
 current MFU-oriented default and keep vLLM request defaults pinned with
 `generation_config = "vllm"` in `vllm_extra`.
 
+OLMo3 YaRN configs from HF may encode `beta_fast`/`beta_slow` as JSON integers.
+Transformers v5 expects floats there. Prime-RL normalizes those RoPE fields at
+the HF config ingestion boundary; do not work around the warning by changing the
+model's RoPE values in TOML.
+
 CUDA/NCCL package versions must be locked, not only manually installed into the
 live venv. If upgrading NCCL, update `uv.lock` so `uv run` does not sync back to
 the older wheel. The exact `ctypes.CDLL("libnccl.so.2")` check also requires the
