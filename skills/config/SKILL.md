@@ -101,6 +101,14 @@ Transformers v5 expects floats there. Prime-RL normalizes those RoPE fields at
 the HF config ingestion boundary; do not work around the warning by changing the
 model's RoPE values in TOML.
 
+Online eval has separate environment-worker concurrency from training rollouts.
+For 100×8 long-context Omni-MATH evals, the `"auto"` worker rule resolves to
+only 4 eval workers, which can bottleneck scoring and judge fallback. This is
+separate from vLLM request concurrency: long generation volume can still
+dominate wall-clock time even when inference GPUs are full. Set
+`[orchestrator.eval].num_workers` explicitly for those configs before judging
+eval wall-clock time; this does not change model sampling or reward semantics.
+
 CUDA/NCCL package versions must be locked, not only manually installed into the
 live venv. If upgrading NCCL, update `uv.lock` so `uv run` does not sync back to
 the older wheel. The exact `ctypes.CDLL("libnccl.so.2")` check also requires the

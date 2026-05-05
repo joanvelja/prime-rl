@@ -89,6 +89,7 @@ seed = 42
 interval = 8
 num_examples = 100
 rollouts_per_example = 8
+num_workers = 64
 eval_base_model = false
 cancel_inflight_rollouts_on_eval = true
 
