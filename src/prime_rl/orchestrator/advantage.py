@@ -65,6 +65,11 @@ def maxrl_advantage_fn(inputs: AdvantageInputs, eps: float = 1e-8) -> AdvantageO
     return AdvantageOutputs(advantages=torch.where(has_success, advantages, torch.zeros_like(rewards)))
 
 
+def reward_advantage_fn(inputs: AdvantageInputs) -> AdvantageOutputs:
+    """Raw reward advantage for reward-weighted REINFORCE objectives."""
+    return AdvantageOutputs(advantages=inputs.rewards)
+
+
 def _efficiency_length_shaping(
     rewards: Float[Tensor, "num_problems rollouts_per_example"],
     completion_lengths: Float[Tensor, "num_problems rollouts_per_example"],

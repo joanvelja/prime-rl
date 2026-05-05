@@ -7,6 +7,7 @@ from prime_rl.orchestrator.advantage import (
     compute_advantages,
     default_advantage_fn,
     maxrl_advantage_fn,
+    reward_advantage_fn,
     setup_advantage_fn,
 )
 
@@ -43,6 +44,16 @@ def test_maxrl_advantage_drops_all_zero_groups():
     result = maxrl_advantage_fn(inputs)
 
     assert torch.equal(result.advantages, torch.zeros_like(inputs.rewards))
+
+
+def test_reward_advantage_returns_raw_rewards():
+    inputs = AdvantageInputs(
+        rewards=torch.tensor([[1.0, 0.0, 0.5]]),
+        completion_lengths=torch.tensor([[10, 12, 8]]),
+    )
+    result = reward_advantage_fn(inputs)
+
+    assert torch.equal(result.advantages, inputs.rewards)
 
 
 def test_efficiency_mixed_group():

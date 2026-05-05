@@ -164,15 +164,11 @@ class Buffer:
         for (env_name, example_id), example_rollouts in rollouts_by_example.items():
             eb = self.env_buffers[env_name]
             avg_reward = mean([r["reward"] for r in example_rollouts])
-            eb.update_pools(example_id, avg_reward)
+            pool = eb.update_pools(example_id, avg_reward)
 
-            if self.config.online_difficulty_filtering:
-                if avg_reward == 0.0:
-                    eb.num_rollouts_per_step["hard"] += len(example_rollouts)
-                    continue
-                elif avg_reward == 1.0:
-                    eb.num_rollouts_per_step["easy"] += len(example_rollouts)
-                    continue
+            if self.config.online_difficulty_filtering and pool != "normal":
+                eb.num_rollouts_per_step[pool] += len(example_rollouts)
+                continue
 
             eb.num_rollouts_per_step["normal"] += len(example_rollouts)
             self.rollout_buffer.extend(example_rollouts)

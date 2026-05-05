@@ -656,7 +656,10 @@ class BufferConfig(BaseConfig):
     online_difficulty_filtering: Annotated[
         bool,
         Field(
-            description="Whether to filter rollouts based on difficulty. If True, rollouts with average reward 0.0 or 1.0 are not added to the buffer.",
+            description=(
+                "Whether to filter rollouts based on difficulty. If True, rollouts assigned to easy or hard "
+                "pools by easy_threshold/hard_threshold are not added to the training buffer."
+            ),
         ),
     ] = False
 

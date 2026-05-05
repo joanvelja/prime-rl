@@ -1,7 +1,7 @@
-max_steps = 20
+max_steps = 25
 max_async_level = 1
 seq_len = 16384
-output_dir = "outputs/omni_math2_rlvr_olmo3_dpo_default_20step"
+output_dir = "outputs/omni_math2_rlvr_canary/dppo_kl_token_maxrl"
 
 [log]
 level = "info"
@@ -20,10 +20,10 @@ num_infer_gpus = 2
 
 [wandb]
 project = "omni-math2-rlvr"
-name = "olmo3-dpo-default-k8-16k-20step"
+name = "olmo3-dpo-canary-dppo-kl-token-maxrl"
 
 [ckpt]
-interval = 5
+interval = 8
 keep_last = 2
 
 [trainer]
@@ -53,7 +53,7 @@ dppo_mask_low = 0.2
 dppo_mask_high = 0.2
 adv_tau = 1.0
 teacher_tau = 0.0
-kl_tau = 0.0
+kl_tau = 0.005
 
 [orchestrator]
 token_batch_size = 65536
@@ -62,8 +62,11 @@ rollouts_per_example = 8
 max_off_policy_steps = 1
 
 [orchestrator.advantage]
-type = "default"
-length_shaping = false
+type = "custom"
+import_path = "prime_rl.orchestrator.advantage.maxrl_advantage_fn"
+
+[orchestrator.advantage.kwargs]
+eps = 1e-8
 
 [orchestrator.train.sampling]
 temperature = 0.6
@@ -82,9 +85,10 @@ online_difficulty_filtering = true
 seed = 42
 
 [orchestrator.eval]
-interval = 5
+interval = 8
 num_examples = 100
 rollouts_per_example = 8
+eval_base_model = false
 cancel_inflight_rollouts_on_eval = true
 
 [orchestrator.eval.sampling]

@@ -135,12 +135,25 @@ def test_buffer_online_difficulty_filtering(dummy_envs, make_rollouts):
     """With online_difficulty_filtering=True, only partial reward rollouts are kept."""
     buffer = Buffer(
         dummy_envs,
-        BufferConfig(online_difficulty_filtering=True),
+        BufferConfig(easy_threshold=1.0, hard_threshold=0.0, online_difficulty_filtering=True),
     )
     buffer.update(make_rollouts(buffer, "env_a", list(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
 
     # Only 3 problems with reward 0.5 -> 6 rollouts kept
     assert len(buffer.rollout_buffer) == 6
+
+
+def test_buffer_can_filter_groups_above_half_solve_rate(dummy_envs, make_rollouts):
+    """REINFORCE1/2 trains on groups with solve rate <= 0.5."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(easy_threshold=0.5000001, online_difficulty_filtering=True),
+    )
+    buffer.update(make_rollouts(buffer, "env_a", list(range(4)), rewards=[0.0, 0.5, 0.75, 1.0]))
+
+    # The 0.75 and 1.0 groups are too easy and are not trainable.
+    assert len(buffer.rollout_buffer) == 4
+    assert len(buffer.env_buffers["env_a"].easy_examples) == 2
 
 
 def test_buffer_no_filtering_by_default(dummy_envs, make_rollouts):

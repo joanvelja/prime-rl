@@ -18,13 +18,6 @@ gpus_per_node = 4
 num_train_gpus = 2
 num_infer_gpus = 2
 
-[slurm]
-job_name = "omni-olmo3-maxrl20"
-partition = "workq"
-account = "brics.a6r"
-time = "06:00:00"
-project_dir = "/projects/a6r/joanv.a6r/work/prime-rl"
-
 [wandb]
 project = "omni-math2-rlvr"
 name = "olmo3-dpo-maxrl-k8-16k-20step"
