@@ -120,25 +120,12 @@ environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
-# Override torch's pinned cuDNN to fix Conv3d performance regression (torch 2.9 + cuDNN 9.8-9.14)
-# See: https://github.com/pytorch/pytorch/issues/166122
 override-dependencies = [
-    "nvidia-cudnn-cu12>=9.15",
     "nvidia-cutlass-dsl>=4.4.2",
     "transformers>=5.1.0.dev0",
-    # fastapi < 0.136 passes `on_startup` to starlette Router, which starlette
-    # 1.0 removed. vllm 0.19 pulls in a transitive fastapi that trips this.
-    "fastapi>=0.136.0",
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu129" }
-torchvision = { index = "pytorch-cu129" }
-torchaudio = { index = "pytorch-cu129" }
-vllm = [
-    { url = "https://github.com/vllm-project/vllm/releases/download/v0.20.1/vllm-0.20.1+cu129-cp38-abi3-manylinux_2_31_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/vllm-project/vllm/releases/download/v0.20.1/vllm-0.20.1+cu129-cp38-abi3-manylinux_2_31_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-]
 # Keep verifiers fetchable for fresh clones and CI; local sibling checkouts can
 # still be used ad hoc for fork development.
 # Joan fork carries the multi-actor debate env (tmp/verifiers/envs/debate*) that
@@ -191,16 +178,6 @@ name = "primeintellect"
 url = "https://hub.primeintellect.ai/primeintellect/simple/"
 explicit = true
 
-[[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
-explicit = true
-
-
-[[tool.uv.index]]
-name = "pytorch-cu129-test"
-url = "https://download.pytorch.org/whl/test/cu129"
-explicit = true
 
 [tool.ruff.lint]
 select = ["F", "I"]
