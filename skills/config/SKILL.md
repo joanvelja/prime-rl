@@ -68,6 +68,11 @@ Shared W&B requires server connectivity and config validation will fail before
 launch. Use online W&B, or explicitly disable shared mode if offline logging is
 required.
 
+Prime-RL defaults W&B data/cache/config/artifact storage under the run
+`output_dir` so long Isambard runs do not fill the home quota. If you override
+`WANDB_DATA_DIR`, `WANDB_CACHE_DIR`, `WANDB_CONFIG_DIR`, or
+`WANDB_ARTIFACT_DIR`, point them at project scratch/Lustre, not `$HOME`.
+
 For canaries launched from inside an already-created Isambard allocation, do
 not add `[slurm]` sections just to encode partition/account/time. The allocation
 wrapper owns job submission and, from the next mnode allocation onward, exports
