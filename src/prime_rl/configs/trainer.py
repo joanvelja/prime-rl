@@ -735,6 +735,16 @@ class TrainerConfig(BaseConfig):
     # The data configuration
     data: DataLoaderConfig = DataLoaderConfig()
 
+    pack_samples: Annotated[
+        bool,
+        Field(
+            description=(
+                "Whether to pack multiple training samples into one micro-batch. "
+                "Disable for HF fallback models that cannot enforce packed-sequence attention boundaries."
+            ),
+        ),
+    ] = True
+
     # The loss configuration
     loss: LossConfig = DefaultLossConfig()
 

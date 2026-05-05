@@ -88,6 +88,11 @@ class TrainSamplingConfig(BaseConfig):
         ),
     ] = 1.0
 
+    top_p: Annotated[
+        float,
+        Field(description="Nucleus sampling threshold."),
+    ] = 1.0
+
     max_completion_tokens: Annotated[
         int | None,
         Field(
@@ -125,7 +130,7 @@ class TrainSamplingConfig(BaseConfig):
         # Top-level OAI params
         args: dict[str, Any] = {
             "temperature": self.temperature,
-            "top_p": 1.0,
+            "top_p": self.top_p,
             "logprobs": True,
         }
         if self.max_completion_tokens is not None:
