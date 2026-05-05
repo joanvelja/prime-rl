@@ -19,6 +19,13 @@ Immediately gather context and write a summary of the run into `{output_dir}/STA
 
 After the initial overview, schedule recurring check-ins. By default, check in every **1 hour** (the researcher can override this).
 
+On Isambard mnode-wrapper allocations, avoid `srun` in recurring checks. Each
+`srun` consumes one per-job step id until the allocation ends, so polling loops
+can burn the step budget. Prefer logs, process state visible from the current
+shell, and the persistent gpustat files under `GPUSTAT_DIR`.
+Those gpustat files are latest snapshots, not history; do not use them after a
+run has ended to infer past GPU utilization.
+
 At each check-in:
 
 1. Check that all processes are alive.
@@ -68,6 +75,10 @@ After a restart, verify that all processes are back up and healthy before resumi
 The output directory and tmux session name are typically provided by the researcher in the appended system prompt (see `scripts/tmux.sh` — the Claude window is launched with this context). If not provided, **ask the researcher** which output directory to monitor and which tmux session the run is in.
 
 The tmux session contains the **Launcher** window where the researcher runs launch commands — this is where you should send any restart commands (see [Restarting a run](#restarting-a-run)).
+
+On the mnode wrapper, tmux attaches are pinned to the head node. Do not probe
+tmux liveness with repeated `srun` calls; if the tmux session is gone, ask the
+researcher before cancelling and relaunching the allocation wrapper.
 
 Once you have the output directory, the resolved configs are at `{output_dir}/configs/`.
 

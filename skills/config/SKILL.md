@@ -68,6 +68,18 @@ Shared W&B requires server connectivity and config validation will fail before
 launch. Use online W&B, or explicitly disable shared mode if offline logging is
 required.
 
+For canaries launched from inside an already-created Isambard allocation, do
+not add `[slurm]` sections just to encode partition/account/time. The allocation
+wrapper owns job submission and, from the next mnode allocation onward, exports
+`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NPROC_PER_NODE`, `GPUSTAT_DIR`, and the
+CUDA 13.1 forward-compat environment from `.env`. Keep the TOML focused on
+experiment topology and validate the wrapper environment before launch.
+
+CUDA/NCCL package versions must be locked, not only manually installed into the
+live venv. If upgrading NCCL, update `uv.lock` so `uv run` does not sync back to
+the older wheel. The exact `ctypes.CDLL("libnccl.so.2")` check also requires the
+venv NCCL wheel lib directory on `LD_LIBRARY_PATH`.
+
 ## Naming
 
 CLI uses kebab-case (`--model.max-model-len`), TOML uses snake_case (`max_model_len`). Both refer to the same field.

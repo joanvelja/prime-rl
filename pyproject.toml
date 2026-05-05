@@ -122,6 +122,7 @@ environments = [
 ]
 override-dependencies = [
     "nvidia-cutlass-dsl>=4.4.2",
+    "nvidia-nccl-cu13==2.30.4",
     "transformers>=5.1.0.dev0",
 ]
 
