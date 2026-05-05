@@ -57,7 +57,7 @@ kwargs = { adv_tau = 1.0, kl_tau = 0.005, kl_level = "token" }
 token_batch_size = 196608
 max_inflight_rollouts = 192
 rollouts_per_example = 8
-max_off_policy_steps = 2
+max_off_policy_steps = 4
 
 [orchestrator.advantage]
 type = "custom"

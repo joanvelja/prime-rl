@@ -80,6 +80,13 @@ wrapper owns job submission and, from the next mnode allocation onward, exports
 CUDA 13.1 forward-compat environment from `.env`. Keep the TOML focused on
 experiment topology and validate the wrapper environment before launch.
 
+For long-rollout Omni-MATH RLVR canaries using token-budget batching, size
+`max_off_policy_steps` to the in-flight queue geometry. If
+`max_inflight_rollouts` holds several token-batches, setting
+`max_off_policy_steps` too low cancels already-generated rollouts and wastes
+inference. Keep the cap explicit because higher values improve throughput by
+accepting more stale samples.
+
 CUDA/NCCL package versions must be locked, not only manually installed into the
 live venv. If upgrading NCCL, update `uv.lock` so `uv run` does not sync back to
 the older wheel. The exact `ctypes.CDLL("libnccl.so.2")` check also requires the
