@@ -127,11 +127,14 @@ def test_is_reinforce_loss_uses_importance_ratio():
     assert "importance_ratio" in metrics
 
 
-def test_reinforce_loss_matches_reward_weighted_nll_without_importance_ratio():
-    trainer_logprobs = [torch.log(torch.tensor([2.0, 4.0], dtype=torch.float32)).cuda()]
-    inference_logprobs = [torch.zeros(2, dtype=torch.float32).cuda()]
-    rewards = [torch.tensor([1.0, 0.0], dtype=torch.float32).cuda()]
-    loss_mask = [torch.ones(2, dtype=torch.bool).cuda()]
+def test_reinforce_loss_matches_sequence_mean_reward_weighted_nll_without_importance_ratio():
+    trainer_logprobs = [
+        torch.log(torch.tensor([2.0, 4.0], dtype=torch.float32)).cuda(),
+        torch.log(torch.tensor([8.0], dtype=torch.float32)).cuda(),
+    ]
+    inference_logprobs = [torch.zeros(2, dtype=torch.float32).cuda(), torch.zeros(1, dtype=torch.float32).cuda()]
+    rewards = [torch.tensor([1.0, 0.0], dtype=torch.float32).cuda(), torch.tensor([1.0], dtype=torch.float32).cuda()]
+    loss_mask = [torch.ones(2, dtype=torch.bool).cuda(), torch.ones(1, dtype=torch.bool).cuda()]
 
     loss_fn = setup_loss_fn(
         CustomLossConfig(import_path="prime_rl.trainer.rl.loss.reinforce_loss_fn", kwargs={"kl_tau": 0.0})
@@ -146,7 +149,12 @@ def test_reinforce_loss_matches_reward_weighted_nll_without_importance_ratio():
         loss_scale=1,
     )
 
-    expected = -(rewards[0] * trainer_logprobs[0]).sum()
+    expected = -torch.stack(
+        [
+            (rewards[0] * trainer_logprobs[0]).sum() / 2,
+            (rewards[1] * trainer_logprobs[1]).sum(),
+        ]
+    ).mean()
     assert torch.isclose(loss, expected, atol=1e-6)
     assert "importance_ratio" not in metrics
 

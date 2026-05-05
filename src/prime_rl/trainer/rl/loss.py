@@ -27,6 +27,7 @@ class LossOutputs:
 
     loss: Float[Tensor, ""]
     metrics: dict[str, Tensor]
+    normalizer: Float[Tensor, ""] | None = None
 
 
 LossFn = Callable[..., LossOutputs]
@@ -236,12 +237,13 @@ def reinforce_loss_fn(
     kl_loss, kl_metrics = _kl_loss(log_importance_ratio, loss_mask, kl_level)
 
     pg_loss = loss_mask * rewards * trainer_logprobs
-    loss = -pg_loss.sum() + kl_tau * kl_loss
+    token_count = loss_mask.sum().clamp_min(1).to(dtype=trainer_logprobs.dtype)
+    loss = (-pg_loss.sum() + kl_tau * kl_loss) / token_count
     metrics = {
         "mismatch_kl": _safe_mean(mismatch_kl, loss_mask),
         **kl_metrics,
     }
-    return LossOutputs(loss=loss, metrics=metrics)
+    return LossOutputs(loss=loss, metrics=metrics, normalizer=torch.ones((), device=loss.device, dtype=loss.dtype))
 
 
 def sft_loss_fn(inputs: LossInputs) -> LossOutputs:
@@ -301,6 +303,7 @@ def compute_loss(
         Tuple of (scaled_loss, aggregated_metrics)
     """
     total_loss = 0.0
+    normalizer: Tensor | None = None
     all_metrics: dict[str, list[Tensor]] = {}
 
     if teacher_logprobs is None:
@@ -320,13 +323,15 @@ def compute_loss(
         result = loss_fn(inputs)
 
         total_loss = total_loss + result.loss
+        if result.normalizer is not None:
+            normalizer = result.normalizer if normalizer is None else normalizer + result.normalizer
 
         for k, v in result.metrics.items():
             if k not in all_metrics:
                 all_metrics[k] = []
             all_metrics[k].append(v)
 
-    scaled_loss = total_loss / loss_scale
+    scaled_loss = total_loss / (normalizer if normalizer is not None else loss_scale)
 
     aggregated: dict[str, Any] = {}
     for k, v in all_metrics.items():
