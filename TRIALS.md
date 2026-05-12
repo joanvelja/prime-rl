@@ -2240,3 +2240,57 @@ baseline/eval-suite TOMLs (`configs/baselines/*_local.toml` and
 `configs/evals/rung6_suite.toml`) because that test only tries RL/trainer/SFT/
 orchestrator/inference config classes, not the baseline/eval-suite loaders.
 The OmniMath2 run-coupled tests passed.
+
+### 2026-05-12 14:30 UTC — Launched proper compiled 28i/4t run
+
+**Config / output**:
+
+- Source config:
+  `configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4.toml`
+- Generated run dir:
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430`
+- W&B run:
+  `https://wandb.ai/jvelja-private/omni-math2-rlvr/runs/d42fd686c81044f1a52341633bb3331d`
+- tmux windows:
+  `joanv_cc_8node:4` `vllm-metrics`,
+  `joanv_cc_8node:5` `gpu-telemetry`,
+  `joanv_cc_8node:6` `run-28i4t`.
+
+**Shape**:
+
+- `28i/4t` via `multi_node`: `num_train_nodes=1`,
+  `num_infer_replicas=7`, `nodes_per_fsdp_group=1`.
+- `batch_size=256`, `max_inflight_rollouts=768`,
+  `rollouts_per_example=8`, `max_async_level=4`,
+  `max_off_policy_steps=8`.
+- Filesystem weight broadcast, prefix caching off, `gpu_memory_utilization=0.95`.
+- Trainer compile enabled: trainer log confirmed `compile=CompileConfig(...)`
+  and `Compiled 32 layers`.
+- No online/final eval in this utilization run; checkpoint interval `25`.
+- Solved-only filtering confirmed in logs:
+  `easy_threshold=1.0 hard_threshold=None online_difficulty_filtering=True`.
+
+**Early evidence**:
+
+- Inference pool became ready at `14:35:25 UTC`.
+- vLLM routers started on port `8000`; backend Prometheus metrics are being
+  scraped from the seven inference nodes on port `8100`.
+- Step 0 orchestrator: `127.81s`, reward `0.3609`, mean seq length `2007.0`,
+  max off-policy `0`; zero-advantage filter enforced `104/256`.
+- Step 0 trainer: `303.32s`, warmup/compile path, peak memory `77.3 GiB`.
+- Step 1 orchestrator: `99.21s`, reward `0.5195`, mean seq length `2914.8`,
+  max off-policy `1`; zero-advantage filter enforced `24/256`.
+- Step 1 trainer: `80.19s`, `8381 tok/s`, `14.9%` MFU, peak memory `84.1 GiB`.
+- Step 2 orchestrator: `102.46s`, reward `0.3555`, mean seq length `4593.3`,
+  max off-policy `2`; zero-advantage filter enforced `96/256`.
+- GPU telemetry latest sample at `14:41:11 UTC` showed all 32 GPUs at `100%`
+  utilization, with inference memory around `88.5 GiB` and trainer memory
+  around `88 GiB`.
+
+**Notes**:
+
+- A W&B shared-mode `409` warning appeared on trainer startup, but the shared
+  run continued and both trainer/orchestrator use run id
+  `d42fd686c81044f1a52341633bb3331d`.
+- Router logs are verbose because `consistent_hash` emits `CONSISTENT_HASH_DEBUG`
+  lines at info level. This is log-noisy but not currently blocking.
