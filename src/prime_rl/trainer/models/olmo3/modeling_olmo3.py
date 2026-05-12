@@ -291,6 +291,15 @@ class Olmo3ForCausalLM(Olmo3PreTrainedModel, GenerationMixin):
         temperature: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> PrimeLmOutput:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels used by PrimeRL's wrapped LM head to optionally compute per-token logprobs/entropy.
+            If not provided, the wrapped LM head returns logits only.
+        temperature (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Per-token temperatures for logprobs/entropy computation when `labels` are provided.
+        cache_position (`torch.LongTensor`, *optional*):
+            Accepted for compatibility with Hugging Face generation APIs; ignored by this custom training model.
+        """
         assert use_cache is None or use_cache is False, "use_cache is not supported for custom olmo3"
         assert past_key_values is None, "past_key_values is not supported for custom olmo3"
         assert cache_position is None, "cache_position is not supported for custom olmo3"
