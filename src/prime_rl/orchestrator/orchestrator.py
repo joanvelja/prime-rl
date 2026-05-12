@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import json
 import os
 import time
 from pathlib import Path
@@ -89,6 +90,18 @@ SHUTDOWN_TIMEOUT_S = 300
 # rollouts are filtered out. After this many attempts, the orchestrator crashes
 # rather than silently skipping training steps.
 MAX_EMPTY_BATCH_ATTEMPTS = 3
+
+
+def _write_scalar_metrics(path: Path, metrics: dict[str, object]) -> None:
+    normalized = {}
+    for key, value in metrics.items():
+        try:
+            normalized[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(normalized, f, indent=2, sort_keys=True)
 
 
 async def _persist_rollouts_and_metrics(
@@ -817,6 +830,21 @@ async def orchestrate(config: OrchestratorConfig):
         by_example = results_df.groupby("example_id")
 
         solve_none, solve_all, effective_batch_size = compute_solve_rates(results_df)
+        filtered_mask = results_df.is_filtered.astype(bool)
+        unfiltered_df = results_df.loc[~filtered_mask]
+        filtered_df = results_df.loc[filtered_mask]
+        train_batch_filter_metrics = {
+            "train_batch/rollouts_unconditioned_on_filtering": float(len(results_df)),
+            "train_batch/rollouts_conditioned_on_filtering": float(len(unfiltered_df)),
+            "train_batch/rollouts_filtered_out": float(len(filtered_df)),
+            "train_batch/reward_unconditioned_on_filtering/mean": results_df.reward.mean(),
+        }
+        if not unfiltered_df.empty:
+            train_batch_filter_metrics["train_batch/reward_conditioned_on_filtering/mean"] = (
+                unfiltered_df.reward.mean()
+            )
+        if not filtered_df.empty:
+            train_batch_filter_metrics["train_batch/reward_filtered_out/mean"] = filtered_df.reward.mean()
         to_log = {
             # Progress metrics
             "progress/tokens": num_tokens,
@@ -863,6 +891,7 @@ async def orchestrate(config: OrchestratorConfig):
             "reward/all/mean": by_example.reward.mean().mean(),
             "reward/all/max": by_example.reward.mean().max(),
             "reward/all/min": by_example.reward.mean().min(),
+            **train_batch_filter_metrics,
             # Solve / batch metrics
             "solve_none/all": solve_none,
             "solve_all/all": solve_all,
@@ -927,6 +956,18 @@ async def orchestrate(config: OrchestratorConfig):
             env_filter_df = filter_df.loc[env_df.index]
             for name in filter_df.columns:
                 to_log[f"filters/{env}/{name}"] = env_filter_df[name].astype(float).mean()
+
+        train_comparison_metrics = {
+            key: value
+            for key, value in to_log.items()
+            if key.startswith("train_batch/") or key.startswith("train_batch_refill/")
+        }
+        train_comparison_metrics["step"] = progress.step
+        await asyncio.to_thread(
+            _write_scalar_metrics,
+            step_path / "train_filter_metrics.json",
+            train_comparison_metrics,
+        )
 
         # Log metrics to monitor(s)
         monitor.log(to_log, step=progress.step)
