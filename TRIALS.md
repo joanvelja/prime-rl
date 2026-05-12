@@ -18,6 +18,97 @@ Do not keep a change just because it launched. Keep it when it improves a target
 metric, removes a real blocker, or creates useful observability. Mark weak or
 failed trials explicitly so future agents do not re-run them by accident.
 
+## 2026-05-12: DAPO Refill Candidate Batching Patch
+
+**Hypothesis**: The DAPO-style refill path is wasting wall-clock by drawing full
+`batch_size=256` candidate batches for every refill round even when only a small
+top-up is needed. Adaptive candidate top-ups should reduce overflow/wasted
+candidate groups while keeping the accepted train batch at 32 prompt groups.
+
+**Change**:
+
+- Commit: `c8a5b8307 Optimize DAPO refill candidate batching` pushed to
+  `joanvelja/feat/omni-math2-olmo3-rlvr-canary`.
+- Code paths:
+  `src/prime_rl/orchestrator/{orchestrator.py,scheduler.py,refill.py,buffer.py}`,
+  `src/prime_rl/configs/orchestrator.py`.
+- Config:
+  `configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml`
+  now records `candidate_groups_per_round = 32` and
+  `max_candidate_groups = 128`.
+- New semantics: `max_refill_rounds` is retained as a compatibility alias for
+  `max_candidate_groups = max_refill_rounds * target_accepted_groups` when the
+  explicit budget is unset. Refill can now call
+  `Scheduler.generate_batch(..., target=...)` for smaller top-up draws.
+
+**Evidence**:
+
+- Focused tests passed:
+  `uv run --no-sync pytest tests/unit/test_configs.py::test_train_batch_refill_requires_rollout_batching tests/unit/test_configs.py::test_train_batch_refill_resolves_candidate_group_budget tests/unit/test_configs.py::test_train_batch_refill_rejects_too_small_candidate_budget tests/unit/test_configs.py::test_train_batch_refill_requires_divisible_rollout_groups tests/unit/orchestrator/test_scheduler.py::test_generate_batch_target_overrides_config_batch_size tests/unit/orchestrator/test_buffer.py::test_train_batch_refill_drops_zero_advantage_groups_without_hard_eviction`
+  → `6 passed`.
+- Ruff passed on touched code/test files.
+- Dry-run passed:
+  `uv run --no-sync rl @ configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/olmo3_refill_bottleneck_patch_explicit_dryrun_20260512T2021`.
+- Generated config check confirmed `batch_size=256`,
+  `max_inflight_rollouts=768`, `max_async_level=4`, `num_workers=28`,
+  filesystem broadcast, `gpu_memory_utilization=0.95`, solved-only filtering,
+  and the new refill budget fields.
+- `bash -n` passed for the generated `rl.sbatch`.
+- Broad `tests/unit/orchestrator tests/unit/test_configs.py` still had
+  unrelated ambient failures in old checkpoint/debate/config tests
+  (`610 passed, 17 failed`); do not treat that as a refill regression.
+
+**Verdict**: `promising but not proven`. Static/dry-run verification is clean.
+Runtime proof requires the patched run to start and show lower
+`train_batch_refill/prompts_consumed_per_accepted_group` / overflow for similar
+accepted-batch quality.
+
+**Next action**: compare patched runtime metrics against the live pre-patch
+`1e-6` refill run. If adaptive top-up reduces candidate waste without hurting
+unconditioned reward or eval, promote the patch as the default refill path.
+
+## 2026-05-12: Parallel LR Arm Queued
+
+**Hypothesis**: The current `1e-6` refill run may be learning too slowly. A
+matched `3e-6` run can test the LR axis while also exercising the patched refill
+path we actually want to use.
+
+**Change**:
+
+- Temp config:
+  `tmp/olmo3_28i4t_refill_patch_lr3e6_100step_20260512.toml`.
+- Dry-run/submit dir:
+  `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029`.
+- Submitted Slurm job: `4572407`,
+  `#SBATCH --job-name=olmo3-28i4t-refill-lr3e6`, currently pending on
+  priority at launch time.
+- Shape: 8 nodes, 28 inference GPUs / 4 trainer GPUs, `max_steps=100`,
+  `batch_size=256`, `rollouts_per_example=8`,
+  `max_inflight_rollouts=768`, `max_async_level=4`,
+  `max_off_policy_steps=8`, filesystem broadcast, prefix caching off,
+  solved-only filtering.
+- Only intended training-recipe change from the checked refill recipe:
+  `trainer.optim.lr = 3e-6`; names/output/time changed for separation.
+
+**Evidence**:
+
+- Dry-run passed and generated configs confirmed `trainer.lr=3e-06`,
+  `batch_size=256`, `max_inflight_rollouts=768`, no `hard_threshold`,
+  `easy_threshold=1.0`, `online_difficulty_filtering=true`,
+  `candidate_groups_per_round=32`, and `max_candidate_groups=128`.
+- `bash -n /tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029/rl.sbatch`
+  passed.
+- Visible tmux watcher:
+  `joanv_cc_8node:6 lr3e6-watch`.
+- This is a separate `sbatch`; it does not reuse or mutate the live allocation
+  running job `4570549`.
+
+**Verdict**: `pending`. No learning or utilization result yet.
+
+**Next action**: when job `4572407` starts, verify startup, W&B run id, worker
+count, and first few refill metrics. Compare reward conditioned/unconditioned
+on filtering and offline eval against the live `1e-6` run.
+
 ## 2026-05-08: 100-Step Default vs MaxRL Canary
 
 **Hypothesis**: With `14 inference / 2 trainer`, `max_off_policy_steps=8`,

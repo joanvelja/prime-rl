@@ -4,7 +4,29 @@ Purpose: keep utilization experiments falsifiable. Do not treat a created tmux
 window, generated launcher, or latest-state GPU snapshot as evidence of GPU
 utilization.
 
-## Current Allocation
+## Current Jobs
+
+As of 2026-05-12 20:31 UTC:
+
+| field | value |
+|---|---|
+| live run job | `4570549` |
+| live run name | `olmo3-default-28i4t-refill` |
+| live run nodes | `nid[010571,010577,010597-010601,010603]` |
+| live run status | running; trainer step 36 completed at `20:30:17 UTC` |
+| live run recipe | 28 inference GPUs / 4 trainer GPUs, `batch_size=256`, `max_inflight_rollouts=768`, `rollouts_per_example=8`, `max_async_level=4` |
+| live run caveat | pre-`c8a5b8307`; refill retries draw full candidate batches |
+| parallel LR job | `4572407` |
+| parallel LR status | pending on priority at submission |
+| parallel LR submit dir | `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029` |
+| parallel LR recipe | same shape as live run, `lr=3e-6`, adaptive refill patch |
+| parallel LR tmux watcher | `joanv_cc_8node:6 lr3e6-watch` |
+
+The live allocation is shared with the user. Do not run cleanup, `srun`, or GPU
+probes against it without explicit confirmation. Read-only log inspection and
+`squeue` are fine.
+
+## Historical Allocation Snapshot
 
 As of 2026-05-12 14:11 UTC:
 

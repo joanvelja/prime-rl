@@ -1,9 +1,85 @@
 # Handoff: Omni-MATH-2 OLMo3 RLVR Canaries
 
-> Last updated: 2026-05-12 14:42 UTC
+> Last updated: 2026-05-12 20:31 UTC
 > Session focus: 8-node Isambard smoke/probe work for OLMo3 RLVR utilization,
 > with solved-only filtering preserved and no hard-threshold quarantine.
 > Trial journal: append to `TRIALS.md` after each material run/config/code trial.
+
+## 2026-05-12 20:31 UTC Current State
+
+Do not touch the GPUs in the live allocation unless the user explicitly asks.
+The user is also working in parallel there.
+
+Live `1e-6` refill run:
+
+- Slurm job: `4570549`
+- Nodes: `nid[010571,010577,010597-010601,010603]`
+- Run dir:
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_refill_20260512_1745`
+- W&B:
+  `jvelja-private/omni-math2-rlvr/9dd054d2dd2e46de924a027c9ef20be4`
+- Config shape: 28 inference GPUs / 4 trainer GPUs, `batch_size=256`,
+  `rollouts_per_example=8`, `max_inflight_rollouts=768`,
+  `max_async_level=4`, filesystem broadcast, prefix caching off,
+  solved-only filtering (`easy_threshold=1.0`, no `hard_threshold`).
+- Latest read-only check: trainer step 36 completed at `20:30:17`, MFU `11.5%`,
+  peak trainer memory `84.0 GiB`; orchestrator was working on step 37.
+- This live run is pre-`c8a5b8307` adaptive refill patch. Its refill path still
+  draws full candidate batches for each retry.
+
+Queued parallel LR arm:
+
+- Slurm job: `4572407`
+- Status at launch: pending `(Priority)`.
+- Submit dir:
+  `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029`
+- Temp config:
+  `tmp/olmo3_28i4t_refill_patch_lr3e6_100step_20260512.toml`
+- Tmux watcher: `joanv_cc_8node:6 lr3e6-watch`
+- Shape: same as the live run except `trainer.optim.lr = 3e-6` and it uses
+  the patched adaptive refill code from commit `c8a5b8307`.
+- This is a separate `sbatch`; it does not use the live allocation.
+
+Code state:
+
+- Commit `c8a5b8307 Optimize DAPO refill candidate batching` was pushed to
+  `joanvelja/feat/omni-math2-olmo3-rlvr-canary`.
+- Local `git status` may still show `[ahead 1]` because updating
+  `.git/refs/remotes/...` failed on a read-only filesystem after the push.
+  The remote push itself succeeded (`3a375ab48..c8a5b8307`).
+- Unrelated dirty files remain and were intentionally not included:
+  `configs/baselines/omni_math2_perfectible_olmo3_fp8kv.toml` and
+  `docs/plans/2026-05-07-fused-mlp-kernels.md`.
+
+Verification for `c8a5b8307`:
+
+- Focused refill/config/scheduler/buffer tests: `6 passed`.
+- Ruff on touched files: passed.
+- Dry-run:
+  `/tmp/olmo3_refill_bottleneck_patch_explicit_dryrun_20260512T2021`.
+- LR-arm dry-run:
+  `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029`.
+- Generated LR-arm configs confirmed `lr=3e-06`, `batch_size=256`,
+  `max_inflight_rollouts=768`, `max_async_level=4`, `num_workers=28`,
+  `gpu_memory_utilization=0.95`, `online_difficulty_filtering=true`,
+  `easy_threshold=1.0`, no `hard_threshold`, `candidate_groups_per_round=32`,
+  `max_candidate_groups=128`.
+- Generated LR-arm `rl.sbatch` passed `bash -n`.
+
+Next checks:
+
+1. Wait for `4572407` to start; verify worker count, router/backend URLs,
+   first trainer step, and W&B run id.
+2. Compare `4572407` vs `4570549` on:
+   `train_batch_refill/reward_unconditioned_on_filtering/mean`,
+   `train_batch_refill/reward_conditioned_on_filtering/mean`,
+   `train_batch_refill/prompts_consumed_per_accepted_group`,
+   `train_batch_refill/overflow_groups`, step time, trainer MFU, and eventual
+   offline eval.
+3. Treat `4570549` vs `4572407` as a bundled comparison
+   (`1e-6 + old refill scheduler` vs `3e-6 + adaptive refill scheduler`).
+   If this looks good or ambiguous, run a patched `1e-6` control before making
+   a clean LR-only claim.
 
 ## 2026-05-12 8-Node Status
 
