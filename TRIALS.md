@@ -2294,3 +2294,230 @@ The OmniMath2 run-coupled tests passed.
   `d42fd686c81044f1a52341633bb3331d`.
 - Router logs are verbose because `consistent_hash` emits `CONSISTENT_HASH_DEBUG`
   lines at info level. This is log-noisy but not currently blocking.
+
+### 2026-05-12 15:42 UTC — Queued all-checkpoint offline eval waiter
+
+User requested offline eval over all checkpoints for the live compiled 28i/4t
+run. Clarification: the scheduled real checkpoints for this run are
+`25,50,75,100` (`ckpt.interval=25`); per-step `broadcasts/step_*` dirs are
+policy-update snapshots, not the unit to sweep for the first quality read.
+
+Added launcher:
+
+```bash
+tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh
+```
+
+The launcher:
+
+- waits for
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/run_default/broadcasts/step_100/STABLE`;
+- evaluates `OFFLINE_EVAL_STEPS=25,50,75,100` by default;
+- uses `--weights-root .../run_default/broadcasts` because the offline eval
+  script expects stable HF-style weight dirs with `model.safetensors*`, not
+  trainer DCP state dirs;
+- defaults to `600x8` (`OFFLINE_EVAL_NUM_EXAMPLES=600`,
+  `OFFLINE_EVAL_ROLLOUTS_PER_EXAMPLE=8`);
+- launches fresh 8-node vLLM eval servers inside the same allocation after the
+  training run reaches step 100;
+- writes logs/results under
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/offline_eval_600x8_all_ckpts`.
+
+Syntax check passed:
+
+```bash
+bash -n tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh
+```
+
+Queued visibly in tmux window:
+
+```bash
+joanv_cc_8node:7 eval-all
+```
+
+At queue time it was only waiting on `step_100/STABLE`, so it was not stealing
+GPUs from the live training run.
+
+### 2026-05-12 15:58 UTC — Implemented opt-in DAPO-style train-batch refill
+
+Implemented CPU-only, opt-in post-filter refill for rollout-batched training.
+This is intentionally **not** enabled in the live run and does not alter
+existing configs unless `[orchestrator.train_batch_refill] enabled = true` is
+set.
+
+Files changed:
+
+- `src/prime_rl/configs/orchestrator.py`
+  - Added `TrainBatchRefillConfig`.
+  - Added `orchestrator.train_batch_refill`.
+  - Validator rejects refill with `token_batch_size`; current implementation is
+    rollout-batch-only.
+- `src/prime_rl/orchestrator/orchestrator.py`
+  - When enabled, repeated candidate batches are drawn after advantages and
+    rollout filters are applied.
+  - Whole groups with no trainable units are dropped from the current training
+    batch and more candidates are drawn up to `max_refill_rounds`.
+  - Dropped groups are **not** moved to buffer easy/hard pools by this path.
+  - Multi-agent path currently errors if enabled; do not use there yet.
+- `src/prime_rl/orchestrator/refill.py`
+  - Added pure helper for selecting accepted trainable groups and collecting
+    refill metrics.
+- `src/prime_rl/orchestrator/train_batch_refill.py`
+  - Added CPU-testable wrapper that computes advantages/filters over candidate
+    rollouts and returns accepted rollouts plus dropped groups.
+- `tests/unit/orchestrator/test_buffer.py`
+  - Added regression coverage that all-zero groups are dropped from the current
+    batch without hard-pool eviction, while all-one groups can still be moved to
+    easy under solved-only filtering.
+- `tests/unit/test_configs.py`
+  - Added validator coverage for rejecting token batching with refill enabled.
+
+Metrics emitted when enabled:
+
+- `train_batch_refill/candidate_groups`
+- `train_batch_refill/accepted_groups`
+- `train_batch_refill/filtered_groups`
+- `train_batch_refill/filtered_easy_groups`
+- `train_batch_refill/filtered_hard_groups`
+- `train_batch_refill/filtered_zero_advantage_groups`
+- `train_batch_refill/candidate_rollouts`
+- `train_batch_refill/accepted_rollouts`
+- `train_batch_refill/refill_rounds`
+- `train_batch_refill/prompts_consumed_per_accepted_group`
+- `train_batch_refill/reward_unconditioned_on_filtering/mean`
+- `train_batch_refill/reward_conditioned_on_filtering/mean`
+- `train_batch_refill/reward_filtered_out/mean`
+
+Prepared launch config:
+
+- `configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml`
+- Same 28i/4t, `batch_size=256`, `max_inflight_rollouts=768`,
+  filesystem broadcast, compile, solved-only filter (`easy_threshold=1.0`, no
+  `hard_threshold`) as the non-refill run.
+- Adds:
+  ```toml
+  [orchestrator.train_batch_refill]
+  enabled = true
+  max_refill_rounds = 4
+  ```
+
+CPU validation:
+
+```bash
+uv run pytest tests/unit/orchestrator/test_buffer.py \
+  tests/unit/orchestrator/test_filters.py \
+  tests/unit/orchestrator/test_advantage.py \
+  tests/unit/test_configs.py::test_train_batch_refill_requires_rollout_batching
+```
+
+Result: `48 passed, 2 warnings`.
+
+```bash
+uv run ruff check src/prime_rl/orchestrator/refill.py \
+  src/prime_rl/orchestrator/train_batch_refill.py \
+  src/prime_rl/orchestrator/orchestrator.py \
+  src/prime_rl/configs/orchestrator.py \
+  tests/unit/orchestrator/test_buffer.py \
+  tests/unit/test_configs.py
+```
+
+Result: `All checks passed!`
+
+Known limitation: the current refill loop refills using additional full
+candidate batches from `scheduler.generate_batch`. That is correct
+drop-without-evict semantics, but it can increase rollout work substantially
+when many candidate groups are zero-signal. Treat the emitted
+`prompts_consumed_per_accepted_group` as the first live cost signal.
+
+### 2026-05-12 16:08 UTC - 28i/4t run externally terminated at step 80
+
+The live compiled 28i/4t run did not reach step 100. It completed orchestrator
+step 79 and trainer step 78, then was externally terminated while generating
+step 80:
+
+- Slurm step: `4555723.236`
+- Slurm state: `CANCELLED by 1483805060`, exit `0:15`
+- End time: `2026-05-12T15:51:59`
+- Allocation `4555723` remained running.
+- Quick log grep found no `ERROR`, `Traceback`, `RuntimeError`, or Python
+  exception in the run logs.
+- The visible pane showed `srun: forcing job termination` and then killed all
+  eight tasks.
+
+Last stable artifacts:
+
+- Trainer/checkpoint cadence artifacts: `step_25`, `step_50`, `step_75`
+- Filesystem broadcast snapshots: `step_25`, `step_50`, `step_75`,
+  `step_76`, `step_77`, `step_78`, `step_79`
+
+The offline eval waiter had been waiting for nonexistent `step_100`. It was
+retargeted and relaunched visibly in tmux as `joanv_cc_8node:6 eval-all`:
+
+```bash
+OFFLINE_EVAL_WAIT_STEP=75 OFFLINE_EVAL_STEPS=25,50,75 \
+  bash tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh
+```
+
+Do not record this interruption as a model/vLLM crash unless later logs prove
+otherwise. Current evidence points to an external signal, not an application
+exception.
+
+### 2026-05-12 16:36 UTC - Offline eval route correction: 8-node direct eval was GIGO
+
+The first direct-backend offline eval relaunch used all 8 nodes as generation
+shards while the eval driver also ran on `nid010685`.
+
+Command shape:
+
+```bash
+PRIME_RL_DISABLE_VLLM_ROUTER=1 \
+OFFLINE_EVAL_WAIT_STEP=75 \
+OFFLINE_EVAL_STEPS=25,50,75 \
+OFFLINE_EVAL_MAX_CONCURRENCY=64 \
+OFFLINE_EVAL_SCORE_MAX_CONCURRENCY=1024 \
+bash tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh
+```
+
+Failure evidence:
+
+- `nid010685` vLLM DP coordinator died at `2026-05-12 16:29` with
+  `RuntimeError: cancelled`.
+- `shard_00/worker.log` then repeatedly logged
+  `APIConnectionError('Connection error.')`.
+- The tqdm aggregate kept advancing, so this would have looked superficially
+  alive while counting aborted rollouts. Do **not** use this output for model
+  quality.
+
+Fix implemented:
+
+- Added `PRIME_RL_DISABLE_VLLM_ROUTER=1` support to the generated multi-node
+  RL Slurm template for one-node inference replicas.
+- Added `PRIME_RL_MULTINODE_HOSTS` override support to the offline eval
+  provisioner and endpoint derivation.
+- Promoted the ad hoc eval wrapper to:
+  `scripts/evals/run_omni_math2_offline_eval_28i4t.sh`.
+
+Clean non-refill eval relaunched visibly in tmux `joanv_cc_8node:6 eval-all`
+on 7 vLLM nodes, excluding the driver node:
+
+```bash
+PRIME_RL_DISABLE_VLLM_ROUTER=1 \
+PRIME_RL_MULTINODE_HOSTS='nid010752 nid010753 nid010756 nid010757 nid010758 nid010765 nid010768' \
+OFFLINE_EVAL_WAIT_STEP=75 \
+OFFLINE_EVAL_STEPS=25,50,75 \
+OFFLINE_EVAL_NODES=7 \
+OFFLINE_EVAL_MAX_CONCURRENCY=64 \
+OFFLINE_EVAL_SCORE_MAX_CONCURRENCY=512 \
+OFFLINE_EVAL_RUN_ROOT=/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/run_default \
+OFFLINE_EVAL_OUTPUT_DIR=/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/offline_eval_600x8_7node_clean \
+OFFLINE_EVAL_ARM=default_28i4t_compile_fsasync4 \
+scripts/evals/run_omni_math2_offline_eval_28i4t.sh
+```
+
+Status at relaunch validation:
+
+- Generation shards/admin endpoints are exactly `nid010752,nid010753,nid010756,
+  nid010757,nid010758,nid010765,nid010768`.
+- `nid010685` is driver-only and has no GPU-resident vLLM.
+- All 28 vLLM GPUs were observed at 100% util / ~88.5 GiB used shortly after
+  generation started.

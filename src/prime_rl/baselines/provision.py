@@ -104,6 +104,12 @@ def _slurm_hostnames(job_id: str | None = None) -> list[str]:
     return [line.strip() for line in result.splitlines() if line.strip()]
 
 
+def _multinode_hostnames(job_id: str | None = None) -> list[str]:
+    if override := os.environ.get("PRIME_RL_MULTINODE_HOSTS"):
+        return override.split()
+    return _slurm_hostnames(job_id)
+
+
 def write_inference_config(config: BaselineConfig) -> Path:
     launch = config.launch
     output_dir = config.output_dir / "inference"
@@ -368,8 +374,13 @@ class InferenceProvisioner(AbstractContextManager[Endpoint]):
         if launch.mode == "srun_multinode":
             if launch.nodes < 2:
                 raise ValueError("launch.nodes must be >= 2 when launch.mode='srun_multinode'")
-            use_router = shutil.which("vllm-router") is not None and not _uses_multinode_tensor_parallel(self.config)
-            multinode_hostnames = _slurm_hostnames(launch.srun_job_id)
+            disable_router = os.environ.get("PRIME_RL_DISABLE_VLLM_ROUTER") == "1"
+            use_router = (
+                not disable_router
+                and shutil.which("vllm-router") is not None
+                and not _uses_multinode_tensor_parallel(self.config)
+            )
+            multinode_hostnames = _multinode_hostnames(launch.srun_job_id)
             if len(multinode_hostnames) < launch.nodes:
                 raise RuntimeError(f"Requested {launch.nodes} nodes but Slurm exposes only {multinode_hostnames}")
             launch_script = write_srun_multinode_script(self.config, config_path, use_router=use_router)

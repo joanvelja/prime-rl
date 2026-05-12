@@ -41,10 +41,12 @@ from transformers import AutoProcessor
 from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.ckpt import Progress, setup_ckpt_manager
 from prime_rl.orchestrator.envs import EvalEnv, EvalEnvs, TrainEnvs
 from prime_rl.orchestrator.filters import apply_filters, setup_filters
+from prime_rl.orchestrator.refill import select_trainable_rollout_groups
 from prime_rl.orchestrator.scheduler import Scheduler
 from prime_rl.orchestrator.utils import (
     compute_teacher_logprobs,
@@ -58,7 +60,6 @@ from prime_rl.orchestrator.vf_utils import (
     intercept_vf_logging,
     save_rollouts,
 )
-from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
 from prime_rl.trainer.model import setup_tokenizer
 from prime_rl.utils.client import (
     init_nccl_broadcast,
@@ -517,7 +518,9 @@ async def orchestrate(config: OrchestratorConfig):
         prev_ckpt_step = ckpt_step
 
         # Schedule generating the training batch. Retry on empty-after-filter
-        # batches so the trainer never receives an empty batch.
+        # batches so the trainer never receives an empty batch. If post-filter
+        # refill is enabled, keep only groups with at least one trainable unit
+        # and draw more candidate batches until the rollout target is filled.
         generate_completions_time = 0.0
         train_rollouts: list[vf.RolloutOutput] = []
         num_rollouts = 0
@@ -525,54 +528,94 @@ async def orchestrate(config: OrchestratorConfig):
         n_trainable = 0
         training_units = []
         rollout_to_unit_idxs: list[list[int]] = []
-        for attempt in range(MAX_EMPTY_BATCH_ATTEMPTS):
-            train_rollouts = await scheduler.generate_batch(step=progress.step)
+        refill_metrics: dict[str, float] = {}
+        refill_enabled = config.train_batch_refill.enabled
+        max_batch_attempts = config.train_batch_refill.max_refill_rounds if refill_enabled else MAX_EMPTY_BATCH_ATTEMPTS
+        if refill_enabled and is_ma:
+            raise ValueError("train_batch_refill is currently unsupported for multi-agent environments")
+
+        for attempt in range(max_batch_attempts):
+            candidate_rollouts = await scheduler.generate_batch(step=progress.step)
             generate_completions_time += scheduler.last_batch_generation_time
 
-            num_rollouts = len(train_rollouts)
-            num_unique_examples = len({r["example_id"] for r in train_rollouts})
+            num_candidate_rollouts = len(candidate_rollouts)
 
             if is_ma:
-                training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
-                    train_rollouts,
+                candidate_training_units, candidate_rollout_to_unit_idxs = fan_out_for_multi_agent(
+                    candidate_rollouts,
                     drop_judge=config.multi_agent.drop_judge,
                     filter_by_learner_seat=config.multi_agent.filter_by_learner_seat,
                 )
                 assert advantage_state is not None  # gated by MA validation above
-                advantages = compute_rae_advantages(training_units, advantage_state)
-                for unit, advantage in zip(training_units, advantages):
+                advantages = compute_rae_advantages(candidate_training_units, advantage_state)
+                for unit, advantage in zip(candidate_training_units, advantages):
                     unit["advantage"] = advantage
 
-                apply_filters(rollout_filters, training_units)
-                for rollout, unit_idxs in zip(train_rollouts, rollout_to_unit_idxs):
-                    unit_filters = [training_units[i]["filters"] for i in unit_idxs]
+                apply_filters(rollout_filters, candidate_training_units)
+                for rollout, unit_idxs in zip(candidate_rollouts, candidate_rollout_to_unit_idxs):
+                    unit_filters = [candidate_training_units[i]["filters"] for i in unit_idxs]
                     rollout["filters"] = {
                         name: any(flags.get(name, False) for flags in unit_filters)
                         for name in (unit_filters[0].keys() if unit_filters else [f.name for f in rollout_filters])
                     }
                     rollout["is_filtered"] = bool(unit_idxs) and all(
-                        training_units[i]["is_filtered"] for i in unit_idxs
+                        candidate_training_units[i]["is_filtered"] for i in unit_idxs
                     )
-                    unit_advantages = [training_units[i]["advantage"] for i in unit_idxs]
+                    unit_advantages = [candidate_training_units[i]["advantage"] for i in unit_idxs]
                     rollout["advantage"] = sum(unit_advantages) / len(unit_advantages) if unit_advantages else 0.0
             else:
-                training_units = list(train_rollouts)
-                rollout_to_unit_idxs = [[i] for i in range(num_rollouts)]
-                compute_advantages(train_rollouts, config.rollouts_per_example, config.advantage)
-                apply_filters(rollout_filters, train_rollouts)
+                candidate_training_units = list(candidate_rollouts)
+                candidate_rollout_to_unit_idxs = [[i] for i in range(num_candidate_rollouts)]
+                compute_advantages(candidate_rollouts, config.rollouts_per_example, config.advantage)
+                apply_filters(rollout_filters, candidate_rollouts)
 
-            n_trainable = sum(1 for u in training_units if not u["is_filtered"])
-            if n_trainable > 0:
+            if refill_enabled:
+                assert config.batch_size is not None  # resolved by config validation
+                remaining_rollouts = config.batch_size - len(train_rollouts)
+                selection = select_trainable_rollout_groups(
+                    train_rollouts=candidate_rollouts,
+                    training_units=candidate_training_units,
+                    rollout_to_unit_idxs=candidate_rollout_to_unit_idxs,
+                    rollouts_per_example=config.rollouts_per_example,
+                    target_rollouts=remaining_rollouts,
+                )
+                unit_offset = len(training_units)
+                train_rollouts.extend(selection.rollouts)
+                training_units.extend(selection.training_units)
+                rollout_to_unit_idxs.extend(
+                    [[unit_offset + unit_idx for unit_idx in unit_idxs] for unit_idxs in selection.rollout_to_unit_idxs]
+                )
+                for key, value in selection.metrics.items():
+                    refill_metrics[key] = refill_metrics.get(key, 0.0) + value
+                refill_metrics["train_batch_refill/refill_rounds"] = float(attempt + 1)
+                num_rollouts = len(train_rollouts)
+                n_trainable = sum(1 for u in training_units if not u["is_filtered"])
+                if num_rollouts >= config.batch_size and n_trainable > 0:
+                    break
+            else:
+                train_rollouts = candidate_rollouts
+                training_units = candidate_training_units
+                rollout_to_unit_idxs = candidate_rollout_to_unit_idxs
+                num_rollouts = len(train_rollouts)
+                n_trainable = sum(1 for u in training_units if not u["is_filtered"])
+                if n_trainable > 0:
+                    break
+
+            if n_trainable > 0 and refill_enabled and attempt == max_batch_attempts - 1:
+                logger.warning(
+                    f"train_batch_refill exhausted {max_batch_attempts} candidate batch(es) at step {progress.step}; "
+                    f"proceeding with {num_rollouts}/{config.batch_size} accepted rollouts"
+                )
                 break
 
-            if attempt == MAX_EMPTY_BATCH_ATTEMPTS - 1:
+            if attempt == max_batch_attempts - 1:
                 logger.error(
-                    f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
-                    f"filtered out all {num_rollouts} rollouts - crashing orchestrator"
+                    f"Attempt {attempt + 1}/{max_batch_attempts} at step {progress.step} "
+                    f"filtered out all {num_candidate_rollouts} rollouts - crashing orchestrator"
                 )
                 reason = (
-                    f"All {num_rollouts} rollouts were filtered out on "
-                    f"{MAX_EMPTY_BATCH_ATTEMPTS} consecutive attempts at step {progress.step}"
+                    f"All rollouts were filtered out on "
+                    f"{max_batch_attempts} consecutive attempts at step {progress.step}"
                 )
                 evicted_path = config.output_dir / "control" / "evicted.txt"
                 evicted_path.parent.mkdir(parents=True, exist_ok=True)
@@ -580,10 +623,27 @@ async def orchestrate(config: OrchestratorConfig):
                 raise RuntimeError(reason)
 
             logger.warning(
-                f"Attempt {attempt + 1}/{MAX_EMPTY_BATCH_ATTEMPTS} at step {progress.step} "
-                f"filtered out all {num_rollouts} rollouts - retrying batch generation"
+                f"Attempt {attempt + 1}/{max_batch_attempts} at step {progress.step} "
+                f"filtered out all {num_candidate_rollouts} rollouts - retrying batch generation"
             )
 
+        num_rollouts = len(train_rollouts)
+        num_unique_examples = len({r["example_id"] for r in train_rollouts})
+        if refill_metrics:
+            accepted_groups = refill_metrics.get("train_batch_refill/accepted_groups", 0.0)
+            candidate_groups = refill_metrics.get("train_batch_refill/candidate_groups", 0.0)
+            refill_metrics["train_batch_refill/prompts_consumed_per_accepted_group"] = (
+                candidate_groups / accepted_groups if accepted_groups > 0 else candidate_groups
+            )
+            for name in (
+                "reward_unconditioned_on_filtering",
+                "reward_conditioned_on_filtering",
+                "reward_filtered_out",
+            ):
+                reward_sum = refill_metrics.pop(f"train_batch_refill/{name}/sum", 0.0)
+                reward_count = refill_metrics.pop(f"train_batch_refill/{name}/count", 0.0)
+                if reward_count > 0:
+                    refill_metrics[f"train_batch_refill/{name}/mean"] = reward_sum / reward_count
         trainable_ratio = n_trainable / num_rollouts
         if trainable_ratio <= 0.1:
             logger.warning(
@@ -818,6 +878,8 @@ async def orchestrate(config: OrchestratorConfig):
             **scheduler.get_metrics(),
             # Buffer metrics
             **buffer.get_metrics(),
+            # Post-filter train batch refill metrics
+            **refill_metrics,
             # Event loop lag metrics
             **event_loop_lag_monitor.get_metrics(),
             # Rollout filter metrics (detection rate per filter + overall drop rate)

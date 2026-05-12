@@ -532,3 +532,33 @@ So:
 - 32 examples: about 8.8 percentage points.
 - 100 examples: about 5.0 percentage points.
 - 600 examples: about 2.0 percentage points.
+
+## 2026-05-12 Offline Eval Utilization Correction
+
+The 8-node direct-backend offline eval route was invalid for quality and
+throughput accounting:
+
+- Eval driver and one vLLM shard both ran on `nid010685`.
+- `nid010685` vLLM DP coordinator died with `RuntimeError: cancelled`.
+- The corresponding eval shard logged repeated `APIConnectionError` messages
+  while the aggregate progress bar continued.
+
+Current clean route:
+
+```text
+driver-only: nid010685
+vLLM nodes:  nid010752 nid010753 nid010756 nid010757 nid010758 nid010765 nid010768
+GPUs used:   28 / 32
+```
+
+Observed shortly after generation started:
+
+| host class | GPU state |
+|---|---|
+| `nid010685` | 4 GPUs idle, no vLLM residency |
+| 7 vLLM nodes | all 28 GPUs at 100% util, about 88.5 GiB used/GPU |
+
+Conclusion: for offline eval in the current tmux-on-compute-node setup, use
+the 7-node clean route for apples-to-apples comparisons. A true 32/32 eval
+needs the driver moved off the inference nodes or a more robust remote driver
+path; otherwise "all 32 GPUs" can silently turn into partial failed shards.

@@ -3272,3 +3272,133 @@ Updated launch plan for 8 nodes:
    - conservative: `batch_size=256`, `max_inflight_rollouts=768`; or
    - utilization compromise: `batch_size=512`, `max_inflight_rollouts=1536`.
 6. Do not try `batch_size=2048` until 512/1024 are measured.
+
+2026-05-12 15:42 UTC eval continuation:
+
+- Live compiled 28i/4t run:
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430`.
+- It has no online eval stanza; quality should be read through offline eval.
+- User requested offline eval over all real checkpoints. For this run, that
+  means scheduled checkpoints `25,50,75,100` (`ckpt.interval=25`), not every
+  per-step filesystem broadcast snapshot.
+- Added and syntax-checked:
+  `tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh`.
+- The script waits for
+  `run_default/broadcasts/step_100/STABLE`, then runs `600x8` Omni-MATH-2
+  offline eval over `25,50,75,100` using `--weights-root run_default/broadcasts`.
+  This is required because `scripts/evals/offline_omni_math2_ckpt_eval.py`
+  discovers stable HF-style weight directories, while `run_default/checkpoints`
+  contains trainer state.
+- Queued visibly in tmux:
+  `joanv_cc_8node:7 eval-all`.
+- At queue time it was just waiting and not consuming GPUs. Results/logs will
+  go under
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/offline_eval_600x8_all_ckpts`.
+
+2026-05-12 15:58 UTC DAPO-style refill implementation:
+
+- Added opt-in config:
+  ```toml
+  [orchestrator.train_batch_refill]
+  enabled = true
+  max_refill_rounds = 4
+  ```
+- Default remains disabled, so the live 28i/4t run is unaffected.
+- Implementation files:
+  - `src/prime_rl/configs/orchestrator.py`
+  - `src/prime_rl/orchestrator/orchestrator.py`
+  - `src/prime_rl/orchestrator/refill.py`
+  - `src/prime_rl/orchestrator/train_batch_refill.py`
+  - `tests/unit/orchestrator/test_buffer.py`
+  - `tests/unit/test_configs.py`
+- Semantics: after advantages and filters are applied, whole groups with no
+  trainable units are dropped from the current train batch and replacement
+  candidate batches are drawn up to `max_refill_rounds`. This does **not**
+  hard-evict all-zero prompts from future sampling. Easy/all-one groups can
+  still be evicted by the existing solved-only buffer filter.
+- Scope: rollout batching only. Validator rejects `token_batch_size` with
+  refill enabled. Multi-agent envs also error if enabled.
+- Metrics emitted under `train_batch_refill/*`: candidate/accepted groups,
+  filtered easy/hard/zero-advantage groups, candidate/accepted rollouts,
+  refill rounds, prompts consumed per accepted group, and reward means
+  conditioned/unconditioned on filtering:
+  `train_batch_refill/reward_conditioned_on_filtering/mean`,
+  `train_batch_refill/reward_unconditioned_on_filtering/mean`,
+  `train_batch_refill/reward_filtered_out/mean`.
+- Prepared refill config:
+  `configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml`.
+  It preserves the non-refill 28i/4t shape (`batch_size=256`,
+  `max_inflight_rollouts=768`, filesystem broadcast, compile, solved-only
+  filter with no `hard_threshold`) and enables:
+  ```toml
+  [orchestrator.train_batch_refill]
+  enabled = true
+  max_refill_rounds = 4
+  ```
+- CPU checks passed:
+  ```bash
+  uv run pytest tests/unit/orchestrator/test_buffer.py \
+    tests/unit/orchestrator/test_filters.py \
+    tests/unit/orchestrator/test_advantage.py \
+    tests/unit/test_configs.py::test_train_batch_refill_requires_rollout_batching
+  # 48 passed, 2 warnings
+
+  uv run ruff check src/prime_rl/orchestrator/refill.py \
+    src/prime_rl/orchestrator/train_batch_refill.py \
+    src/prime_rl/orchestrator/orchestrator.py \
+    src/prime_rl/configs/orchestrator.py \
+    tests/unit/orchestrator/test_buffer.py \
+    tests/unit/test_configs.py
+  # All checks passed
+  ```
+- Next live canary after current eval/run finishes: enable this on a short
+  28i/4t `batch_size=256` canary and compare accepted reward/eval against raw
+  candidate reward. Do not treat accepted-batch reward alone as quality.
+
+2026-05-12 16:08 UTC interruption/update:
+
+- The live 28i/4t run did not finish to step 100.
+- Slurm step `4555723.236` ended as `CANCELLED by 1483805060`, exit `0:15`,
+  at `2026-05-12T15:51:59`, while generating orchestrator step 80.
+- Allocation `4555723` stayed running.
+- Last completed trainer step in `trainer/node_0.log`: step 78.
+- Last completed orchestrator step in `orchestrator.log`: step 79.
+- Quick log grep found no Python traceback/runtime error; pane showed
+  `srun: forcing job termination`, then all 8 tasks were terminated/killed.
+- Stable trainer checkpoints exist for `25,50,75`; filesystem broadcast
+  snapshots additionally exist for `76,77,78,79`.
+- The old eval waiter was waiting for nonexistent `step_100`. It was retargeted
+  and relaunched visibly in `joanv_cc_8node:6 eval-all` with:
+  ```bash
+  OFFLINE_EVAL_WAIT_STEP=75 OFFLINE_EVAL_STEPS=25,50,75 \
+    bash tmp/run_olmo3_offline_eval_28i4t_all_ckpts_20260512.sh
+  ```
+- Treat the termination as externally signalled unless later evidence shows
+  otherwise. Do not repeat the mistaken claim that this was a model/vLLM crash
+  without a traceback.
+
+2026-05-12 16:36 UTC eval route correction:
+
+- The first direct-backend offline eval on all 8 nodes is invalid for quality:
+  `nid010685` was both the eval driver node and a vLLM shard. Its vLLM DP
+  coordinator died around `16:29 UTC` with `RuntimeError: cancelled`; shard 00
+  then repeatedly logged `APIConnectionError('Connection error.')` while the
+  aggregate tqdm kept moving. Do not use
+  `offline_eval_600x8_all_ckpts` for quality conclusions.
+- Added durable support for the clean route:
+  - `src/prime_rl/baselines/provision.py` now honors
+    `PRIME_RL_MULTINODE_HOSTS` for srun-multinode eval launches.
+  - `scripts/evals/offline_omni_math2_ckpt_eval.py` derives admin/generation
+    URLs from that same host override.
+  - `src/prime_rl/templates/multi_node_rl.sbatch.j2` now honors
+    `PRIME_RL_DISABLE_VLLM_ROUTER=1` when direct backends are valid.
+  - New reusable wrapper:
+    `scripts/evals/run_omni_math2_offline_eval_28i4t.sh`.
+- Clean non-refill eval is now running visibly in `joanv_cc_8node:6 eval-all`
+  using 7 vLLM nodes and excluding the driver node:
+  `nid010752,nid010753,nid010756,nid010757,nid010758,nid010765,nid010768`.
+  Output path:
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430/offline_eval_600x8_7node_clean`.
+- Observed clean-launch GPU state: `nid010685` driver-only with no vLLM GPU
+  residency; all 28 vLLM GPUs at 100% util / about 88.5 GiB used after
+  generation started.

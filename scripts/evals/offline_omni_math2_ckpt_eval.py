@@ -475,9 +475,9 @@ def _derive_admin_urls(config: BaselineConfig, endpoint: Endpoint) -> list[str]:
     if config.launch.mode != "srun_multinode":
         return [endpoint.base_url]
 
-    from prime_rl.baselines.provision import _slurm_hostnames
+    from prime_rl.baselines.provision import _multinode_hostnames
 
-    hostnames = _slurm_hostnames(config.launch.srun_job_id)
+    hostnames = _multinode_hostnames(config.launch.srun_job_id)
     backend_port = config.launch.backend_port or (config.launch.port + 100)
     return [f"http://{host}:{backend_port}" for host in hostnames[: config.launch.nodes]]
 
@@ -487,7 +487,10 @@ def _derive_generation_urls(
     endpoint: Endpoint,
     admin_urls: list[str],
 ) -> list[str]:
-    if config is not None and config.launch.mode == "srun_multinode" and shutil.which("vllm-router") is None:
+    disable_router = os.environ.get("PRIME_RL_DISABLE_VLLM_ROUTER") == "1"
+    if config is not None and config.launch.mode == "srun_multinode" and (
+        disable_router or shutil.which("vllm-router") is None
+    ):
         return [_normal_generation_url(url) for url in admin_urls]
     return [_normal_generation_url(endpoint.base_url)]
 

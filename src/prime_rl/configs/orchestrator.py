@@ -723,6 +723,29 @@ class BufferConfig(BaseConfig):
         return self
 
 
+class TrainBatchRefillConfig(BaseConfig):
+    """Configures post-filter refill of train batches."""
+
+    enabled: Annotated[
+        bool,
+        Field(
+            description=(
+                "If True, drop groups whose post-advantage filters leave no trainable units and keep generating "
+                "candidate groups until the rollout batch target is reached or max_refill_rounds is exhausted. "
+                "Dropped groups are not moved to buffer easy/hard pools."
+            ),
+        ),
+    ] = False
+
+    max_refill_rounds: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="Maximum full candidate batches to draw for one trainer step when refill is enabled.",
+        ),
+    ] = 4
+
+
 class DefaultAdvantageConfig(BaseModel):
     """Config for the default advantage."""
 
@@ -1004,6 +1027,9 @@ class OrchestratorConfig(BaseConfig):
     # Data buffer configuration
     buffer: BufferConfig = BufferConfig()
 
+    # Post-filter train batch refill configuration
+    train_batch_refill: TrainBatchRefillConfig = TrainBatchRefillConfig()
+
     # The advantage configuration (stage 3 of the pipeline; see AdvantageConfig
     # docstring). For multi-agent envs, set type="ema_per_member" or "custom";
     # for single-agent envs, set type="default" or "custom".
@@ -1269,6 +1295,12 @@ class OrchestratorConfig(BaseConfig):
                 assert self.max_inflight_rollouts is not None
                 env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_train_batch_refill(self):
+        if self.train_batch_refill.enabled and self.token_batch_size is not None:
+            raise ValueError("train_batch_refill is currently only supported with rollout batch_size")
         return self
 
     @model_validator(mode="after")

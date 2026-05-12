@@ -7,12 +7,12 @@ from pydantic import BaseModel, Field, ValidationError
 from pydantic_config import ConfigFileError
 
 from prime_rl.configs.inference import InferenceConfig
-from prime_rl.configs.orchestrator import NCCLWeightBroadcastConfig as OrchestratorNCCLWeightBroadcastConfig
 from prime_rl.configs.orchestrator import EvalConfig, OrchestratorConfig, TrainSamplingConfig
+from prime_rl.configs.orchestrator import NCCLWeightBroadcastConfig as OrchestratorNCCLWeightBroadcastConfig
 from prime_rl.configs.rl import RLConfig
 from prime_rl.configs.sft import SFTConfig
-from prime_rl.configs.trainer import NCCLWeightBroadcastConfig as TrainerNCCLWeightBroadcastConfig
 from prime_rl.configs.trainer import ModelConfig as TrainerModelConfig
+from prime_rl.configs.trainer import NCCLWeightBroadcastConfig as TrainerNCCLWeightBroadcastConfig
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.utils.config import BaseConfig, cli
 from prime_rl.utils.validation import validate_shared_weight_broadcast
@@ -181,6 +181,15 @@ def test_eval_env_seed_override_wins():
     config = EvalConfig(seed=42, env=[{"id": "test-env", "seed": 7}])
 
     assert config.env[0].seed == 7
+
+
+def test_train_batch_refill_requires_rollout_batching():
+    with pytest.raises(ValidationError, match="train_batch_refill"):
+        OrchestratorConfig(
+            token_batch_size=1024,
+            max_inflight_rollouts=16,
+            train_batch_refill={"enabled": True},
+        )
 
 
 def test_validate_shared_weight_broadcast_rejects_inference_mismatch():
