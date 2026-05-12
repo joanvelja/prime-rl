@@ -207,3 +207,13 @@ outputs/
 .bottleneck-analysis/
 .codex
 /core
+
+# Experimental scratch + handoff notes (local-only)
+/tmp/
+/ext/
+/.handoffs/
+.env.bak.*
+
+# Claude Code local state
+.claude/scheduled_tasks.lock
+.claude/worktrees/
