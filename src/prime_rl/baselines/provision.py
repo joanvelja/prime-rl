@@ -200,11 +200,23 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Match production rl.sbatch: inference uses expandable_segments=False (True
+# observed to crash vLLM v1 mid-run with api_server_count>1). Trainer uses
+# True, but the baselines path is inference-only.
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 
 module load brics/nccl 2>/dev/null || true
 module load brics/aws-ofi-nccl 2>/dev/null || true
 unset NCCL_ALGO
+
+# Match production rl.sbatch: discover InfiniBand HCA so NCCL picks the
+# right device for cross-node collectives (DP coordinator, weight bcast).
+if command -v ibv_devinfo >/dev/null 2>&1; then
+    IB_HCA=$(ibv_devinfo | sed -n -e '/hca_id/p' -e '/link_layer:/p' | grep -B1 InfiniBand | grep hca_id | sed -e 's/^hca_id://g' | tr -d '[[:blank:]]' | paste -sd,)
+    if [ -n "$IB_HCA" ]; then
+        export NCCL_IB_HCA="$IB_HCA"
+    fi
+fi
 
 LOCAL_IP=$(ip -o -4 addr show hsn0 2>/dev/null | awk '{{split($4,a,"/"); print a[1]; exit}}')
 if [ -z "$LOCAL_IP" ]; then
@@ -237,11 +249,10 @@ if [ "$USE_ROUTER" -eq 1 ] && [ "$INFER_NODE_RANK" -eq 0 ]; then
     ROUTER_LOG="$OUTPUT_DIR/router.log"
     echo "Starting vllm-router on $LOCAL_IP:$ROUTER_PORT for $ROUTER_ARGS" | tee "$ROUTER_LOG"
     vllm-router \\
-        --policy round_robin \\
+        --policy consistent_hash \\
         --worker-urls $ROUTER_ARGS \\
         --host 0.0.0.0 \\
         --port "$ROUTER_PORT" \\
-        --intra-node-data-parallel-size "$DP_LOCAL" \\
         --worker-startup-timeout-secs 4200 \\
         --log-level debug \\
         >> "$ROUTER_LOG" 2>&1 &

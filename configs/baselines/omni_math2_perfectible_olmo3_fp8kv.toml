@@ -27,13 +27,9 @@ example_id_key = "id"
 task_name = "omni_math2"
 info_keys = [
   "domain",
-  "primary_domain",
   "difficulty",
-  "difficulty_label",
   "source",
-  "source_bucket",
   "tags",
-  "sampling_stratum",
 ]
 prompts_ref = "configs/baselines/omni_math2_prompt_pack.yaml"
 prompt_role = "debater_a"
