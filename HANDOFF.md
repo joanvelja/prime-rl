@@ -1,6 +1,6 @@
 # Handoff: Omni-MATH-2 OLMo3 RLVR Canaries
 
-> Last updated: 2026-05-12 14:16 UTC
+> Last updated: 2026-05-12 14:42 UTC
 > Session focus: 8-node Isambard smoke/probe work for OLMo3 RLVR utilization,
 > with solved-only filtering preserved and no hard-threshold quarantine.
 > Trial journal: append to `TRIALS.md` after each material run/config/code trial.
@@ -45,6 +45,16 @@ Runtime/template fixes made during the 8-node work:
   an OmniMath2 config failure.
 
 8-node run conclusions:
+
+- Live proper run is currently active:
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_20260512_1430`.
+  It uses the first-class 28i/4t compiled config, no online/final eval,
+  checkpoint interval `25`, and W&B run
+  `d42fd686c81044f1a52341633bb3331d`. Visible tmux windows are
+  `vllm-metrics`, `gpu-telemetry`, and `run-28i4t` in `joanv_cc_8node`.
+  Early checks: inference pool ready, routers active, trainer compiled 32
+  layers, step 1 trainer logged `80.19s`, `8381 tok/s`, `14.9%` MFU, and
+  latest GPU telemetry showed all 32 GPUs at `100%`.
 
 - 24i/8t multi-node launches correctly: six one-node inference replicas, four
   vLLM workers per replica, 24 inference workers total, and FSDP world size 8.
