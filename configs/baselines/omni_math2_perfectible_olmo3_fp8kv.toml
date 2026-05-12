@@ -70,5 +70,5 @@ backend_port = 9900
 gpu_memory_utilization = 0.95
 max_model_len = 16384
 enforce_eager = false
-# Phase 1: replicate prod's known-good baseline. FP8 KV / prefix caching / stream_interval to be added in Phase 2 once base launch is confirmed healthy.
-vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm" }
+# Phase 2: prod baseline + FP8 KV cache + prefix caching (40 rollouts/problem share prompts) + stream_interval=10 (batch workload).
+vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm", kv_cache_dtype = "fp8", calculate_kv_scales = true, enable_prefix_caching = true, stream_interval = 10 }
