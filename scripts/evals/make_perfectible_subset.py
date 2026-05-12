@@ -55,6 +55,8 @@ def run(
     rollout_id_key: str,
     rollout_reward_key: str,
     dataset_id_key: str,
+    hf_repo: str | None = None,
+    hf_private: bool = False,
 ) -> dict[str, Any]:
     grouped: dict[str, list[float]] = defaultdict(list)
     for row in _read_jsonl(baseline_rollouts):
@@ -93,6 +95,19 @@ def run(
         "selected_examples": len(selected_rows),
         "missing_selected_ids": sorted(selected_ids - {str(row.get(dataset_id_key)) for row in selected_rows}),
     }
+
+    if hf_repo is not None:
+        from datasets import Dataset
+
+        hub_url = Dataset.from_list(selected_rows).push_to_hub(
+            hf_repo,
+            split="train",
+            private=hf_private,
+        )
+        summary["hf_repo"] = hf_repo
+        summary["hf_private"] = hf_private
+        summary["hf_commit_info"] = str(hub_url)
+
     summary_path = output.with_suffix(output.suffix + ".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return summary
@@ -126,6 +141,16 @@ def main() -> int:
         default="id",
         help="source-dataset row key that joins to --rollout-id-key (default: id)",
     )
+    parser.add_argument(
+        "--hf-repo",
+        default=None,
+        help="optional HuggingFace dataset repo to push to after local write (e.g. user/name)",
+    )
+    parser.add_argument(
+        "--hf-private",
+        action="store_true",
+        help="push the HF dataset as private (default: public)",
+    )
     args = parser.parse_args()
     summary = run(
         baseline_rollouts=args.baseline_rollouts,
@@ -137,6 +162,8 @@ def main() -> int:
         rollout_id_key=args.rollout_id_key,
         rollout_reward_key=args.rollout_reward_key,
         dataset_id_key=args.dataset_id_key,
+        hf_repo=args.hf_repo,
+        hf_private=args.hf_private,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
