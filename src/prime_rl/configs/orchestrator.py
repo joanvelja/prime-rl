@@ -731,7 +731,7 @@ class TrainBatchRefillConfig(BaseConfig):
         Field(
             description=(
                 "If True, drop groups whose post-advantage filters leave no trainable units and keep generating "
-                "candidate groups until the rollout batch target is reached or max_refill_rounds is exhausted. "
+                "candidate groups until the rollout batch target is reached or the candidate budget is exhausted. "
                 "Dropped groups are not moved to buffer easy/hard pools."
             ),
         ),
@@ -741,9 +741,34 @@ class TrainBatchRefillConfig(BaseConfig):
         int,
         Field(
             ge=1,
-            description="Maximum full candidate batches to draw for one trainer step when refill is enabled.",
+            description=(
+                "Deprecated compatibility knob. When max_candidate_groups is unset, this sets "
+                "max_candidate_groups = max_refill_rounds * target_accepted_groups."
+            ),
         ),
     ] = 4
+
+    candidate_groups_per_round: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum candidate prompt groups to consume from the rollout buffer per refill round. "
+                "Defaults to the accepted target group count; adaptive refill may draw fewer groups for top-ups."
+            ),
+        ),
+    ] = None
+
+    max_candidate_groups: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum candidate prompt groups to consume for one trainer step. Defaults to "
+                "max_refill_rounds * target_accepted_groups."
+            ),
+        ),
+    ] = None
 
 
 class DefaultAdvantageConfig(BaseModel):
@@ -1301,6 +1326,21 @@ class OrchestratorConfig(BaseConfig):
     def validate_train_batch_refill(self):
         if self.train_batch_refill.enabled and self.token_batch_size is not None:
             raise ValueError("train_batch_refill is currently only supported with rollout batch_size")
+        if self.train_batch_refill.enabled:
+            assert self.batch_size is not None
+            if self.batch_size % self.rollouts_per_example != 0:
+                raise ValueError("train_batch_refill requires batch_size to be divisible by rollouts_per_example")
+            target_groups = self.batch_size // self.rollouts_per_example
+            if self.train_batch_refill.candidate_groups_per_round is None:
+                self.train_batch_refill.candidate_groups_per_round = target_groups
+            if self.train_batch_refill.max_candidate_groups is None:
+                self.train_batch_refill.max_candidate_groups = self.train_batch_refill.max_refill_rounds * target_groups
+            if self.train_batch_refill.max_candidate_groups < target_groups:
+                raise ValueError("train_batch_refill.max_candidate_groups must be at least the accepted group target")
+            if self.train_batch_refill.candidate_groups_per_round > self.train_batch_refill.max_candidate_groups:
+                raise ValueError(
+                    "train_batch_refill.candidate_groups_per_round must be <= max_candidate_groups"
+                )
         return self
 
     @model_validator(mode="after")

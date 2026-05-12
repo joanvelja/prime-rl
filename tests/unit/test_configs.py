@@ -192,6 +192,38 @@ def test_train_batch_refill_requires_rollout_batching():
         )
 
 
+def test_train_batch_refill_resolves_candidate_group_budget():
+    config = OrchestratorConfig(
+        batch_size=256,
+        rollouts_per_example=8,
+        max_inflight_rollouts=768,
+        train_batch_refill={"enabled": True, "max_refill_rounds": 4},
+    )
+
+    assert config.train_batch_refill.candidate_groups_per_round == 32
+    assert config.train_batch_refill.max_candidate_groups == 128
+
+
+def test_train_batch_refill_rejects_too_small_candidate_budget():
+    with pytest.raises(ValidationError, match="max_candidate_groups"):
+        OrchestratorConfig(
+            batch_size=256,
+            rollouts_per_example=8,
+            max_inflight_rollouts=768,
+            train_batch_refill={"enabled": True, "max_candidate_groups": 16},
+        )
+
+
+def test_train_batch_refill_requires_divisible_rollout_groups():
+    with pytest.raises(ValidationError, match="divisible"):
+        OrchestratorConfig(
+            batch_size=257,
+            rollouts_per_example=8,
+            max_inflight_rollouts=768,
+            train_batch_refill={"enabled": True},
+        )
+
+
 def test_validate_shared_weight_broadcast_rejects_inference_mismatch():
     trainer = TrainerConfig(weight_broadcast=TrainerNCCLWeightBroadcastConfig())
     orchestrator = OrchestratorConfig(weight_broadcast=OrchestratorNCCLWeightBroadcastConfig())

@@ -59,8 +59,11 @@ def select_trainable_rollout_groups(
     filtered_easy_groups = 0
     filtered_hard_groups = 0
     filtered_zero_advantage_groups = 0
+    overflow_groups = 0
+    overflow_rollouts: list[vf.RolloutOutput] = []
     accepted_groups = 0
     filtered_rollouts: list[vf.RolloutOutput] = []
+    selected_unit_idx_set: set[int] = set()
 
     for rollout_idxs in groups.values():
         unit_idxs: list[int] = []
@@ -84,12 +87,15 @@ def select_trainable_rollout_groups(
             continue
 
         if len(selected_rollout_idxs) + len(rollout_idxs) > target_rollouts:
+            overflow_groups += 1
+            overflow_rollouts.extend(train_rollouts[rollout_idx] for rollout_idx in rollout_idxs)
             continue
 
         selected_rollout_idxs.extend(rollout_idxs)
         accepted_groups += 1
         for unit_idx in unit_idxs:
-            if unit_idx not in selected_unit_idxs:
+            if unit_idx not in selected_unit_idx_set:
+                selected_unit_idx_set.add(unit_idx)
                 selected_unit_idxs.append(unit_idx)
 
     unit_idx_map = {old_idx: new_idx for new_idx, old_idx in enumerate(selected_unit_idxs)}
@@ -108,6 +114,7 @@ def select_trainable_rollout_groups(
     candidate_reward_sum, candidate_reward_count = _reward_stats(train_rollouts)
     accepted_reward_sum, accepted_reward_count = _reward_stats(selected_rollouts)
     filtered_reward_sum, filtered_reward_count = _reward_stats(filtered_rollouts)
+    overflow_reward_sum, overflow_reward_count = _reward_stats(overflow_rollouts)
 
     metrics = {
         "train_batch_refill/candidate_groups": float(candidate_groups),
@@ -116,8 +123,10 @@ def select_trainable_rollout_groups(
         "train_batch_refill/filtered_easy_groups": float(filtered_easy_groups),
         "train_batch_refill/filtered_hard_groups": float(filtered_hard_groups),
         "train_batch_refill/filtered_zero_advantage_groups": float(filtered_zero_advantage_groups),
+        "train_batch_refill/overflow_groups": float(overflow_groups),
         "train_batch_refill/candidate_rollouts": float(len(train_rollouts)),
         "train_batch_refill/accepted_rollouts": float(len(selected_rollouts)),
+        "train_batch_refill/overflow_rollouts": float(len(overflow_rollouts)),
         "train_batch_refill/prompts_consumed_per_accepted_group": float(prompts_consumed_per_accepted_group),
         "train_batch_refill/reward_unconditioned_on_filtering/sum": candidate_reward_sum,
         "train_batch_refill/reward_unconditioned_on_filtering/count": candidate_reward_count,
@@ -125,6 +134,8 @@ def select_trainable_rollout_groups(
         "train_batch_refill/reward_conditioned_on_filtering/count": accepted_reward_count,
         "train_batch_refill/reward_filtered_out/sum": filtered_reward_sum,
         "train_batch_refill/reward_filtered_out/count": filtered_reward_count,
+        "train_batch_refill/reward_overflow/sum": overflow_reward_sum,
+        "train_batch_refill/reward_overflow/count": overflow_reward_count,
     }
     return TrainBatchRefillSelection(
         rollouts=selected_rollouts,
