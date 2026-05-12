@@ -7,12 +7,15 @@ from pydantic import BaseModel, Field, ValidationError
 from pydantic_config import ConfigFileError
 
 from prime_rl.configs.inference import InferenceConfig
-from prime_rl.configs.orchestrator import OrchestratorConfig, TrainSamplingConfig
+from prime_rl.configs.orchestrator import NCCLWeightBroadcastConfig as OrchestratorNCCLWeightBroadcastConfig
+from prime_rl.configs.orchestrator import EvalConfig, OrchestratorConfig, TrainSamplingConfig
 from prime_rl.configs.rl import RLConfig
 from prime_rl.configs.sft import SFTConfig
+from prime_rl.configs.trainer import NCCLWeightBroadcastConfig as TrainerNCCLWeightBroadcastConfig
 from prime_rl.configs.trainer import ModelConfig as TrainerModelConfig
 from prime_rl.configs.trainer import TrainerConfig
 from prime_rl.utils.config import BaseConfig, cli
+from prime_rl.utils.validation import validate_shared_weight_broadcast
 
 # All config config classes
 CONFIG_CLASSES = [
@@ -165,3 +168,101 @@ def test_train_sampling_accepts_top_p():
     sampling = TrainSamplingConfig(top_p=0.95)
 
     assert sampling.to_sampling_args()["top_p"] == 0.95
+
+
+def test_eval_seed_inherits_to_env():
+    config = EvalConfig(num_examples=100, seed=42, env=[{"id": "test-env"}])
+
+    assert config.env[0].num_examples == 100
+    assert config.env[0].seed == 42
+
+
+def test_eval_env_seed_override_wins():
+    config = EvalConfig(seed=42, env=[{"id": "test-env", "seed": 7}])
+
+    assert config.env[0].seed == 7
+
+
+def test_validate_shared_weight_broadcast_rejects_inference_mismatch():
+    trainer = TrainerConfig(weight_broadcast=TrainerNCCLWeightBroadcastConfig())
+    orchestrator = OrchestratorConfig(weight_broadcast=OrchestratorNCCLWeightBroadcastConfig())
+    inference = InferenceConfig()
+
+    with pytest.raises(ValueError, match="inference=filesystem"):
+        validate_shared_weight_broadcast(trainer, orchestrator, inference)
+
+
+def test_gpu_layout_deployment_sets_one_gpu_inference_pool(tmp_path):
+    config_path = tmp_path / "gpu_layout.toml"
+    write_toml(
+        config_path,
+        {
+            "max_steps": 1,
+            "model": {"name": "Qwen/Qwen3-0.6B"},
+            "weight_broadcast": {"type": "nccl"},
+            "trainer": {},
+            "orchestrator": {"client": {"dp_rank_count": 6}},
+            "deployment": {
+                "type": "gpu_layout",
+                "gpus_per_node": 4,
+                "nodes": [
+                    {"inference": [0, 1, 2, 3]},
+                    {"inference": [0, 1], "trainer": [2, 3]},
+                ],
+            },
+            "inference": {"parallel": {"tp": 1, "dp": 1}},
+        },
+    )
+
+    config = cli(RLConfig, args=["@", config_path.as_posix()])
+
+    assert config.deployment.total_infer_gpus == 6
+    assert config.deployment.total_train_gpus == 2
+    assert config.orchestrator.client.dp_rank_count == 1
+    assert config.orchestrator.num_train_workers == 2
+    assert config.inference.parallel.dp == 1
+    assert config.inference.data_parallel_size_local == 1
+    assert config.inference.api_server_count == 1
+    assert config.trainer.weight_broadcast.inference_world_size == 6
+    assert config.orchestrator.weight_broadcast.inference_world_size == 6
+    assert config.trainer.weight_broadcast.host == "0.0.0.0"
+
+
+def test_gpu_layout_rejects_overlapping_gpu_roles(tmp_path):
+    config_path = tmp_path / "gpu_layout_bad.toml"
+    write_toml(
+        config_path,
+        {
+            "trainer": {},
+            "orchestrator": {},
+            "inference": {},
+            "deployment": {
+                "type": "gpu_layout",
+                "gpus_per_node": 4,
+                "nodes": [{"inference": [0], "trainer": [0]}],
+            },
+        },
+    )
+
+    with pytest.raises(ConfigFileError, match="assigned to both inference and trainer"):
+        cli(RLConfig, args=["@", config_path.as_posix()])
+
+
+def test_gpu_layout_rejects_layout_without_inference_gpus(tmp_path):
+    config_path = tmp_path / "gpu_layout_no_infer.toml"
+    write_toml(
+        config_path,
+        {
+            "trainer": {},
+            "orchestrator": {},
+            "inference": {},
+            "deployment": {
+                "type": "gpu_layout",
+                "gpus_per_node": 4,
+                "nodes": [{"trainer": [0, 1]}],
+            },
+        },
+    )
+
+    with pytest.raises(ConfigFileError, match="at least one inference GPU"):
+        cli(RLConfig, args=["@", config_path.as_posix()])

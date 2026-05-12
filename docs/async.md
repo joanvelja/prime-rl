@@ -1,13 +1,16 @@
 # Asynchronous Training
 
-PRIME-RL implements asynchronous off-policy training, instead of the traditional synchronous on-policy training. This means that we allow inference to generate rollouts from a stale policy up to $k$ (in the code we call this `max_async_level`) steps ahead of the trainer. With `k=1` and trainer and inference step timings being equal, this allows to run without any idle time on either the trainer or inference. By default, we set `k=2` to allow overlap with a weight broadcast over the Internet, which is needed for decentralized training.
+PRIME-RL implements asynchronous off-policy training, instead of the traditional synchronous on-policy training. This means that we allow inference to generate rollouts from a stale policy up to $k$ (in the code we call this `max_async_level`) steps ahead of the trainer. With `k=1` and trainer and inference step timings being equal, this allows overlap between trainer and inference without either side being fully idle.
+
+The current config default is `max_async_level = 1`. NCCL weight broadcast also validates that `max_async_level == 1`; higher async levels require a non-NCCL broadcast path such as filesystem-based adapter/weight loading.
 
 ![Two-Step Off-Policy Training](assets/two-step-off-policy.png)
 
 ## Loss Objective
 
-We adopt a loss objective capable of handling the natural distribution shift caused by the off-policy nature of the training. By default, we use a token-level loss variant of the [AIPO](https://arxiv.org/abs/2505.24034) training objective introduced in Llama-RL,
-but omit the entropy and KL loss terms.
+We adopt a loss objective capable of handling the natural distribution shift caused by the off-policy nature of the training. The current default trainer loss is implemented in `prime_rl.trainer.rl.loss.dppo_kl_loss_fn`: it uses rollout-time logprobs for an importance ratio, masks tokens whose trainer-vs-rollout probability difference crosses the DPPO thresholds, and optionally adds a squared log-ratio penalty controlled by `kl_tau`.
+
+Older descriptions of this as plain ratio clipping are imprecise for the current implementation: the mask is based on probability difference, while unmasked policy-gradient terms still use the unclipped importance ratio.
 
 At each step, we sample $N$ prompts from our dataset. For
 each prompt $x$, we sample a group of rollouts $\{y_i\}^G_{i=1}$
@@ -36,4 +39,4 @@ PRIME-RL uses a global training step $n=1,2,3,\dots$ that is used to tag artifac
 - **Trainer**: Produces policy $\pi_n$ with weights $\theta_n$ from rollouts $(x_n, y_n)$
 - **Inference**: Produces rollouts $(x_n, y_n)$ from policy $\pi_{max(0, n-k)}$
 
-Here, $k$ is the `max_async_level` parameter, which defaults to 2. Note that we use 0-indexed steps to cleanly indicate that at each step, the divergence off-policy gap is at most $k$ steps.
+Here, $k$ is the `max_async_level` parameter, which currently defaults to 1. Note that we use 0-indexed steps to cleanly indicate that at each step, the intended inference/trainer async gap is at most $k$ steps. Rollouts can still be older than this by the time they are consumed if they were already in flight; `max_off_policy_steps` controls the acceptance/drop threshold for those stale rollout groups.

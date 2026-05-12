@@ -127,6 +127,70 @@ def test_is_reinforce_loss_uses_importance_ratio():
     assert "importance_ratio" in metrics
 
 
+def test_is_reinforce_loss_can_clip_importance_ratio():
+    trainer_logprobs = [torch.log(torch.tensor([10.0, 0.5], dtype=torch.float32)).cuda()]
+    inference_logprobs = [torch.zeros(2, dtype=torch.float32).cuda()]
+    advantages = [torch.ones(2, dtype=torch.float32).cuda()]
+    loss_mask = [torch.ones(2, dtype=torch.bool).cuda()]
+
+    loss_fn = setup_loss_fn(
+        CustomLossConfig(
+            import_path="prime_rl.trainer.rl.loss.is_reinforce_loss_fn",
+            kwargs={"kl_tau": 0.0, "importance_ratio_clip": 2.0},
+        )
+    )
+    loss, metrics = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=1,
+    )
+
+    raw_ratio = torch.exp(trainer_logprobs[0] - inference_logprobs[0]).detach()
+    clipped_ratio = raw_ratio.clamp(max=2.0)
+    expected = -(advantages[0] * clipped_ratio * trainer_logprobs[0]).sum()
+    assert torch.isclose(loss, expected, atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio"], clipped_ratio.mean(), atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio_raw"], raw_ratio.mean(), atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio_clipped"], torch.tensor(0.5, device=loss.device), atol=1e-6)
+
+
+def test_default_loss_can_clip_importance_ratio():
+    trainer_logprobs = [torch.log(torch.tensor([10.0, 0.5], dtype=torch.float32)).cuda()]
+    inference_logprobs = [torch.zeros(2, dtype=torch.float32).cuda()]
+    advantages = [torch.ones(2, dtype=torch.float32).cuda()]
+    loss_mask = [torch.ones(2, dtype=torch.bool).cuda()]
+
+    loss_fn = setup_loss_fn(
+        DefaultLossConfig(
+            dppo_mask_low=100.0,
+            dppo_mask_high=100.0,
+            kl_tau=0.0,
+            importance_ratio_clip=2.0,
+        )
+    )
+    loss, metrics = compute_loss(
+        trainer_logprobs=trainer_logprobs,
+        inference_logprobs=inference_logprobs,
+        teacher_logprobs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        loss_fn=loss_fn,
+        loss_scale=1,
+    )
+
+    raw_ratio = torch.exp(trainer_logprobs[0] - inference_logprobs[0])
+    clipped_ratio = raw_ratio.clamp(max=2.0)
+    expected = -(advantages[0] * clipped_ratio).sum()
+    assert torch.isclose(loss, expected, atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio"], clipped_ratio.mean(), atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio_raw"], raw_ratio.mean(), atol=1e-6)
+    assert torch.isclose(metrics["importance_ratio_clipped"], torch.tensor(0.5, device=loss.device), atol=1e-6)
+
+
 def test_reinforce_loss_matches_sequence_mean_reward_weighted_nll_without_importance_ratio():
     trainer_logprobs = [
         torch.log(torch.tensor([2.0, 4.0], dtype=torch.float32)).cuda(),

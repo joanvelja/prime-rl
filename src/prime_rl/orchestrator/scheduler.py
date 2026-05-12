@@ -372,20 +372,7 @@ class Scheduler:
 
     async def generate_batch(self, step: int) -> list[vf.RolloutOutput]:
         """Continuously generates a batch of rollouts."""
-        self.step = step
-
-        if self.enable_policy_updates:
-            # Cancel the previous update policy task to avoid concurrent updates
-            if self.update_policy_task is not None:
-                await safe_cancel(self.update_policy_task)
-
-            # Manually check the async barrier before starting the step, then re-create the update policy loop
-            # This ensures that we respect max_async_level, while still listening for policy updates mid-step
-            await self.maybe_update_policy()
-            self.update_policy_task = asyncio.create_task(self.update_policy_loop())
-        else:
-            self.ckpt_step = step
-            self.checkpoint_ready.set()
+        await self.sync_policy_for_step(step)
 
         batch_start_time = time.perf_counter()
 
@@ -498,6 +485,24 @@ class Scheduler:
         self.last_batch_generation_time = time.perf_counter() - batch_start_time
         return batch_rollouts
 
+    async def sync_policy_for_step(self, step: int) -> None:
+        """Synchronize to the policy checkpoint required before starting a step."""
+        self.step = step
+
+        if not self.enable_policy_updates:
+            self.ckpt_step = step
+            self.checkpoint_ready.set()
+            return
+
+        # Cancel the previous update policy task to avoid concurrent updates.
+        if self.update_policy_task is not None:
+            await safe_cancel(self.update_policy_task)
+
+        # Manually check the async barrier before starting the step, then
+        # re-create the update policy loop so mid-step policy updates still run.
+        await self.maybe_update_policy()
+        self.update_policy_task = asyncio.create_task(self.update_policy_loop())
+
     async def stop(self) -> None:
         await self.cancel_inflight_rollouts()
         if self.update_policy_task is not None:
@@ -505,6 +510,14 @@ class Scheduler:
             self.update_policy_task = None
         if self.inflight_policy_update_task is not None:
             await safe_cancel(self.inflight_policy_update_task)
+            self.inflight_policy_update_task = None
+
+    async def pause_policy_updates(self) -> None:
+        if self.update_policy_task is not None:
+            await safe_cancel(self.update_policy_task)
+            self.update_policy_task = None
+        if self.inflight_policy_update_task is not None:
+            await self.inflight_policy_update_task
             self.inflight_policy_update_task = None
 
     @property

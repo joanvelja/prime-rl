@@ -441,6 +441,13 @@ async def orchestrate(config: OrchestratorConfig):
         logger.info(f"Starting orchestrator step {progress.step}")
         step_start_time = time.perf_counter()
 
+        # Bring scheduler.ckpt_step up to the checkpoint required for this
+        # step before deciding whether eval is due. Otherwise checkpoint-bound
+        # evals can be noticed one loop late, after the next train batch has
+        # already filled the inference queue.
+        await scheduler.sync_policy_for_step(progress.step)
+        ckpt_step = scheduler.ckpt_step if enable_policy_updates else progress.step
+
         # Run evals BEFORE training (blocking). Weight updates are paused via
         # scheduler.checkpoint_ready during eval to ensure consistent weights.
         # Each eval env has its own interval, so we check each independently.
@@ -463,8 +470,12 @@ async def orchestrate(config: OrchestratorConfig):
             env_names = ", ".join(e.name for e in envs_to_eval)
             logger.info(f"Running evals at {ckpt_step=} for {env_names}")
 
-            # Pause weight updates and re-scheduling of training rollouts during eval
-            # to avoid evaluating across different checkpoints and avoid congestion
+            # Pause policy-update polling during eval so a newly saved trainer
+            # checkpoint cannot swap weights mid-evaluation.
+            await scheduler.pause_policy_updates()
+
+            # Pause re-scheduling of training rollouts during eval to avoid
+            # congestion.
             scheduler.checkpoint_ready.clear()
 
             # For heavy eval workloads, it might be necessary additionally cancel in-flight training rollouts
@@ -480,6 +491,7 @@ async def orchestrate(config: OrchestratorConfig):
                         ckpt_step=ckpt_step,
                         step=progress.step,
                         cache_salt=str(ckpt_step),
+                        eval_clients=inference_pool.eval_clients,
                     )
                     for eval_env in envs_to_eval
                 ]
@@ -905,6 +917,7 @@ async def orchestrate(config: OrchestratorConfig):
                     ckpt_step=ckpt_step,
                     step=progress.step,
                     cache_salt=str(ckpt_step),
+                    eval_clients=inference_pool.eval_clients,
                 )
                 for eval_env in eval_envs
             ]

@@ -1,4 +1,4 @@
-max_steps = 25
+max_steps = 100
 max_async_level = 1
 seq_len = 16384
 output_dir = "outputs/omni_math2_rlvr_canary/dppo_kl_token_maxrl"
@@ -13,17 +13,23 @@ name = "allenai/Olmo-3-7B-Instruct-DPO"
 type = "nccl"
 
 [deployment]
-type = "single_node"
+type = "gpu_layout"
 gpus_per_node = 4
-num_train_gpus = 2
-num_infer_gpus = 2
+inference_port_start = 8000
+
+[[deployment.nodes]]
+inference = [0, 1, 2, 3]
+
+[[deployment.nodes]]
+inference = [0, 1]
+trainer = [2, 3]
 
 [wandb]
 project = "omni-math2-rlvr"
 name = "olmo3-dpo-canary-dppo-kl-token-maxrl"
 
 [ckpt]
-interval = 8
+interval = 10
 keep_last = 2
 
 [trainer]
@@ -31,6 +37,10 @@ pack_samples = true
 
 [trainer.model]
 impl = "custom"
+seq_len = 18432
+dp_replicate = 1
+cp = 1
+ep = 1
 attn = "flash_attention_3"
 optimization_dtype = "bfloat16"
 reduce_dtype = "bfloat16"
@@ -42,7 +52,7 @@ freq = 2
 
 [trainer.optim]
 type = "adamw"
-lr = 5e-7
+lr = 1e-6
 weight_decay = 0.0
 max_norm = 1.0
 betas1 = 0.9
@@ -57,10 +67,10 @@ teacher_tau = 0.0
 kl_tau = 0.005
 
 [orchestrator]
-token_batch_size = 262144
-max_inflight_rollouts = 192
+token_batch_size = 524288
+max_inflight_rollouts = 768
 rollouts_per_example = 8
-max_off_policy_steps = 4
+max_off_policy_steps = 8
 
 [orchestrator.advantage]
 type = "custom"
@@ -69,8 +79,11 @@ import_path = "prime_rl.orchestrator.advantage.maxrl_advantage_fn"
 [orchestrator.advantage.kwargs]
 eps = 1e-8
 
+[orchestrator.train]
+num_workers = 2
+
 [orchestrator.train.sampling]
-temperature = 0.6
+temperature = 1.0
 top_p = 0.95
 max_completion_tokens = 15360
 
@@ -81,17 +94,17 @@ args = { dataset_name = "json", data_files = "benchmarks/datasets/omni_math2/omn
 
 [orchestrator.buffer]
 easy_threshold = 1.0
-hard_threshold = 0.0
 online_difficulty_filtering = true
 seed = 42
 
 [orchestrator.eval]
-interval = 8
+interval = 10
 num_examples = 100
+seed = 42
 rollouts_per_example = 8
-num_workers = 64
+num_workers = 128
 eval_base_model = false
-cancel_inflight_rollouts_on_eval = true
+cancel_inflight_rollouts_on_eval = false
 
 [orchestrator.eval.sampling]
 temperature = 0.6
@@ -107,6 +120,7 @@ args = { dataset_name = "json", data_files = "benchmarks/datasets/omni_math2/omn
 
 [inference]
 gpu_memory_utilization = 0.93
+enable_expert_parallel = false
 vllm_extra = { max_num_seqs = 192, max_num_batched_tokens = 131072, performance_mode = "throughput", generation_config = "vllm" }
 
 [inference.model]
@@ -115,4 +129,4 @@ enforce_eager = false
 
 [inference.parallel]
 tp = 1
-dp = 2
+dp = 1

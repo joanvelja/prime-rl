@@ -643,6 +643,10 @@ class DefaultLossConfig(BaseModel):
     adv_tau: Annotated[float, Field(ge=0, description="The tau for advantages.")] = 1.0
     teacher_tau: Annotated[float, Field(ge=0, description="The tau for teacher logprobs.")] = 0.0
     kl_tau: Annotated[float, Field(ge=0, description="The tau for KL divergence.")] = 1e-3
+    importance_ratio_clip: Annotated[
+        float | None,
+        Field(gt=0, description="Optional upper clip for importance ratios exp(trainer_logprob - inference_logprob)."),
+    ] = None
 
 
 class SFTLossConfig(BaseModel):
