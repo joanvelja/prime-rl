@@ -43,6 +43,13 @@ def _maybe_mean(values: list[float]) -> float | None:
     return mean(values) if values else None
 
 
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _step_from_dir(path: Path) -> int | None:
     match = STEP_RE.fullmatch(path.name)
     return int(match.group(1)) if match else None
@@ -75,15 +82,43 @@ def summarize_train_rollouts(run_root: Path, steps: set[int] | None) -> list[dic
         ]
         sidecar = step_dir / "train_filter_metrics.json"
         sidecar_metrics = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+        reward_unconditioned = _first_not_none(
+            sidecar_metrics.get("train_batch_refill/reward_unconditioned_on_filtering/mean"),
+            sidecar_metrics.get("train_batch/reward_unconditioned_on_filtering/mean"),
+            _maybe_mean(rewards),
+        )
+        reward_conditioned = _first_not_none(
+            sidecar_metrics.get("train_batch_refill/reward_conditioned_on_filtering/mean"),
+            sidecar_metrics.get("train_batch/reward_conditioned_on_filtering/mean"),
+            _maybe_mean(accepted),
+        )
+        reward_filtered = _first_not_none(
+            sidecar_metrics.get("train_batch_refill/reward_filtered_out/mean"),
+            sidecar_metrics.get("train_batch/reward_filtered_out/mean"),
+            _maybe_mean(filtered),
+        )
+        candidate_rollouts = sidecar_metrics.get("train_batch_refill/candidate_rollouts")
+        accepted_sidecar = sidecar_metrics.get("train_batch_refill/accepted_rollouts")
+        filtered_sidecar = (
+            candidate_rollouts - accepted_sidecar
+            if candidate_rollouts is not None and accepted_sidecar is not None
+            else None
+        )
         rows.append(
             {
                 "step": step,
-                "rollouts": len(rollouts),
-                "accepted_rollouts": len(accepted),
-                "filtered_rollouts": len(filtered),
-                "reward_unconditioned_on_filtering": _maybe_mean(rewards),
-                "reward_conditioned_on_filtering": _maybe_mean(accepted),
-                "reward_filtered_out": _maybe_mean(filtered),
+                "rollouts": candidate_rollouts if candidate_rollouts is not None else len(rollouts),
+                "accepted_rollouts": accepted_sidecar if accepted_sidecar is not None else len(accepted),
+                "filtered_rollouts": filtered_sidecar if filtered_sidecar is not None else len(filtered),
+                "reward_unconditioned_on_filtering": reward_unconditioned,
+                "reward_conditioned_on_filtering": reward_conditioned,
+                "reward_filtered_out": reward_filtered,
+                "refill_rounds": sidecar_metrics.get("train_batch_refill/refill_rounds"),
+                "candidate_groups": sidecar_metrics.get("train_batch_refill/candidate_groups"),
+                "accepted_groups": sidecar_metrics.get("train_batch_refill/accepted_groups"),
+                "prompts_consumed_per_accepted_group": sidecar_metrics.get(
+                    "train_batch_refill/prompts_consumed_per_accepted_group"
+                ),
                 "metrics_sidecar": sidecar_metrics,
             }
         )
