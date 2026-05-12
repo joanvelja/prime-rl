@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-var")
     parser.add_argument("--client-type")
     parser.add_argument("--api-profile")
+    parser.add_argument("--progress", choices=["auto", "none"])
     parser.add_argument("--num-examples", type=int)
     parser.add_argument("--record-ids", nargs="+")
     parser.add_argument("--rollouts-per-example", type=int)
@@ -71,6 +72,7 @@ def _apply_overrides(config: BaselineConfig, args: argparse.Namespace) -> Baseli
         "api_key_var",
         "client_type",
         "api_profile",
+        "progress",
         "num_examples",
         "record_ids",
         "rollouts_per_example",

@@ -8,7 +8,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from prime_rl.baselines.config import BaselineConfig
 from prime_rl.baselines.metrics import summarize_records
@@ -33,6 +33,7 @@ VLLM_EXTRA_BODY_KEYS = frozenset(
         "bad_words",
     }
 )
+ProgressCallback = Callable[[str, int], None]
 
 
 def _module_name(env_id: str) -> str:
@@ -173,6 +174,7 @@ async def _run_rollouts(
     env: Any,
     endpoint: Endpoint,
     sampling: dict[str, Any],
+    progress_callback: ProgressCallback | None = None,
 ) -> list[tuple[int, Any]]:
     import verifiers as vf
     from verifiers.clients import resolve_client
@@ -187,12 +189,21 @@ async def _run_rollouts(
     resolved_client = resolve_client(client)
     total_rollouts = len(examples) * config.rollouts_per_example
     decoupled = not requires_group and getattr(env, "env_client", None) is None
+    progress_enabled = config.progress != "none"
     generation_pbar = (
-        ProgressTracker(total=total_rollouts, desc="Baseline generations", position=0) if decoupled else None
+        ProgressTracker(total=total_rollouts, desc="Baseline generations", position=0)
+        if decoupled and progress_enabled
+        else None
     )
-    scoring_pbar = ProgressTracker(total=total_rollouts, desc="Baseline scoring", position=1) if decoupled else None
+    scoring_pbar = (
+        ProgressTracker(total=total_rollouts, desc="Baseline scoring", position=1)
+        if decoupled and progress_enabled
+        else None
+    )
     rollout_pbar = (
-        ProgressTracker(total=total_rollouts, desc="Baseline rollouts", position=0) if not decoupled else None
+        ProgressTracker(total=total_rollouts, desc="Baseline rollouts", position=0)
+        if not decoupled and progress_enabled
+        else None
     )
 
     async def run_one_decoupled(example: dict[str, Any], trial_index: int) -> tuple[int, Any]:
@@ -208,6 +219,8 @@ async def _run_rollouts(
                 )
             if generation_pbar is not None:
                 generation_pbar.update(1)
+            if progress_callback is not None:
+                progress_callback("generated", 1)
 
             async with scoring_semaphore:
                 if env.score_rollouts:
@@ -217,6 +230,8 @@ async def _run_rollouts(
                 await env.rubric.cleanup(state)
             if scoring_pbar is not None:
                 scoring_pbar.update(1)
+            if progress_callback is not None:
+                progress_callback("scored", 1)
 
             return state
 
@@ -235,6 +250,8 @@ async def _run_rollouts(
             )
         if rollout_pbar is not None:
             rollout_pbar.update(1)
+        if progress_callback is not None:
+            progress_callback("rollout", 1)
         return trial_index, output
 
     async def run_group(example: dict[str, Any]) -> list[tuple[int, Any]]:
@@ -249,6 +266,8 @@ async def _run_rollouts(
             )
         if rollout_pbar is not None:
             rollout_pbar.update(len(outputs))
+        if progress_callback is not None:
+            progress_callback("rollout", len(outputs))
         return list(enumerate(outputs))
 
     try:
@@ -321,7 +340,7 @@ def _question_rows(records: list[dict[str, Any]], config: BaselineConfig) -> lis
     return rows
 
 
-def run_baseline(config: BaselineConfig) -> dict[str, Any]:
+def run_baseline(config: BaselineConfig, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
     prepare_import_paths(config)
     import verifiers as vf
 
@@ -336,7 +355,7 @@ def run_baseline(config: BaselineConfig) -> dict[str, Any]:
     env = vf.load_environment(config.env_id, **env_args)
     sampling = _sampling_args(config)
     with InferenceProvisioner(config) as endpoint:
-        outputs = asyncio.run(_run_rollouts(config, env, endpoint, sampling))
+        outputs = asyncio.run(_run_rollouts(config, env, endpoint, sampling, progress_callback=progress_callback))
     elapsed_s = time.perf_counter() - t0
 
     records = [

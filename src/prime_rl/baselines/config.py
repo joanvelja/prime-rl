@@ -9,6 +9,7 @@ from typing import Any, Literal
 from prime_rl.baselines.metrics import DEFAULT_KS
 
 LaunchMode = Literal["external", "local", "srun", "srun_multinode"]
+ProgressMode = Literal["auto", "none"]
 
 
 @dataclass
@@ -66,6 +67,7 @@ class BaselineConfig:
     api_key_var: str = "VLLM_API_KEY"
     client_type: str = "openai_chat_completions"
     api_profile: str | None = None
+    progress: ProgressMode = "auto"
     verifiers_path: Path | None = None
     env_paths: list[Path] = field(default_factory=list)
     launch: LaunchConfig = field(default_factory=LaunchConfig)
@@ -166,6 +168,7 @@ def load_config(path: Path) -> BaselineConfig:
         api_key_var=raw.get("api_key_var", "VLLM_API_KEY"),
         client_type=raw.get("client_type", "openai_chat_completions"),
         api_profile=raw.get("api_profile"),
+        progress=raw.get("progress", "auto"),
         verifiers_path=Path(raw["verifiers_path"]) if raw.get("verifiers_path") else None,
         env_paths=env_paths,
         launch=_coerce_launch(dict(raw.get("launch", {}))),
