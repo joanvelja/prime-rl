@@ -3918,3 +3918,35 @@ Updated launch plan for 8 nodes:
 - Current jobs are still using the old `64` cap because their launch arguments
   are fixed. At `12:43 UTC`, aggregate target rows were `5669`; no summaries
   had landed yet.
+
+2026-05-13 12:57 UTC resumable offline-eval restart:
+
+- Implemented partial-resume for baseline evals. `raw_rollouts.partial.jsonl`
+  is now read on restart and keyed by `(example_id, trial_index)`; completed
+  decoupled rollouts are skipped, truncated/corrupt final lines are ignored,
+  and final artifacts are written from merged resumed+new outputs.
+- `resume_partial` defaults to `true`; set `resume_partial = false` in baseline
+  TOML or pass `baseline-eval --no-resume-partial` to force a fresh run.
+  Offline checkpoint eval disables resume only when `--force` is used.
+- Verified:
+  - `uv run --no-sync ruff check src/prime_rl/baselines/config.py src/prime_rl/baselines/cli.py src/prime_rl/baselines/runner.py scripts/evals/offline_omni_math2_ckpt_eval.py tests/unit/baselines/test_config.py tests/unit/baselines/test_runner.py`
+  - `uv run --no-sync pytest tests/unit/baselines/test_config.py tests/unit/baselines/test_runner.py tests/unit/test_offline_omni_math2_ckpt_eval.py`
+- Cancelled the eight slow old-cap jobs:
+  `4585069`, `4585071`, `4585073`, `4585994`, `4586007`, `4586008`,
+  `4586009`, `4586010`.
+- Preserved partial rows at cancellation:
+  - `1e-6`: step25 `641`, step50 `1431`, step75 `474`, step85 `628`.
+  - `3e-6`: step25 `628`, step50 `1287`, step75 `694`, step100 `1500`.
+  - Total preserved: `7283 / 38400` raw rollouts.
+- Resubmitted same output directories with `OFFLINE_EVAL_MAX_CONCURRENCY=256`:
+  - `4586973`: `1e-6` step `25`.
+  - `4586972`: `1e-6` step `50`.
+  - `4586969`: `1e-6` step `75`.
+  - `4586971`: `1e-6` step `85`.
+  - `4586974`: `3e-6` step `25`.
+  - `4586970`: `3e-6` step `50`.
+  - `4586976`: `3e-6` step `75`.
+  - `4586975`: `3e-6` step `100`.
+- At submit time all replacements were pending on priority. Monitor is now a
+  detached host process PID `132730`, tracking old + replacement jobs at:
+  `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.

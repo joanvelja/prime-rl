@@ -804,3 +804,36 @@ across hosts summed to exactly `64`, with `0` waiting; sampled KV usage on a
 backend was only about `0.05-0.08`, and preemptions were `0`. The canonical
 launcher default was patched from `64` to `256` for future `offline-eval`
 launches. Current jobs keep the old cap because they already launched.
+
+At `2026-05-13 12:57 UTC`, the old `64`-concurrency eval jobs were cancelled
+and replaced after adding resumable partial support to the baseline runner.
+Preserved partial rollout rows:
+
+```text
+1e-6 step25:    641
+1e-6 step50:   1431
+1e-6 step75:    474
+1e-6 step85:    628
+3e-6 step25:    628
+3e-6 step50:   1287
+3e-6 step75:    694
+3e-6 step100:  1500
+```
+
+Replacement jobs, all submitted with `OFFLINE_EVAL_MAX_CONCURRENCY=256` into
+the same output directories:
+
+```text
+4586973 -> 1e-6 step25
+4586972 -> 1e-6 step50
+4586969 -> 1e-6 step75
+4586971 -> 1e-6 step85
+4586974 -> 3e-6 step25
+4586970 -> 3e-6 step50
+4586976 -> 3e-6 step75
+4586975 -> 3e-6 step100
+```
+
+At submit time these replacements were pending on priority. The monitor process
+is PID `132730` and status is still written to
+`outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.

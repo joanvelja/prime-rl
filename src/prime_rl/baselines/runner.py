@@ -8,7 +8,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 
 from prime_rl.baselines.config import BaselineConfig
 from prime_rl.baselines.metrics import summarize_records
@@ -34,6 +34,7 @@ VLLM_EXTRA_BODY_KEYS = frozenset(
     }
 )
 ProgressCallback = Callable[[str, int], None]
+RolloutKey: TypeAlias = tuple[str, int]
 
 
 def _module_name(env_id: str) -> str:
@@ -153,6 +154,64 @@ def _example_id(example: dict[str, Any]) -> str:
     return str(example.get("example_id", example.get("id")))
 
 
+def _expected_rollout_keys(examples: Sequence[dict[str, Any]], rollouts_per_example: int) -> set[RolloutKey]:
+    return {
+        (_example_id(example), trial_index)
+        for example in examples
+        for trial_index in range(rollouts_per_example)
+    }
+
+
+def _rollout_key(trial_index: int, output: Any) -> RolloutKey | None:
+    if not isinstance(output, dict):
+        return None
+    example_id = output.get("example_id")
+    if example_id is None:
+        return None
+    return (str(example_id), int(trial_index))
+
+
+def _read_partial_outputs(path: Path, expected_keys: set[RolloutKey]) -> dict[RolloutKey, tuple[int, Any]]:
+    if not path.exists():
+        return {}
+
+    outputs: dict[RolloutKey, tuple[int, Any]] = {}
+    with path.open() as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                trial_index = int(row["trial_index"])
+                output = row["output"]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            key = _rollout_key(trial_index, output)
+            if key in expected_keys:
+                outputs[key] = (trial_index, output)
+    return outputs
+
+
+def _merge_rollout_outputs(
+    *,
+    expected_keys: set[RolloutKey],
+    existing_outputs: Sequence[tuple[int, Any]],
+    new_outputs: Sequence[tuple[int, Any]],
+) -> list[tuple[int, Any]]:
+    merged: dict[RolloutKey, tuple[int, Any]] = {}
+    for trial_index, output in (*existing_outputs, *new_outputs):
+        key = _rollout_key(trial_index, output)
+        if key in expected_keys:
+            merged[key] = (trial_index, output)
+
+    missing = sorted(expected_keys - set(merged))
+    if missing:
+        preview = ", ".join(f"{example_id}:{trial_index}" for example_id, trial_index in missing[:10])
+        raise RuntimeError(f"Missing {len(missing)} baseline rollout(s) after generation; first missing: {preview}")
+
+    return [merged[key] for key in sorted(expected_keys)]
+
+
 def _eval_examples(config: BaselineConfig, env: Any) -> list[dict[str, Any]]:
     if not config.record_ids:
         return env.get_eval_dataset(n=config.num_examples, seed=config.seed).to_list()
@@ -182,39 +241,62 @@ async def _run_rollouts(
     from verifiers.utils.save_utils import make_serializable, state_to_output
 
     examples = _eval_examples(config, env)
+    expected_keys = _expected_rollout_keys(examples, config.rollouts_per_example)
+    partial_path = config.output_dir / "raw_rollouts.partial.jsonl"
+    resumed_outputs = _read_partial_outputs(partial_path, expected_keys) if config.resume_partial else {}
+    if resumed_outputs:
+        print(
+            f"resuming {len(resumed_outputs)}/{len(expected_keys)} completed baseline rollouts "
+            f"from {partial_path}",
+            flush=True,
+        )
     client = _make_client_config(config, endpoint, config.max_concurrency)
     generation_semaphore = asyncio.Semaphore(config.max_concurrency)
     scoring_semaphore = asyncio.Semaphore(config.score_max_concurrency or config.max_concurrency)
     requires_group = _requires_group_scoring(env)
     resolved_client = resolve_client(client)
-    total_rollouts = len(examples) * config.rollouts_per_example
+    if requires_group:
+        examples_to_run = [
+            example
+            for example in examples
+            if any(
+                (_example_id(example), trial_index) not in resumed_outputs
+                for trial_index in range(config.rollouts_per_example)
+            )
+        ]
+        total_rollouts = len(examples_to_run) * config.rollouts_per_example
+    else:
+        rollout_tasks = [
+            (example, trial_index)
+            for example in examples
+            for trial_index in range(config.rollouts_per_example)
+            if (_example_id(example), trial_index) not in resumed_outputs
+        ]
+        total_rollouts = len(rollout_tasks)
     decoupled = not requires_group and getattr(env, "env_client", None) is None
     progress_enabled = config.progress != "none"
     generation_pbar = (
         ProgressTracker(total=total_rollouts, desc="Baseline generations", position=0)
-        if decoupled and progress_enabled
+        if decoupled and progress_enabled and total_rollouts
         else None
     )
     scoring_pbar = (
         ProgressTracker(total=total_rollouts, desc="Baseline scoring", position=1)
-        if decoupled and progress_enabled
+        if decoupled and progress_enabled and total_rollouts
         else None
     )
     rollout_pbar = (
         ProgressTracker(total=total_rollouts, desc="Baseline rollouts", position=0)
-        if not decoupled and progress_enabled
+        if not decoupled and progress_enabled and total_rollouts
         else None
     )
 
-    # Streaming partial writer: append each completed (trial_index, output) tuple
-    # to raw_rollouts.partial.jsonl. On crash, the partial holds everything that
-    # made it through scoring. Final run_baseline write overwrites the canonical
-    # raw_rollouts.jsonl + records.jsonl from the in-memory gather result and
-    # unlinks the partial; the partial is only the salvage path.
-    partial_path = config.output_dir / "raw_rollouts.partial.jsonl"
+    # Streaming partial writer: append each completed (trial_index, output) tuple.
+    # On restart, completed (example_id, trial_index) keys are reused and skipped.
     partial_path.parent.mkdir(parents=True, exist_ok=True)
-    partial_path.unlink(missing_ok=True)
-    partial_fh = open(partial_path, "w", buffering=1)
+    if not config.resume_partial:
+        partial_path.unlink(missing_ok=True)
+    partial_fh = open(partial_path, "a" if config.resume_partial else "w", buffering=1)
     partial_lock = asyncio.Lock()
 
     async def _append_partial(trial_index: int, output: Any) -> None:
@@ -293,15 +375,30 @@ async def _run_rollouts(
         return indexed
 
     try:
+        if total_rollouts == 0:
+            return _merge_rollout_outputs(
+                expected_keys=expected_keys,
+                existing_outputs=list(resumed_outputs.values()),
+                new_outputs=[],
+            )
+
         if requires_group:
-            grouped = await asyncio.gather(*(run_group(example) for example in examples))
-            return [item for group in grouped for item in group]
+            grouped = await asyncio.gather(*(run_group(example) for example in examples_to_run))
+            new_outputs = [item for group in grouped for item in group]
+            return _merge_rollout_outputs(
+                expected_keys=expected_keys,
+                existing_outputs=list(resumed_outputs.values()),
+                new_outputs=new_outputs,
+            )
 
         run_one = run_one_coupled if getattr(env, "env_client", None) is not None else run_one_decoupled
-        tasks = [
-            run_one(example, trial_index) for example in examples for trial_index in range(config.rollouts_per_example)
-        ]
-        return list(await asyncio.gather(*tasks))
+        tasks = [run_one(example, trial_index) for example, trial_index in rollout_tasks]
+        new_outputs = list(await asyncio.gather(*tasks))
+        return _merge_rollout_outputs(
+            expected_keys=expected_keys,
+            existing_outputs=list(resumed_outputs.values()),
+            new_outputs=new_outputs,
+        )
     finally:
         partial_fh.close()
         for pbar in (generation_pbar, scoring_pbar, rollout_pbar):

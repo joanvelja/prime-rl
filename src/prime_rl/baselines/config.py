@@ -60,6 +60,7 @@ class BaselineConfig:
     max_concurrency: int = 32
     score_max_concurrency: int | None = None
     max_retries: int = 0
+    resume_partial: bool = True
     fail_on_error: bool = True
     success_threshold: float = 1.0
     ks: tuple[int, ...] = DEFAULT_KS
@@ -162,6 +163,7 @@ def load_config(path: Path) -> BaselineConfig:
             else None
         ),
         max_retries=int(raw.get("max_retries", 0)),
+        resume_partial=bool(raw.get("resume_partial", True)),
         fail_on_error=bool(raw.get("fail_on_error", True)),
         success_threshold=float(raw.get("success_threshold", 1.0)),
         ks=tuple(int(k) for k in raw.get("ks", DEFAULT_KS)),

@@ -3352,3 +3352,60 @@ uv run --no-sync pytest tests/unit/test_launch_entrypoint.py \
 
 Current jobs are still running with the old `64` cap because launch arguments
 are fixed at job start. At `12:43 UTC`, aggregate target rows were `5669`.
+
+Follow-up at `12:57 UTC`: made offline eval restarts partial-resumable instead
+of treating `raw_rollouts.partial.jsonl` as salvage-only. The baseline runner
+now reads existing partial rows keyed by `(example_id, trial_index)`, skips
+completed decoupled rollouts on restart, tolerates a truncated final partial
+line, and writes final canonical artifacts from the merged resumed+new outputs.
+Group-scored envs only skip fully completed groups so group-dependent rewards
+are not mixed with partial groups. `resume_partial` defaults to `true`, can be
+disabled in TOML or with `baseline-eval --no-resume-partial`, and offline eval
+sets `resume_partial=false` only when `--force` is used.
+
+Verified:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/baselines/config.py \
+  src/prime_rl/baselines/cli.py src/prime_rl/baselines/runner.py \
+  scripts/evals/offline_omni_math2_ckpt_eval.py \
+  tests/unit/baselines/test_config.py tests/unit/baselines/test_runner.py
+uv run --no-sync pytest tests/unit/baselines/test_config.py \
+  tests/unit/baselines/test_runner.py \
+  tests/unit/test_offline_omni_math2_ckpt_eval.py
+```
+
+Cancelled the eight slow `--max-concurrency 64` jobs after preserving partials:
+`4585069`, `4585071`, `4585073`, `4585994`, `4586007`, `4586008`, `4586009`,
+`4586010`. Partial rows preserved at cancellation:
+
+```text
+1e-6 step25:    641
+1e-6 step50:   1431
+1e-6 step75:    474
+1e-6 step85:    628
+3e-6 step25:    628
+3e-6 step50:   1287
+3e-6 step75:    694
+3e-6 step100:  1500
+total:         7283 / 38400
+```
+
+Resubmitted the same output directories with `OFFLINE_EVAL_MAX_CONCURRENCY=256`
+so the patched runner can resume from those partials:
+
+| arm | checkpoint | old job | replacement job | output dir |
+|---|---:|---:|---:|---|
+| `1e-6` refill | 25 | `4586007` | `4586973` | `offline_eval_600x8_8node_router_step25_retry2` |
+| `1e-6` refill | 50 | `4585069` | `4586972` | `offline_eval_600x8_8node_router_step50` |
+| `1e-6` refill | 75 | `4586010` | `4586969` | `offline_eval_600x8_8node_router_step75_retry2` |
+| `1e-6` refill | 85 | `4585994` | `4586971` | `offline_eval_600x8_8node_router_step85_retry1` |
+| `3e-6` refill | 25 | `4586008` | `4586974` | `offline_eval_600x8_8node_router_step25_retry2` |
+| `3e-6` refill | 50 | `4585073` | `4586970` | `offline_eval_600x8_8node_router_step50` |
+| `3e-6` refill | 75 | `4586009` | `4586976` | `offline_eval_600x8_8node_router_step75_retry2` |
+| `3e-6` refill | 100 | `4585071` | `4586975` | `offline_eval_600x8_8node_router_step100` |
+
+At submit time the replacement jobs were pending on priority. The monitor was
+restarted outside the sandbox as PID `132730` and now tracks old cancelled jobs
+plus replacements in
+`outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
