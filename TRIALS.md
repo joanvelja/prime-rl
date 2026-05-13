@@ -40,7 +40,7 @@ testing a higher-group-size quality signal.
   `enable_fp32_lm_head=true`, dataset
   `joanvelja/omni-math2-olmo3-perfectible-seed42`, `lr=3e-6`,
   `batch_size=512`, `rollouts_per_example=16`,
-  `max_inflight_rollouts=1536`.
+  `max_inflight_rollouts=1024`.
 - Retained DAPO-like refill/filtering:
   `candidate_groups_per_round=32`, `max_candidate_groups=128`,
   `easy_threshold=1.0`, no `hard_threshold`,
@@ -54,13 +54,13 @@ testing a higher-group-size quality signal.
   `uv run --no-sync pytest tests/unit/test_configs.py::test_inference_fp32_lm_head_threads_through_vllm_additional_config`
   -> `1 passed`.
 - Direct RL dry-run passed:
-  `/tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135`.
+  `/tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1208`.
 - Canonical launcher dry-run passed:
-  `/tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1137`.
+  `/tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1208`.
 - `bash -n` passed for the generated direct dry-run `rl.sbatch`.
 - Resolved config confirmed `trainer.lr=3e-06`,
   `inference.enable_fp32_lm_head=true`, `batch_size=512`,
-  `max_inflight_rollouts=1536`, `rollouts_per_example=16`,
+  `max_inflight_rollouts=1024`, `rollouts_per_example=16`,
   dataset `joanvelja/omni-math2-olmo3-perfectible-seed42`,
   `easy_threshold=1.0`, no `hard_threshold`,
   `online_difficulty_filtering=true`, `candidate_groups_per_round=32`, and
@@ -3135,3 +3135,93 @@ Resubmitted the eight one-checkpoint routed evals:
 At the follow-up check, `4585067`, `4585068`, and `4585069` were running. Their
 server logs showed remote cleanup completion, vLLM router startup, 8 backend
 hosts, and `nccl_net=AWS Libfabric`; this clears the self-kill failure mode.
+
+### 2026-05-13 11:50 UTC - Corrected invalid 1e-6 final step
+
+The `1e-6` step-split retry exposed a second issue:
+
+- `4585067` (`1e-6`, requested step `100`) reached router/backend readiness
+  but failed with `No matching stable weight checkpoints found`; this is
+  expected because the `1e-6` run stopped at step `85`, not step `100`.
+- `4585068` (`1e-6`, requested step `25`) also reached readiness and then
+  failed with the same discovery error, even though the step `25` broadcast dir
+  now has `STABLE` and all three safetensor shards. Local verifier:
+  `_discover_weight_steps(..., steps={25})` returns step `25`; this looks like
+  a transient filesystem visibility issue from the compute-side run, so it was
+  retried.
+- `4585069` (`1e-6`, step `50`) reached pause/update/resume and began writing
+  partial rollouts under
+  `offline_eval_600x8_8node_router_step50/refill_lr1e6_28i4t/step_000050/`.
+- `4585070` (`1e-6`, step `75`) remained pending/running and is valid.
+
+Actual stable `1e-6` broadcast steps at this point:
+
+```text
+25 50 75 81 82 83 84 85
+```
+
+Submitted replacements:
+
+- `4585323`: `1e-6` step `25` retry,
+  `offline_eval_600x8_8node_router_step25_retry1`.
+- `4585324`: `1e-6` final step `85`,
+  `offline_eval_600x8_8node_router_step85`.
+
+Updated the persistent monitor to track:
+
+```text
+4585067 4585068 4585069 4585070 4585071 4585072 4585073 4585074 4585323 4585324
+```
+
+### 2026-05-13 12:07 UTC - Added checkpoint preflight and retried broken split evals
+
+The step-split routed evals exposed two more failure modes:
+
+- `4585070` (`1e-6`, step `75`) failed after vLLM/router readiness with
+  `No matching stable weight checkpoints found`, despite local checkpoint
+  discovery seeing the step `75` broadcast.
+- `4585072` (`3e-6`, step `25`) failed the same way.
+- `4585074` (`3e-6`, step `75`) was stuck in endpoint readiness after one
+  backend node (`nid010501`, `node_7.log`) hit a vLLM engine-core
+  initialization failure. It was cancelled rather than allowed to burn an
+  8-node allocation.
+
+Patched `src/prime_rl/entrypoints/launch.py` so generated offline-eval sbatch
+scripts preflight requested checkpoint directories before starting vLLM. For
+`--steps`, the script now checks `step_N/{STABLE,model.safetensors.index.json
+or *.safetensors}` and prints available checkpoint markers before exiting.
+
+Verified:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/entrypoints/launch.py \
+  tests/unit/test_launch_entrypoint.py
+uv run --no-sync pytest tests/unit/test_launch_entrypoint.py
+```
+
+Submitted clean retries through the canonical launch entrypoint:
+
+- `4585649`: `1e-6` step `75`,
+  `offline_eval_600x8_8node_router_step75_retry1`.
+- `4585647`: `3e-6` step `25`,
+  `offline_eval_600x8_8node_router_step25_retry1`.
+- `4585648`: `3e-6` step `75`,
+  `offline_eval_600x8_8node_router_step75_retry1`.
+
+The persistent monitor was replaced and now runs outside the sandbox:
+
+```text
+pid: 24242
+script: outputs/omni_math2_rlvr_canary/monitors/postrun_eval_monitor_20260513_stepsplit.sh
+status: outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md
+```
+
+At the `12:07 UTC` refresh, active evals were `4585069`, `4585071`, `4585073`,
+`4585323`, `4585324`, and `4585647`; `4585648` and `4585649` were queued.
+Partial rollout rows at that refresh:
+
+```text
+1e-6 step50: 429
+3e-6 step100: 289
+3e-6 step50: 230
+```
