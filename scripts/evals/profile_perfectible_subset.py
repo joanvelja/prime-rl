@@ -446,7 +446,8 @@ def main() -> int:
     ax.set_xlabel("difficulty (omni-math 1-10 scale, jittered ±0.1)")
     ax.set_ylabel("per-problem solve rate")
     ax.set_title(f"Solve rate vs problem difficulty (selected {len(sel_rate_for_diff)} problems)")
-    ax.axhspan(args.low, args.high, color="#2ca02c", alpha=0.08, zorder=0)
+    ax.axhspan(args.low, args.high, color="#2ca02c", alpha=0.16, zorder=0, label=f"selected band [{args.low:.1f}, {args.high:.1f}]")
+    ax.legend(loc="lower left")
     fig.savefig(plots / "solve_rate_vs_difficulty.png")
     plt.close(fig)
 
@@ -544,12 +545,61 @@ def main() -> int:
     readme.append("![tokens_and_truncation](plots/tokens_and_truncation.png)\n\n")
 
     readme.append("## Judge-fallback rate\n\n")
+    near_one = sum(1 for r in sel_judge_rate if r >= 0.95)
     readme.append(
         f"Fraction of rollouts where `math_verify` was ambiguous and the LLM judge (`gpt-5.4-mini`) had to be invoked. "
-        f"Mean {mean(sel_judge_rate):.3f}, median {median(sel_judge_rate):.3f} — the modal scoring path on this subset. "
-        "High judge rate → answers in symbolic forms that don't reduce cleanly.\n\n"
+        f"Mean {mean(sel_judge_rate):.3f}, median {median(sel_judge_rate):.3f}. "
+        "**Distribution is bimodal**: a central cluster around 0.5-0.6 (math_verify resolves ~half the rollouts cleanly), "
+        f"plus a spike at ≈1.0 ({near_one} problems with judge rate ≥ 0.95) — these are problems whose canonical answer "
+        "is in a form SymPy almost never simplifies (nested radicals, unsimplified piecewise expressions, "
+        "named constants). Worth flagging because the judge is the modal scoring path and dominates eval compute "
+        f"cost — at ~{mean(sel_judge_rate):.0%} judge rate across 40 rollouts × 340 problems × {pass_ks[-1]} samples = "
+        f"≈{int(mean(sel_judge_rate) * 340 * 40):,} judge API calls per full evaluation.\n\n"
     )
     readme.append("![judge_rate](plots/judge_rate.png)\n\n")
+
+    # Caveats section
+    hmmt_count = sum(c for s, c in sel_sources.items() if s.startswith("HMMT"))
+    top_domain_pct = (
+        max(sel_domains.values()) * 100 / len(selected) if sel_domains and selected else 0
+    )
+    readme.append("## Coverage caveats\n\n")
+    readme.append(
+        "Things to know before using this dataset as a generic math-reasoning benchmark "
+        "(it is fit for purpose as a *diagnostic* subset for THIS model + recipe, not as a "
+        "balanced benchmark in general):\n\n"
+    )
+    readme.append(
+        f"- **Heavy competition skew toward HMMT** — {hmmt_count}/{len(selected)} = "
+        f"{hmmt_count * 100 / len(selected):.0f}% of the selected problems come from "
+        "Harvard-MIT Math Tournament (HMMT_2 + HMMT_11 combined). This reflects the "
+        "underlying omni-math2 distribution, not a sampling artifact, but worth knowing "
+        "if you generalize results.\n"
+    )
+    readme.append(
+        f"- **Algebra-heavy domain mix** — {Counter(sel_domains).most_common(1)[0][1]} of "
+        f"{len(selected)} = {top_domain_pct:.0f}% of selected problems are Algebra. "
+        "Geometry / Number Theory / Discrete Math each contribute 15-20%; "
+        "Calculus barely appears.\n"
+    )
+    readme.append(
+        "- **Annotated difficulty is only weakly predictive** of OLMo3-7B-Instruct-DPO's "
+        "actual solve rate (see `solve_rate_vs_difficulty.png`). Problems labeled "
+        "difficulty 4-6 span the full [0.2, 0.8] band; problems labeled 7-9 are not "
+        "consistently harder for this model. Selection by *observed* solve rate is the "
+        "more reliable difficulty signal.\n"
+    )
+    readme.append(
+        f"- **Length-truncation tail is non-trivial** — {sum(1 for r in sel_trunc_rate if r > 0.1):d} "
+        f"problems ({sum(1 for r in sel_trunc_rate if r > 0.1) * 100 / len(sel_trunc_rate):.0f}%) "
+        "had >10% of their 40 rollouts hit the 15360-token cap. If you re-eval at smaller "
+        "completion budgets you'll lose these problems' signal.\n"
+    )
+    readme.append(
+        f"- **Model-specific** — the perfectible band is by construction relative to "
+        f"`{args.model_name.split('/')[-1]}` at this sampling temperature. A different base "
+        "model or different t/top_p will produce a different subset.\n\n"
+    )
 
     readme.append("## Selected problems × source dataset coverage\n\n")
     readme.append("| | Selected | Sampled (1k) | Source (full) |\n|---|---:|---:|---:|\n")
