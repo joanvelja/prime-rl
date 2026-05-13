@@ -253,6 +253,7 @@ def _configure_eval(
     max_concurrency: int,
     score_max_concurrency: int,
     max_retries: int,
+    resume_partial: bool,
     ks: tuple[int, ...],
     judge_cache_path: str,
     fail_on_error: bool,
@@ -269,6 +270,7 @@ def _configure_eval(
     config.max_concurrency = max_concurrency
     config.score_max_concurrency = score_max_concurrency
     config.max_retries = max_retries
+    config.resume_partial = resume_partial
     config.fail_on_error = fail_on_error
     config.ks = ks
     config.base_url = endpoint.base_url
@@ -611,6 +613,7 @@ def _run_one_checkpoint(
         max_concurrency=args.max_concurrency,
         score_max_concurrency=args.score_max_concurrency,
         max_retries=args.max_retries,
+        resume_partial=not args.force,
         ks=ks,
         judge_cache_path=args.judge_cache_path,
         fail_on_error=not args.allow_errors,

@@ -14,6 +14,7 @@ protocol = "maj_at_n"
 num_examples = 4
 rollouts_per_example = 3
 score_max_concurrency = 128
+resume_partial = false
 ks = [1, 3]
 base_url = "http://127.0.0.1:8000/v1"
 api_profile = "vllm_permissive"
@@ -45,6 +46,7 @@ vllm_extra = {skip_mm_profiling = true}
     assert config.env_id == "hf_singleturn"
     assert config.rollouts_per_example == 3
     assert config.score_max_concurrency == 128
+    assert config.resume_partial is False
     assert config.api_profile == "vllm_permissive"
     assert config.client_type == "openai_completions"
     assert config.env_args["task_type"] == "open_ended"
