@@ -752,3 +752,24 @@ Persistent monitor:
 outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md
 outputs/omni_math2_rlvr_canary/monitors/postrun_eval_monitor_20260513_stepsplit.pid
 ```
+
+Correction at `2026-05-13 12:16 UTC`: the failed checkpoint discoveries were
+not Lustre visibility. `scripts/evals/offline_omni_math2_ckpt_eval.py` applied
+its default `--step-interval 50` even when `--steps` was explicit, so
+checkpoints `25`, `75`, and `85` were filtered out after vLLM startup. The
+eval script now disables interval/min/max filters for explicit `--steps`.
+
+Jobs launched before that patch and cancelled or failed for this path:
+`4585323`, `4585324`, `4585647`, `4585648`, `4585649`.
+
+Current corrected retry jobs:
+
+| arm | checkpoint | job |
+|---|---:|---:|
+| `1e-6` refill | 25 | `4586007` |
+| `1e-6` refill | 75 | `4586010` |
+| `1e-6` refill | 85 | `4585994` |
+| `3e-6` refill | 25 | `4586008` |
+| `3e-6` refill | 75 | `4586009` |
+
+The monitor was restarted with PID `44199`.

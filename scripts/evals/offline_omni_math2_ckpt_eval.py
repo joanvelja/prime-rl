@@ -94,6 +94,18 @@ def _discover_weight_steps(
     return sorted(discovered)
 
 
+def _range_filters_for_explicit_steps(
+    step_filter: set[int] | None,
+    *,
+    step_interval: int | None,
+    min_step: int | None,
+    max_step: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    if step_filter is not None:
+        return None, None, None
+    return step_interval, min_step, max_step
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open() as f:
@@ -806,12 +818,18 @@ def main() -> None:
 
         for arm, run_root in runs:
             weights_root = args.weights_root or (run_root / "weights")
-            steps = _discover_weight_steps(
-                weights_root,
-                steps=step_filter,
+            step_interval, min_step, max_step = _range_filters_for_explicit_steps(
+                step_filter,
                 step_interval=args.step_interval,
                 min_step=args.min_step,
                 max_step=args.max_step,
+            )
+            steps = _discover_weight_steps(
+                weights_root,
+                steps=step_filter,
+                step_interval=step_interval,
+                min_step=min_step,
+                max_step=max_step,
             )
             if not steps:
                 raise RuntimeError(f"No matching stable weight checkpoints found for {arm} in {weights_root}")
