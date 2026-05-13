@@ -1,8 +1,8 @@
-"""Profile a perfectible-subset selection: stats + SVG plots + HF dataset card.
+"""Profile a perfectible-subset selection: stats + PNG plots + HF dataset card.
 
 Reads the baseline rollouts + the selected subset + the source dataset, computes
-per-problem and per-domain statistics, renders inline SVG charts, and writes a
-README.md suitable for direct upload as the HuggingFace dataset card.
+per-problem and per-domain statistics, renders matplotlib PNG charts, and writes
+a README.md suitable for direct upload as the HuggingFace dataset card.
 
 Usage:
     uv run python scripts/evals/profile_perfectible_subset.py \\
@@ -18,17 +18,35 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean, median, stdev
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+import matplotlib
 
-from scripts.evals.analyze_baseline_matrix import compact_float, esc, scale, svg_doc
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+
+plt.rcParams.update({
+    "figure.dpi": 110,
+    "savefig.dpi": 110,
+    "savefig.bbox": "tight",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+    "grid.linestyle": "-",
+    "grid.linewidth": 0.6,
+    "axes.axisbelow": True,
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 11,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+})
 
 
 def primary_domain(domain_field: Any) -> str:
@@ -76,47 +94,37 @@ def bar_chart_vertical(
     values: list[float],
     title: str,
     y_label: str,
-    width: int = 640,
-    height: int = 320,
+    savepath: Path,
     color: str = "#1f77b4",
-) -> str:
-    """Vertical bar chart with categorical x-axis."""
-    pad_l, pad_r, pad_t, pad_b = 70, 24, 36, 80
-    plot_w = width - pad_l - pad_r
-    plot_h = height - pad_t - pad_b
-    y_max = max(values) * 1.1 if values else 1.0
-    n = len(values)
-    bar_w = plot_w / max(n, 1) * 0.78
-    gap = plot_w / max(n, 1) * 0.22
-
-    body = [
-        f'<text x="{width / 2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">{esc(title)}</text>',
-    ]
-    body.append(f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" stroke="#333"/>')
-    body.append(f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{pad_t + plot_h}" stroke="#333"/>')
-    for tick in (0.0, 0.25, 0.5, 0.75, 1.0):
-        yv = y_max * tick
-        ypx = pad_t + plot_h - (yv / y_max) * plot_h if y_max else pad_t + plot_h
-        body.append(
-            f'<line x1="{pad_l - 4}" y1="{ypx}" x2="{pad_l}" y2="{ypx}" stroke="#333"/>'
-            f'<text x="{pad_l - 8}" y="{ypx + 4}" text-anchor="end" font-size="10">{compact_float(yv)}</text>'
-        )
-    body.append(
-        f'<text x="14" y="{pad_t + plot_h / 2}" text-anchor="middle" font-size="11" transform="rotate(-90 14 {pad_t + plot_h / 2})">{esc(y_label)}</text>'
-    )
-
-    for i, (lbl, v) in enumerate(zip(labels, values)):
-        x = pad_l + i * (bar_w + gap) + gap / 2
-        h = (v / y_max) * plot_h if y_max else 0
-        y = pad_t + plot_h - h
-        body.append(f'<rect x="{x}" y="{y}" width="{bar_w}" height="{h}" fill="{color}"/>')
-        body.append(
-            f'<text x="{x + bar_w / 2}" y="{y - 4}" text-anchor="middle" font-size="10">{compact_float(v)}</text>'
-        )
-        body.append(
-            f'<text x="{x + bar_w / 2}" y="{pad_t + plot_h + 14}" text-anchor="middle" font-size="10" transform="rotate(35 {x + bar_w / 2} {pad_t + plot_h + 14})">{esc(lbl)}</text>'
-        )
-    return svg_doc(width, height, "\n".join(body))
+    colors: list[str] | None = None,
+    annotate: bool = True,
+    rotate_xticks: int = 0,
+) -> None:
+    """Vertical bar chart. PNG saved to savepath."""
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    xs = list(range(len(values)))
+    bars = ax.bar(xs, values, color=colors if colors else color, edgecolor="white", linewidth=0.5)
+    ax.set_title(title)
+    ax.set_ylabel(y_label)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(labels, rotation=rotate_xticks, ha="right" if rotate_xticks else "center")
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=8))
+    ax.grid(axis="x", visible=False)
+    if annotate:
+        ymax = max(values) if values else 1
+        for bar, v in zip(bars, values):
+            if v <= 0:
+                continue
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                v + ymax * 0.015,
+                f"{int(v)}" if v == int(v) else f"{v:.2g}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+    fig.savefig(savepath)
+    plt.close(fig)
 
 
 def bar_chart_horizontal(
@@ -125,36 +133,33 @@ def bar_chart_horizontal(
     values: list[int | float],
     title: str,
     x_label: str,
-    width: int = 720,
-    row_h: int = 22,
+    savepath: Path,
     color: str = "#1f77b4",
-) -> str:
-    """Horizontal bar chart sorted descending."""
-    pad_l, pad_r, pad_t, pad_b = 220, 24, 36, 32
-    plot_w = width - pad_l - pad_r
-    plot_h = max(row_h * len(labels), row_h)
-    height = pad_t + plot_h + pad_b
-    x_max = max(values) * 1.05 if values else 1.0
-
-    body = [
-        f'<text x="{width / 2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">{esc(title)}</text>',
-    ]
-    body.append(f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{pad_t + plot_h}" stroke="#333"/>')
-    body.append(f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" stroke="#333"/>')
-    for i, (lbl, v) in enumerate(zip(labels, values)):
-        y = pad_t + i * row_h + 2
-        w = (v / x_max) * plot_w if x_max else 0
-        body.append(f'<rect x="{pad_l}" y="{y}" width="{w}" height="{row_h - 6}" fill="{color}"/>')
-        body.append(
-            f'<text x="{pad_l - 6}" y="{y + (row_h - 4) / 2 + 4}" text-anchor="end" font-size="11">{esc(lbl)}</text>'
+) -> None:
+    """Horizontal bar chart. Order is preserved (labels passed in order)."""
+    height = max(2.5, 0.35 * len(labels) + 1.5)
+    fig, ax = plt.subplots(figsize=(8, height))
+    ys = list(range(len(values)))
+    # Reverse for top-to-bottom (matplotlib renders bottom-up)
+    bars = ax.barh(ys, values, color=color, edgecolor="white", linewidth=0.5)
+    ax.set_yticks(ys)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=8))
+    ax.grid(axis="y", visible=False)
+    xmax = max(values) if values else 1
+    for bar, v in zip(bars, values):
+        ax.text(
+            v + xmax * 0.01,
+            bar.get_y() + bar.get_height() / 2,
+            f"{int(v)}" if v == int(v) else f"{v:.2g}",
+            va="center",
+            fontsize=9,
         )
-        body.append(
-            f'<text x="{pad_l + w + 4}" y="{y + (row_h - 4) / 2 + 4}" font-size="10">{compact_float(v)}</text>'
-        )
-    body.append(
-        f'<text x="{pad_l + plot_w / 2}" y="{pad_t + plot_h + 22}" text-anchor="middle" font-size="11">{esc(x_label)}</text>'
-    )
-    return svg_doc(width, height, "\n".join(body))
+    fig.savefig(savepath)
+    plt.close(fig)
 
 
 def line_chart(
@@ -164,54 +169,41 @@ def line_chart(
     title: str,
     x_label: str,
     y_label: str,
-    width: int = 640,
-    height: int = 320,
+    savepath: Path,
     color: str = "#1f77b4",
     annotate: bool = True,
-) -> str:
-    """Single line plot with markers."""
-    pad_l, pad_r, pad_t, pad_b = 64, 24, 36, 56
-    plot_w = width - pad_l - pad_r
-    plot_h = height - pad_t - pad_b
-    x_lo, x_hi = min(xs), max(xs)
-    y_lo, y_hi = 0.0, max(ys) * 1.08 if ys else 1.0
-
-    body = [
-        f'<text x="{width / 2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">{esc(title)}</text>',
-        f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" stroke="#333"/>',
-        f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{pad_t + plot_h}" stroke="#333"/>',
-    ]
-    for t in (0.0, 0.25, 0.5, 0.75, 1.0):
-        yv = y_hi * t
-        ypx = pad_t + plot_h - (yv / y_hi) * plot_h if y_hi else pad_t + plot_h
-        body.append(
-            f'<line x1="{pad_l - 4}" y1="{ypx}" x2="{pad_l}" y2="{ypx}" stroke="#333"/>'
-            f'<text x="{pad_l - 8}" y="{ypx + 4}" text-anchor="end" font-size="10">{compact_float(yv)}</text>'
-        )
-    for xv in xs:
-        xpx = scale(xv, (x_lo, x_hi), (pad_l, pad_l + plot_w))
-        body.append(
-            f'<line x1="{xpx}" y1="{pad_t + plot_h}" x2="{xpx}" y2="{pad_t + plot_h + 4}" stroke="#333"/>'
-            f'<text x="{xpx}" y="{pad_t + plot_h + 16}" text-anchor="middle" font-size="10">{compact_float(xv)}</text>'
-        )
-    pts = " ".join(
-        f"{scale(x, (x_lo, x_hi), (pad_l, pad_l + plot_w))},{pad_t + plot_h - (y / y_hi) * plot_h if y_hi else pad_t + plot_h}"
-        for x, y in zip(xs, ys)
-    )
-    body.append(f'<polyline points="{pts}" stroke="{color}" stroke-width="2" fill="none"/>')
-    for x, y in zip(xs, ys):
-        cx = scale(x, (x_lo, x_hi), (pad_l, pad_l + plot_w))
-        cy = pad_t + plot_h - (y / y_hi) * plot_h if y_hi else pad_t + plot_h
-        body.append(f'<circle cx="{cx}" cy="{cy}" r="3" fill="{color}"/>')
-        if annotate:
-            body.append(f'<text x="{cx}" y="{cy - 8}" text-anchor="middle" font-size="9">{compact_float(y)}</text>')
-    body.append(
-        f'<text x="{pad_l + plot_w / 2}" y="{height - 18}" text-anchor="middle" font-size="11">{esc(x_label)}</text>'
-    )
-    body.append(
-        f'<text x="14" y="{pad_t + plot_h / 2}" text-anchor="middle" font-size="11" transform="rotate(-90 14 {pad_t + plot_h / 2})">{esc(y_label)}</text>'
-    )
-    return svg_doc(width, height, "\n".join(body))
+    log_x: bool = False,
+    ymax: float | None = None,
+) -> None:
+    """Line plot with markers + value annotations."""
+    fig, ax = plt.subplots(figsize=(8, 4.4))
+    ax.plot(xs, ys, "-o", color=color, linewidth=2, markersize=7)
+    ax.set_title(title, pad=14)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    if log_x:
+        ax.set_xscale("log", base=2)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{int(x)}" if x == int(x) else f"{x:g}" for x in xs])
+    top = ymax if ymax is not None else max(ys) * 1.15
+    ax.set_ylim(0, top)
+    if annotate:
+        for x, y in zip(xs, ys):
+            # Place annotation below for values near the top (>0.92 * top) to avoid title collision
+            below = y > 0.92 * top
+            offset_y = -14 if below else 9
+            va = "top" if below else "bottom"
+            ax.annotate(
+                f"{y:.3f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, offset_y),
+                ha="center",
+                va=va,
+                fontsize=9,
+            )
+    fig.savefig(savepath)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -259,19 +251,20 @@ def main() -> int:
 
     sampled_rates = [mean(per_q_reward[qid]) for qid in sampled_ids if qid in per_q_reward]
 
-    # Histogram of solve rates
-    def hist(rates: list[float], buckets: list[tuple[float, float]]) -> list[int]:
-        out = [0] * len(buckets)
+    # Histogram of solve rates — 20 buckets of width 0.05 (finer than the [0.2, 0.8] band edges)
+    bucket_width = 0.05
+    n_buckets = int(round(1.0 / bucket_width))
+
+    def hist(rates: list[float]) -> list[int]:
+        out = [0] * n_buckets
         for r in rates:
-            for i, (lo, hi) in enumerate(buckets):
-                if lo <= r < hi or (hi == 1.0 and r == 1.0):
-                    out[i] += 1
-                    break
+            i = min(int(r / bucket_width), n_buckets - 1)
+            out[i] += 1
         return out
 
-    decile_buckets = [(i / 10, (i + 1) / 10) for i in range(10)]
-    sel_hist = hist(sel_rates, decile_buckets)
-    sampled_hist = hist(sampled_rates, decile_buckets)
+    bucket_centers = [(i + 0.5) * bucket_width for i in range(n_buckets)]
+    sel_hist = hist(sel_rates)
+    sampled_hist = hist(sampled_rates)
 
     # Domain mix
     sel_domains = Counter(primary_domain(r.get("domain")) for r in selected)
@@ -304,110 +297,158 @@ def main() -> int:
     # === Plots ===
     plots = args.out_dir / "plots"
 
-    # 1) Solve-rate histogram for selected
-    (plots / "solve_rate_selected.svg").write_text(
-        bar_chart_vertical(
-            labels=[f"[{lo:.1f},{hi:.1f})" for lo, hi in decile_buckets],
-            values=[float(c) for c in sel_hist],
-            title=f"Solve-rate distribution (selected {len(selected)} problems)",
-            y_label="# problems",
-            color="#2ca02c",
-        )
+    # 1) Solve-rate histogram for sampled-1000 (the *real* picture: heavy left tail).
+    #    Selected region [args.low, args.high] shaded; selected count + non-selected counts annotated.
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    bar_xs = [c - bucket_width / 2 for c in bucket_centers]
+    ax.bar(bar_xs, sampled_hist, width=bucket_width * 0.95, color="#525252", align="edge", edgecolor="white", linewidth=0.4)
+    ax.axvspan(args.low, args.high, color="#2ca02c", alpha=0.18, zorder=0, label=f"selected band [{args.low:.1f}, {args.high:.1f}]")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("per-problem mean reward across 40 rollouts")
+    ax.set_ylabel("# problems")
+    ax.set_title(f"Solve-rate distribution over {len(sampled_rows)} sampled problems\n({len(selected)} selected / {len(sampled_rows) - len(selected)} discarded)")
+    ax.legend(loc="upper right")
+    ax.grid(axis="x", visible=False)
+    fig.savefig(plots / "solve_rate_sampled.png")
+    plt.close(fig)
+
+    # 2) Same as above but log-y so the perfectible band is visible despite the left tail.
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    ax.bar(bar_xs, sampled_hist, width=bucket_width * 0.95, color="#525252", align="edge", edgecolor="white", linewidth=0.4)
+    ax.axvspan(args.low, args.high, color="#2ca02c", alpha=0.18, zorder=0, label=f"selected band [{args.low:.1f}, {args.high:.1f}]")
+    ax.set_yscale("symlog", linthresh=1)
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("per-problem mean reward across 40 rollouts")
+    ax.set_ylabel("# problems (log)")
+    ax.set_title(f"Solve-rate distribution (log-y) — {len(sampled_rows)} sampled, {len(selected)} selected")
+    ax.legend(loc="upper right")
+    ax.grid(axis="x", visible=False)
+    fig.savefig(plots / "solve_rate_sampled_log.png")
+    plt.close(fig)
+
+    # 3) Selected-only solve-rate histogram (zoom on the [low, high] band).
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.bar(bar_xs, sel_hist, width=bucket_width * 0.95, color="#2ca02c", align="edge", edgecolor="white", linewidth=0.4)
+    ax.set_xlim(args.low - 0.02, args.high + 0.05)
+    ax.set_xlabel("per-problem mean reward across 40 rollouts")
+    ax.set_ylabel("# problems")
+    ax.set_title(f"Solve-rate distribution within selected band ({len(selected)} problems)")
+    ax.grid(axis="x", visible=False)
+    fig.savefig(plots / "solve_rate_selected.png")
+    plt.close(fig)
+
+    # 4) pass@k for selected subset
+    line_chart(
+        xs=[float(k) for k in pass_ks],
+        ys=pass_at_k_values,
+        title=f"pass@k for selected {len(selected)}-problem subset",
+        x_label="k (sampled with replacement)",
+        y_label="pass@k (unbiased)",
+        savepath=plots / "pass_at_k.png",
+        log_x=True,
+        ymax=1.08,
     )
 
-    # 2) Solve-rate histogram for full sampled-1000 (band shaded by color)
-    sampled_colors = ["#d62728" if not (args.low <= b[0] and b[1] <= args.high) else "#2ca02c" for b in decile_buckets]
-    (plots / "solve_rate_sampled.svg").write_text(
-        bar_chart_vertical(
-            labels=[f"[{lo:.1f},{hi:.1f})" for lo, hi in decile_buckets],
-            values=[float(c) for c in sampled_hist],
-            title=f"Solve-rate over all {len(sampled_rows)} sampled problems (green = perfectible)",
-            y_label="# problems",
-            color="#888",
-        )
-    )
-
-    # 3) Domain mix (top 12 by selected count)
+    # 5) Domain mix
     top_doms = [d for d, _ in sel_domains.most_common(12)]
-    (plots / "domain_mix.svg").write_text(
-        bar_chart_horizontal(
-            labels=top_doms,
-            values=[sel_domains[d] for d in top_doms],
-            title=f"Top math domains in selected ({len(selected)} problems)",
-            x_label="# problems",
-        )
+    bar_chart_horizontal(
+        labels=top_doms,
+        values=[sel_domains[d] for d in top_doms],
+        title=f"Top math domains in selected ({len(selected)} problems)",
+        x_label="# problems",
+        savepath=plots / "domain_mix.png",
     )
 
-    # 4) Source mix (top 15)
+    # 6) Source mix (top 15)
     top_srcs = [s for s, _ in sel_sources.most_common(15)]
-    (plots / "source_mix.svg").write_text(
-        bar_chart_horizontal(
-            labels=top_srcs,
-            values=[sel_sources[s] for s in top_srcs],
-            title=f"Top competition sources in selected ({len(selected)} problems)",
-            x_label="# problems",
-            color="#9467bd",
-        )
+    bar_chart_horizontal(
+        labels=top_srcs,
+        values=[sel_sources[s] for s in top_srcs],
+        title=f"Top competition sources in selected ({len(selected)} problems)",
+        x_label="# problems",
+        color="#9467bd",
+        savepath=plots / "source_mix.png",
     )
 
-    # 5) Difficulty mix
+    # 7) Difficulty mix
     diff_order = ["easy (<3)", "medium (3-5)", "hard (5-7)", "very hard (7-9)", "extreme (>=9)", "unknown"]
-    (plots / "difficulty_mix.svg").write_text(
-        bar_chart_vertical(
-            labels=diff_order,
-            values=[float(sel_difficulty.get(d, 0)) for d in diff_order],
-            title=f"Difficulty distribution in selected ({len(selected)} problems)",
-            y_label="# problems",
-            color="#ff7f0e",
-        )
+    bar_chart_vertical(
+        labels=diff_order,
+        values=[float(sel_difficulty.get(d, 0)) for d in diff_order],
+        title=f"Difficulty distribution in selected ({len(selected)} problems)",
+        y_label="# problems",
+        color="#ff7f0e",
+        savepath=plots / "difficulty_mix.png",
+        rotate_xticks=15,
     )
 
-    # 6) Output token distribution (binned)
-    bins = list(range(0, 16001, 1500))
-    token_hist = [0] * (len(bins) - 1)
-    for t in sel_tokens_mean:
-        for i in range(len(bins) - 1):
-            if bins[i] <= t < bins[i + 1]:
-                token_hist[i] += 1
-                break
-    (plots / "output_tokens.svg").write_text(
-        bar_chart_vertical(
-            labels=[f"{bins[i]}-{bins[i + 1]}" for i in range(len(bins) - 1)],
-            values=[float(c) for c in token_hist],
-            title="Mean output tokens per problem (selected)",
-            y_label="# problems",
-            color="#17becf",
-        )
-    )
+    # 8) Output token distribution + truncation rate (side-by-side)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.6))
+    ax1.hist(sel_tokens_mean, bins=20, color="#17becf", edgecolor="white", linewidth=0.4)
+    ax1.set_xlabel("mean output tokens per problem (avg over 40 rollouts)")
+    ax1.set_ylabel("# problems")
+    ax1.set_title("Output token distribution (selected)")
+    ax1.axvline(15360, color="red", linestyle="--", linewidth=1, alpha=0.7)
+    ax1.annotate("max_completion_tokens=15360", xy=(15360, ax1.get_ylim()[1] * 0.9), xytext=(-6, 0),
+                 textcoords="offset points", ha="right", fontsize=9, color="red")
+    ax1.grid(axis="x", visible=False)
 
-    # 7) Truncation rate distribution
-    trunc_bins = [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 1.01]
-    trunc_hist = [0] * (len(trunc_bins) - 1)
-    for r in sel_trunc_rate:
-        for i in range(len(trunc_bins) - 1):
-            if trunc_bins[i] <= r < trunc_bins[i + 1]:
-                trunc_hist[i] += 1
-                break
-    (plots / "truncation_rate.svg").write_text(
-        bar_chart_vertical(
-            labels=[f"[{trunc_bins[i]:.0%},{trunc_bins[i + 1]:.0%})" for i in range(len(trunc_bins) - 1)],
-            values=[float(c) for c in trunc_hist],
-            title="Per-problem length-truncation rate (selected)",
-            y_label="# problems",
-            color="#e377c2",
-        )
-    )
+    ax2.hist(sel_trunc_rate, bins=20, color="#e377c2", edgecolor="white", linewidth=0.4)
+    ax2.set_xlabel("per-problem truncation rate (frac of 40 rollouts hitting 15360)")
+    ax2.set_ylabel("# problems")
+    ax2.set_title("Length-truncation rate (selected)")
+    ax2.grid(axis="x", visible=False)
+    fig.savefig(plots / "tokens_and_truncation.png")
+    plt.close(fig)
 
-    # 8) Pass@k for selected subset
-    (plots / "pass_at_k.svg").write_text(
-        line_chart(
-            xs=[float(k) for k in pass_ks],
-            ys=pass_at_k_values,
-            title=f"pass@k for selected {len(selected)}-problem subset",
-            x_label="k",
-            y_label="pass@k",
-        )
-    )
+    # 9) Judge-fallback rate distribution
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.hist(sel_judge_rate, bins=20, color="#8c564b", edgecolor="white", linewidth=0.4)
+    ax.set_xlabel("per-problem judge-fallback rate (frac of rollouts where math_verify was ambiguous)")
+    ax.set_ylabel("# problems")
+    ax.set_title(f"Judge invocation rate (selected, mean={mean(sel_judge_rate):.3f})")
+    ax.grid(axis="x", visible=False)
+    fig.savefig(plots / "judge_rate.png")
+    plt.close(fig)
+
+    # 10) Solve rate vs mean output tokens (scatter, colored by truncation rate)
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    sel_rates_arr = sel_rates
+    sel_tokens_arr = sel_tokens_mean
+    sel_trunc_arr = sel_trunc_rate
+    sc = ax.scatter(sel_tokens_arr, sel_rates_arr, c=sel_trunc_arr, cmap="viridis_r", s=20, alpha=0.75)
+    ax.set_xlabel("mean output tokens (over 40 rollouts)")
+    ax.set_ylabel("per-problem solve rate")
+    ax.set_title(f"Solve rate vs reasoning length (selected {len(selected)} problems)")
+    plt.colorbar(sc, ax=ax, label="truncation rate")
+    ax.grid(visible=True)
+    fig.savefig(plots / "solve_rate_vs_tokens.png")
+    plt.close(fig)
+
+    # 11) Solve rate vs difficulty (scatter, with jitter on difficulty)
+    import random
+    rng = random.Random(42)
+    sel_difficulty_raw = []
+    sel_rate_for_diff = []
+    for r in selected:
+        d = r.get("difficulty")
+        try:
+            v = float(d)
+        except (TypeError, ValueError):
+            continue
+        qid = str(r.get("id"))
+        if qid not in per_q_reward:
+            continue
+        sel_difficulty_raw.append(v + rng.uniform(-0.1, 0.1))
+        sel_rate_for_diff.append(mean(per_q_reward[qid]))
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    ax.scatter(sel_difficulty_raw, sel_rate_for_diff, s=20, alpha=0.55, color="#1f77b4")
+    ax.set_xlabel("difficulty (omni-math 1-10 scale, jittered ±0.1)")
+    ax.set_ylabel("per-problem solve rate")
+    ax.set_title(f"Solve rate vs problem difficulty (selected {len(sel_rate_for_diff)} problems)")
+    ax.axhspan(args.low, args.high, color="#2ca02c", alpha=0.08, zorder=0)
+    fig.savefig(plots / "solve_rate_vs_difficulty.png")
+    plt.close(fig)
 
     # === README ===
     readme = []
@@ -448,63 +489,67 @@ def main() -> int:
 
     readme.append("## Solve-rate distribution\n\n")
     readme.append(
-        f"Per-problem mean reward across 40 rollouts. By construction every selected problem "
-        f"falls in [{args.low}, {args.high}].\n\n"
+        f"Per-problem mean reward across 40 rollouts. The full 1000 sampled distribution has a heavy left tail "
+        f"(most problems are unsolvable for `{args.model_name.split('/')[-1]}`). The selected band [{args.low}, {args.high}] "
+        "is the central region; everything outside is discarded.\n\n"
     )
+    readme.append("![solve_rate_sampled](plots/solve_rate_sampled.png)\n\n")
+    readme.append("Log-y view of the same distribution makes the perfectible region readable alongside the dominant left tail:\n\n")
+    readme.append("![solve_rate_sampled_log](plots/solve_rate_sampled_log.png)\n\n")
     readme.append(
-        f"- range: [{min(sel_rates):.3f}, {max(sel_rates):.3f}]\n"
-        f"- mean: {mean(sel_rates):.3f} | median: {median(sel_rates):.3f} | stdev: {stdev(sel_rates):.3f}\n\n"
+        f"Zoomed into the selected band only — the {len(selected)} kept problems are roughly uniformly distributed across [0.2, 0.8] "
+        f"(mean {mean(sel_rates):.3f}, median {median(sel_rates):.3f}, stdev {stdev(sel_rates):.3f}). "
+        "No clustering toward the band edges:\n\n"
     )
-    readme.append("![solve_rate_selected](plots/solve_rate_selected.svg)\n\n")
-    readme.append(
-        "For context, the full 1000 sampled problems show the heavy left tail — most problems are unsolvable "
-        f"for {args.model_name.split('/')[-1]} (~50% in [0.0, 0.1)). The 'perfectible' band is the central region.\n\n"
-    )
-    readme.append("![solve_rate_sampled](plots/solve_rate_sampled.svg)\n\n")
+    readme.append("![solve_rate_selected](plots/solve_rate_selected.png)\n\n")
 
     readme.append("## pass@k on selected\n\n")
-    readme.append("Unbiased Chen et al. (2021) estimator over 40 rollouts.\n\n")
+    readme.append(
+        "Unbiased Chen et al. (2021) estimator over 40 rollouts. A working RL recipe should be able to climb "
+        "toward pass@40 ≈ 1.0 on this subset.\n\n"
+    )
     readme.append("| k | pass@k |\n|---:|---:|\n")
     for k, v in zip(pass_ks, pass_at_k_values):
         readme.append(f"| {k} | {v:.4f} |\n")
-    readme.append("\n![pass_at_k](plots/pass_at_k.svg)\n\n")
+    readme.append("\n![pass_at_k](plots/pass_at_k.png)\n\n")
 
-    readme.append("## Domain mix (top 12)\n\n")
+    readme.append("## Domain & source mix\n\n")
     readme.append("Primary domain extracted from the 'Mathematics -> X -> ...' chain in the original tags.\n\n")
-    readme.append("![domain_mix](plots/domain_mix.svg)\n\n")
-
-    readme.append("## Competition source mix (top 15)\n\n")
-    readme.append("![source_mix](plots/source_mix.svg)\n\n")
+    readme.append("![domain_mix](plots/domain_mix.png)\n\n")
+    readme.append("![source_mix](plots/source_mix.png)\n\n")
 
     readme.append("## Difficulty mix\n\n")
-    readme.append("Original omni-math difficulty score (1-10).\n\n")
-    readme.append("![difficulty_mix](plots/difficulty_mix.svg)\n\n")
+    readme.append("Original omni-math difficulty score (1-10), bucketed.\n\n")
+    readme.append("![difficulty_mix](plots/difficulty_mix.png)\n\n")
 
-    readme.append("## Output token distribution\n\n")
+    readme.append("## Solve rate vs reasoning length & difficulty\n\n")
     readme.append(
-        f"Mean output tokens per problem (averaged over 40 rollouts). Note the 15360-token cap — "
-        f"{sum(1 for r in sel_trunc_rate if r > 0):d} of {len(sel_trunc_rate)} problems had at least one truncated rollout.\n\n"
+        "Per-problem scatter of mean reward vs mean output tokens, with the 40-rollout truncation rate as the colormap. "
+        "Problems with very long reasoning + high truncation tend to score lower, as expected.\n\n"
     )
-    readme.append("![output_tokens](plots/output_tokens.svg)\n\n")
+    readme.append("![solve_rate_vs_tokens](plots/solve_rate_vs_tokens.png)\n\n")
+    readme.append(
+        "Solve rate vs annotated problem difficulty (1-10 scale, jittered for readability). "
+        "The green band is the perfectible selection range. Notice the broad spread at every difficulty level — "
+        "annotated difficulty is only weakly predictive of actual model solve rate.\n\n"
+    )
+    readme.append("![solve_rate_vs_difficulty](plots/solve_rate_vs_difficulty.png)\n\n")
 
-    readme.append("## Truncation rate per problem\n\n")
+    readme.append("## Output tokens & truncation\n\n")
     readme.append(
-        "Fraction of the 40 rollouts that hit `max_completion_tokens=15360` before emitting EOS. "
-        "High truncation suggests the problem is at the edge of the model's reasoning budget.\n\n"
+        f"Mean output tokens per problem and per-problem truncation rate (fraction of 40 rollouts hitting "
+        f"max_completion_tokens=15360 before EOS). {sum(1 for r in sel_trunc_rate if r > 0)} of {len(sel_trunc_rate)} "
+        f"problems had at least one truncated rollout; mean rate {mean(sel_trunc_rate):.3f}, max {max(sel_trunc_rate):.3f}.\n\n"
     )
-    readme.append(
-        f"- mean: {mean(sel_trunc_rate):.3f} | median: {median(sel_trunc_rate):.3f} | max: {max(sel_trunc_rate):.3f}\n\n"
-    )
-    readme.append("![truncation_rate](plots/truncation_rate.svg)\n\n")
+    readme.append("![tokens_and_truncation](plots/tokens_and_truncation.png)\n\n")
 
     readme.append("## Judge-fallback rate\n\n")
     readme.append(
-        "Fraction of rollouts where `math_verify` was ambiguous and the LLM judge (`gpt-5.4-mini`) "
-        "had to be invoked. High judge rate → answers in symbolic forms that don't reduce cleanly.\n\n"
+        f"Fraction of rollouts where `math_verify` was ambiguous and the LLM judge (`gpt-5.4-mini`) had to be invoked. "
+        f"Mean {mean(sel_judge_rate):.3f}, median {median(sel_judge_rate):.3f} — the modal scoring path on this subset. "
+        "High judge rate → answers in symbolic forms that don't reduce cleanly.\n\n"
     )
-    readme.append(
-        f"- mean: {mean(sel_judge_rate):.3f} | median: {median(sel_judge_rate):.3f}\n\n"
-    )
+    readme.append("![judge_rate](plots/judge_rate.png)\n\n")
 
     readme.append("## Selected problems × source dataset coverage\n\n")
     readme.append("| | Selected | Sampled (1k) | Source (full) |\n|---|---:|---:|---:|\n")
