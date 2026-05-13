@@ -466,7 +466,7 @@ def main() -> int:
         "- perfectible-subset\n"
         "- rl-diagnostic\n"
         "size_categories:\n- n<1K\n"
-        "pretty_name: omni-math2 OLMo3 perfectible subset\n"
+        f"pretty_name: omni-math2 {args.model_name} perfectible subset\n"
         "---\n\n"
     )
     repo_header = f"# {args.hf_repo}\n\n" if args.hf_repo else "# Perfectible subset\n\n"
@@ -488,14 +488,36 @@ def main() -> int:
     readme.append(f"| Sampling | t=1.0, top_p=0.95, max_completion_tokens=15360 |\n")
     readme.append(f"| **Selected** | **{len(selected)}** problems ({len(selected) * 100 / len(sampled_rows):.1f}% of sampled) |\n\n")
 
+    # Data-driven tail-shape description (not hardcoded — varies by model)
+    frac_all0 = sum(1 for r in sampled_rates if r == 0) / len(sampled_rates)
+    frac_all1 = sum(1 for r in sampled_rates if r == 1) / len(sampled_rates)
+    sampled_mean = mean(sampled_rates)
+    if frac_all0 > frac_all1 + 0.10:
+        tail_phrase = (
+            f"a heavy left tail ({frac_all0:.0%} of sampled problems get 0/40 — too hard for "
+            f"`{args.model_name.split('/')[-1]}`)"
+        )
+        dominant_tail = "left tail"
+    elif frac_all1 > frac_all0 + 0.10:
+        tail_phrase = (
+            f"a heavy right tail ({frac_all1:.0%} of sampled problems get 40/40 — too easy for "
+            f"`{args.model_name.split('/')[-1]}`)"
+        )
+        dominant_tail = "right tail"
+    else:
+        tail_phrase = (
+            f"a roughly balanced distribution ({frac_all0:.0%} all-0, {frac_all1:.0%} all-1, "
+            f"mean {sampled_mean:.2f}) — `{args.model_name.split('/')[-1]}` is well-matched to the dataset's difficulty range"
+        )
+        dominant_tail = "balanced tails"
+
     readme.append("## Solve-rate distribution\n\n")
     readme.append(
-        f"Per-problem mean reward across 40 rollouts. The full 1000 sampled distribution has a heavy left tail "
-        f"(most problems are unsolvable for `{args.model_name.split('/')[-1]}`). The selected band [{args.low}, {args.high}] "
-        "is the central region; everything outside is discarded.\n\n"
+        f"Per-problem mean reward across 40 rollouts. The full {len(sampled_rates)} sampled distribution has {tail_phrase}. "
+        f"The selected band [{args.low}, {args.high}] is the central region; everything outside is discarded.\n\n"
     )
     readme.append("![solve_rate_sampled](plots/solve_rate_sampled.png)\n\n")
-    readme.append("Log-y view of the same distribution makes the perfectible region readable alongside the dominant left tail:\n\n")
+    readme.append(f"Log-y view of the same distribution makes the perfectible region readable alongside the dominant {dominant_tail}:\n\n")
     readme.append("![solve_rate_sampled_log](plots/solve_rate_sampled_log.png)\n\n")
     readme.append(
         f"Zoomed into the selected band only — the {len(selected)} kept problems are roughly uniformly distributed across [0.2, 0.8] "
@@ -578,14 +600,16 @@ def main() -> int:
         "underlying omni-math2 distribution, not a sampling artifact, but worth knowing "
         "if you generalize results.\n"
     )
+    top_domain_name, top_domain_count = Counter(sel_domains).most_common(1)[0]
+    other_domains = [(d, c) for d, c in Counter(sel_domains).most_common() if d != top_domain_name][:4]
+    other_phrase = ", ".join(f"{d} ({c*100/len(selected):.0f}%)" for d, c in other_domains)
     readme.append(
-        f"- **Algebra-heavy domain mix** — {Counter(sel_domains).most_common(1)[0][1]} of "
-        f"{len(selected)} = {top_domain_pct:.0f}% of selected problems are Algebra. "
-        "Geometry / Number Theory / Discrete Math each contribute 15-20%; "
-        "Calculus barely appears.\n"
+        f"- **Top domain is {top_domain_name}** — {top_domain_count} of "
+        f"{len(selected)} = {top_domain_pct:.0f}% of selected problems. "
+        f"Other domains: {other_phrase}. See `plots/domain_mix.png` for full breakdown.\n"
     )
     readme.append(
-        "- **Annotated difficulty is only weakly predictive** of OLMo3-7B-Instruct-DPO's "
+        f"- **Annotated difficulty is only weakly predictive** of `{args.model_name.split('/')[-1]}`'s "
         "actual solve rate (see `solve_rate_vs_difficulty.png`). Problems labeled "
         "difficulty 4-6 span the full [0.2, 0.8] band; problems labeled 7-9 are not "
         "consistently harder for this model. Selection by *observed* solve rate is the "
