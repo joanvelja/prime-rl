@@ -29,6 +29,13 @@ Caveats (be honest about what this measures):
   scripts/evals/make_perfectible_subset.py operates on the FINAL reward
   field (math_verify + judge combined) and is the authoritative filter.
   This script is a directional progress indicator, not a final answer.
+
+- Empirical undercount observed on omni-math2 / OLMo3-7B-Instruct-DPO:
+  judge-side extrapolation predicted ~217-226 perfectible problems, the
+  full-reward filter returned 340 (∼1.5× more). Bias is in the expected
+  direction (judge only sees the math-ambiguous tail) and stabilizes
+  within ~20 min of run start, but magnitude can be substantial. Treat
+  the extrapolated count as a lower bound, not a point estimate.
 """
 
 from __future__ import annotations
