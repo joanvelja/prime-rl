@@ -34,7 +34,7 @@ write_status() {
     echo "## Current Summaries"
     echo
     find "$repo_root/outputs/omni_math2_rlvr_canary" \
-      -path '*offline_eval_600x8_7node_clean*' \
+      \( -path '*offline_eval_600x8_7node_clean*' -o -path '*offline_eval_600x8_8node_router*' \) \
       -name summary.json \
       -print | sort || true
   } > "$status_path.tmp"
@@ -48,7 +48,7 @@ while true; do
 
   summary_count=$(
     find "$repo_root/outputs/omni_math2_rlvr_canary" \
-      -path '*offline_eval_600x8_7node_clean*' \
+      \( -path '*offline_eval_600x8_7node_clean*' -o -path '*offline_eval_600x8_8node_router*' \) \
       -name summary.json \
       -print | wc -l
   )

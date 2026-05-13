@@ -3676,3 +3676,40 @@ Updated launch plan for 8 nodes:
   - `4584395` (`3e-6`) is still listed as running but has one failed backend
     task (`4584395.7`) and is likely doomed unless vLLM/router tolerates the
     missing node. If it fails, retry with the cleanup patch above.
+
+2026-05-13 11:31 UTC eval restart:
+
+- Cancelled doomed `3e-6` eval job `4584395`; it was stuck before `step_25`
+  after backend task `4584395.7` failed on `nid010069`.
+- Re-submitted the same routed `3e-6` eval sbatch after the cleanup patch.
+  New job id: `4584655`.
+- Live evals to monitor:
+  - `4584396`: `1e-6` routed refill eval, running.
+  - `4584655`: `3e-6` routed refill eval retry, pending/running depending on
+    queue state.
+- Check with:
+  ```bash
+  squeue -j 4584396,4584655 -o '%.18i %.9P %.40j %.10T %.10M %.9l %.6D %R'
+  sacct -j 4584396,4584655 --format=JobID,JobName%40,State,ExitCode,Elapsed,NodeList%80 -P
+  ```
+
+2026-05-13 11:35 UTC eval split:
+
+- Cancelled serial routed evals `4584396` and `4584655`. The `1e-6` job had
+  only `228/4800` rollout rows for `step_25` after about 25 minutes; at the
+  observed `~2.1k` generated tok/s across 32 eval GPUs, four checkpoints in
+  one 6h allocation was not viable.
+- Submitted one `600x8` routed job per checkpoint with `08:00:00` wall time:
+  - `1e-6`: `4584726` step 25, `4584727` step 50, `4584733` step 75,
+    `4584739` step 100.
+  - `3e-6`: `4584740` step 25, `4584741` step 50, `4584743` step 75,
+    `4584744` step 100.
+- Output dirs are `offline_eval_600x8_8node_router_step{25,50,75,100}` under
+  each arm's run root.
+- `scripts/evals/compare_omni_math2_offline_evals.py` now globs
+  `offline_eval_600x8_8node_router*`, so the step-split summaries are included.
+- Monitor with:
+  ```bash
+  squeue -j 4584726,4584727,4584733,4584739,4584740,4584741,4584743,4584744 \
+    -o '%.18i %.9P %.40j %.10T %.10M %.9l %.6D %R'
+  ```

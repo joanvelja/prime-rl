@@ -56,7 +56,7 @@ SUMMARY_SETS = (
     SummarySet(
         "dapo_refill_v1_lr1e6_28i4t_router_8node",
         "outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_refill_20260512_1745/"
-        "offline_eval_600x8_8node_router/refill_lr1e6_28i4t/step_*/summary.json",
+        "offline_eval_600x8_8node_router*/refill_lr1e6_28i4t/step_*/summary.json",
     ),
     SummarySet(
         "dapo_refill_lr3e6_28i4t",
@@ -71,7 +71,7 @@ SUMMARY_SETS = (
     SummarySet(
         "dapo_refill_lr3e6_28i4t_router_8node",
         "outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_*/"
-        "offline_eval_600x8_8node_router/refill_lr3e6_28i4t/step_*/summary.json",
+        "offline_eval_600x8_8node_router*/refill_lr3e6_28i4t/step_*/summary.json",
     ),
     SummarySet(
         "dapo_refill_lr3e6_28i4t",

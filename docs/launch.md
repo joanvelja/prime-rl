@@ -60,6 +60,26 @@ router port 9800, backend port 9900, `gpu_memory_utilization=0.95`,
 `max_model_len=16384`, `max_num_seqs=192`, and
 `max_num_batched_tokens=65536`.
 
+For full `600x8` post-run eval across multiple checkpoints, prefer one Slurm
+job per checkpoint instead of serial `--steps 25,50,75,100` in one allocation:
+
+```bash
+uv run --no-sync python -m prime_rl.entrypoints.launch offline-eval \
+  --after-job-id <train_job_id> \
+  --arm refill_lr1e6_28i4t \
+  --run-root outputs/omni_math2_rlvr_canary/<run_name>/run_default \
+  --weights-root outputs/omni_math2_rlvr_canary/<run_name>/run_default/broadcasts \
+  --output-dir outputs/omni_math2_rlvr_canary/<run_name>/offline_eval_600x8_8node_router_step25 \
+  --steps 25 \
+  --nodes 8 \
+  --sbatch-nodes 8 \
+  --router-policy round_robin \
+  --time-limit 08:00:00
+```
+
+Repeat with `--steps 50`, `75`, and `100`, changing the output suffix to match.
+The comparison script includes `offline_eval_600x8_8node_router*` directories.
+
 The old scripts remain as compatibility shims:
 
 ```bash

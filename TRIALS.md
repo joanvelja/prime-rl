@@ -2973,3 +2973,60 @@ bash -n /tmp/provision-driver-t2k0y0jc/inference/launch_multinode_driver.sh
 
 The generated driver syntax passed. Do not re-run the `3e-6` routed eval
 without this cleanup patch if `4584395` times out/fails.
+
+### 2026-05-13 11:31 UTC - Restarted 3e-6 routed eval with cleanup patch
+
+- Cancelled `4584395` after confirming backend task `4584395.7` failed on
+  `nid010069` with `DP Coordinator process failed to report ZMQ addresses
+  during startup`; the job was stuck before reaching `step_25`.
+- Re-submitted the `3e-6` routed offline eval from the same canonical sbatch:
+  `outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_20260512_2155/offline_eval_600x8_8node_router/submit/offline_eval_after_4574276_20260513T105309Z.sbatch`.
+- New job id: `4584655`.
+- At submission, `4584655` was pending on priority; it will use the current
+  worktree code, including commit `d42605a1e` with the stale-cleanup patch.
+
+Current live evals:
+
+- `4584396`: `1e-6` refill routed eval, running; reached `step_25` after
+  successful pause/update/resume.
+- `4584655`: `3e-6` refill routed eval retry, pending at submission.
+
+### 2026-05-13 11:35 UTC - Split routed evals by checkpoint
+
+Cancelled the serial routed evals because the observed `600x8` runtime made
+`steps=25,50,75,100` impossible inside a single `06:00:00` Slurm job:
+
+- `4584396` (`1e-6`) was cancelled at `00:24:56`; it had only reached
+  `step_25` and had `228/4800` rollout rows in the partial output.
+- `4584655` (`3e-6`) was still pending and was cancelled before start.
+
+Observed before cancellation:
+
+- Router was healthy and had expanded to all 32 DP-aware workers.
+- Backend metrics showed `63-64` active requests and zero queued requests.
+- 60-second backend counter delta was about `2,120` generated tok/s across
+  the 32 eval GPUs.
+
+Submitted one routed `600x8` eval job per arm/checkpoint, each with its own
+output root and `08:00:00` wall time:
+
+- `1e-6`: step `25` -> `4584726`,
+  `offline_eval_600x8_8node_router_step25`.
+- `1e-6`: step `50` -> `4584727`,
+  `offline_eval_600x8_8node_router_step50`.
+- `1e-6`: step `75` -> `4584733`,
+  `offline_eval_600x8_8node_router_step75`.
+- `1e-6`: step `100` -> `4584739`,
+  `offline_eval_600x8_8node_router_step100`.
+- `3e-6`: step `25` -> `4584740`,
+  `offline_eval_600x8_8node_router_step25`.
+- `3e-6`: step `50` -> `4584741`,
+  `offline_eval_600x8_8node_router_step50`.
+- `3e-6`: step `75` -> `4584743`,
+  `offline_eval_600x8_8node_router_step75`.
+- `3e-6`: step `100` -> `4584744`,
+  `offline_eval_600x8_8node_router_step100`.
+
+All eight were pending on priority immediately after submission. The comparator
+now globs `offline_eval_600x8_8node_router*` so these step-split outputs will
+be included.
