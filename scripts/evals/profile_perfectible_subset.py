@@ -546,6 +546,8 @@ def main() -> int:
 
     readme.append("## Judge-fallback rate\n\n")
     near_one = sum(1 for r in sel_judge_rate if r >= 0.95)
+    rollouts_per_problem = 40
+    judge_calls_est = int(mean(sel_judge_rate) * len(selected) * rollouts_per_problem)
     readme.append(
         f"Fraction of rollouts where `math_verify` was ambiguous and the LLM judge (`gpt-5.4-mini`) had to be invoked. "
         f"Mean {mean(sel_judge_rate):.3f}, median {median(sel_judge_rate):.3f}. "
@@ -553,8 +555,8 @@ def main() -> int:
         f"plus a spike at ≈1.0 ({near_one} problems with judge rate ≥ 0.95) — these are problems whose canonical answer "
         "is in a form SymPy almost never simplifies (nested radicals, unsimplified piecewise expressions, "
         "named constants). Worth flagging because the judge is the modal scoring path and dominates eval compute "
-        f"cost — at ~{mean(sel_judge_rate):.0%} judge rate across 40 rollouts × 340 problems × {pass_ks[-1]} samples = "
-        f"≈{int(mean(sel_judge_rate) * 340 * 40):,} judge API calls per full evaluation.\n\n"
+        f"cost — at {mean(sel_judge_rate):.0%} judge rate over {len(selected)} problems × "
+        f"{rollouts_per_problem} rollouts ≈ **{judge_calls_est:,} judge API calls per full pass-at-{rollouts_per_problem} evaluation**.\n\n"
     )
     readme.append("![judge_rate](plots/judge_rate.png)\n\n")
 
