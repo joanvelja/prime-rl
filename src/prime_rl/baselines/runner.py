@@ -179,7 +179,7 @@ async def _run_rollouts(
     import verifiers as vf
     from verifiers.clients import resolve_client
     from verifiers.utils.async_utils import maybe_retry
-    from verifiers.utils.save_utils import state_to_output
+    from verifiers.utils.save_utils import make_serializable, state_to_output
 
     examples = _eval_examples(config, env)
     client = _make_client_config(config, endpoint, config.max_concurrency)
@@ -205,6 +205,22 @@ async def _run_rollouts(
         if not decoupled and progress_enabled
         else None
     )
+
+    # Streaming partial writer: append each completed (trial_index, output) tuple
+    # to raw_rollouts.partial.jsonl. On crash, the partial holds everything that
+    # made it through scoring. Final run_baseline write overwrites the canonical
+    # raw_rollouts.jsonl + records.jsonl from the in-memory gather result and
+    # unlinks the partial; the partial is only the salvage path.
+    partial_path = config.output_dir / "raw_rollouts.partial.jsonl"
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.unlink(missing_ok=True)
+    partial_fh = open(partial_path, "w", buffering=1)
+    partial_lock = asyncio.Lock()
+
+    async def _append_partial(trial_index: int, output: Any) -> None:
+        async with partial_lock:
+            partial_fh.write(json.dumps({"trial_index": trial_index, "output": output}, default=make_serializable))
+            partial_fh.write("\n")
 
     async def run_one_decoupled(example: dict[str, Any], trial_index: int) -> tuple[int, Any]:
         rollout_input = vf.RolloutInput(**example)
@@ -236,7 +252,9 @@ async def _run_rollouts(
             return state
 
         state = await maybe_retry(run_attempt, max_retries=config.max_retries)()
-        return trial_index, state_to_output(state, STATE_COLUMNS)
+        output = state_to_output(state, STATE_COLUMNS)
+        await _append_partial(trial_index, output)
+        return trial_index, output
 
     async def run_one_coupled(example: dict[str, Any], trial_index: int) -> tuple[int, Any]:
         async with generation_semaphore:
@@ -252,6 +270,7 @@ async def _run_rollouts(
             rollout_pbar.update(1)
         if progress_callback is not None:
             progress_callback("rollout", 1)
+        await _append_partial(trial_index, output)
         return trial_index, output
 
     async def run_group(example: dict[str, Any]) -> list[tuple[int, Any]]:
@@ -268,7 +287,10 @@ async def _run_rollouts(
             rollout_pbar.update(len(outputs))
         if progress_callback is not None:
             progress_callback("rollout", len(outputs))
-        return list(enumerate(outputs))
+        indexed = list(enumerate(outputs))
+        for trial_index, output in indexed:
+            await _append_partial(trial_index, output)
+        return indexed
 
     try:
         if requires_group:
@@ -281,6 +303,7 @@ async def _run_rollouts(
         ]
         return list(await asyncio.gather(*tasks))
     finally:
+        partial_fh.close()
         for pbar in (generation_pbar, scoring_pbar, rollout_pbar):
             if pbar is not None:
                 pbar.close()
@@ -402,6 +425,8 @@ def run_baseline(config: BaselineConfig, progress_callback: ProgressCallback | N
     data_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(config.output_dir / "raw_rollouts.jsonl", raw_outputs)
     _write_jsonl(config.output_dir / "records.jsonl", records)
+    # Canonical raw_rollouts.jsonl is in place; partial is now redundant.
+    (config.output_dir / "raw_rollouts.partial.jsonl").unlink(missing_ok=True)
     (config.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     (data_dir / f"{config.protocol}.json").write_text(json.dumps(question_rows, indent=2))
     (data_dir / "tokens.json").write_text(
