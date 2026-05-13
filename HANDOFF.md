@@ -20,7 +20,7 @@ Recipe now targets:
 - `trainer.optim.lr = 3e-6`.
 - `batch_size = 512`, `rollouts_per_example = 16`, so still 32 prompt
   groups/update.
-- `max_inflight_rollouts = 1536` to preserve the previous 3x in-flight factor.
+- `max_inflight_rollouts = 1024` for 2x in-flight rollout capacity.
 - DAPO-like refill/filtering is preserved:
   `train_batch_refill.enabled=true`, `candidate_groups_per_round=32`,
   `max_candidate_groups=128`, `easy_threshold=1.0`,
@@ -30,9 +30,9 @@ Verification just run:
 
 - `uv run --no-sync ruff check src/prime_rl/configs/inference.py src/prime_rl/inference/patches.py src/prime_rl/inference/vllm/worker/__init__.py tests/unit/test_configs.py`
 - `uv run --no-sync pytest tests/unit/test_configs.py::test_inference_fp32_lm_head_threads_through_vllm_additional_config`
-- `uv run --no-sync rl @ configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135`
-- `uv run --no-sync python -m prime_rl.entrypoints.launch rlvr --config configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1137`
-- `bash -n /tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135/rl.sbatch`
+- `uv run --no-sync rl @ configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1208`
+- `uv run --no-sync python -m prime_rl.entrypoints.launch rlvr --config configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1208`
+- `bash -n /tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1208/rl.sbatch`
 - HF smoke passed only after sourcing `.env` and redirecting caches to writable
   `/tmp`: the dataset has 340 train rows and columns
   `answer,difficulty,domain,id,problem,solution,source,tags`.
@@ -3807,3 +3807,32 @@ Updated launch plan for 8 nodes:
 - Monitor PID was replaced with `279784`; it now tracks:
   `4585067`, `4585068`, `4585069`, `4585070`, `4585071`, `4585072`,
   `4585073`, `4585074`, `4585323`, `4585324`.
+
+2026-05-13 12:07 UTC status update:
+
+- Added a generated-sbatch checkpoint preflight in
+  `src/prime_rl/entrypoints/launch.py`: explicit `--steps` are checked for
+  `STABLE` plus safetensors manifest/shards before vLLM starts. Verified with
+  `uv run --no-sync ruff check src/prime_rl/entrypoints/launch.py
+  tests/unit/test_launch_entrypoint.py` and
+  `uv run --no-sync pytest tests/unit/test_launch_entrypoint.py`.
+- `4585070` (`1e-6` step `75`) and `4585072` (`3e-6` step `25`) failed after
+  readiness with no matching stable checkpoint even though local discovery sees
+  the requested broadcasts.
+- `4585074` (`3e-6` step `75`) was cancelled; `node_7.log` showed a vLLM
+  engine-core initialization failure on `nid010501`, and the router kept
+  health-checking unhealthy DP ranks.
+- Submitted retries:
+  - `4585649`: `1e-6` step `75`.
+  - `4585647`: `3e-6` step `25`.
+  - `4585648`: `3e-6` step `75`.
+- Persistent monitor is now:
+  - PID: `24242`
+  - script:
+    `outputs/omni_math2_rlvr_canary/monitors/postrun_eval_monitor_20260513_stepsplit.sh`
+  - status:
+    `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`
+- At the `12:07 UTC` refresh, active evals were `4585069`, `4585071`,
+  `4585073`, `4585323`, `4585324`, and `4585647`; `4585648` and `4585649`
+  were queued. Partial rows were `1e-6 step50=429`,
+  `3e-6 step100=289`, and `3e-6 step50=230`.

@@ -76,3 +76,30 @@ def test_offline_eval_args_default_to_routed_multinode() -> None:
     assert "8" in rendered
     assert "--launch-srun-job-id" in rendered
     assert "${SLURM_JOB_ID}" in rendered
+
+
+def test_offline_eval_env_script_preflights_requested_weights() -> None:
+    args = argparse.Namespace(
+        root=Path("/repo"),
+        run_root=Path("outputs/run/run_default"),
+        weights_root=Path("outputs/run/run_default/broadcasts"),
+        output_dir=Path("/tmp/eval"),
+        wait_step=None,
+        base_url=None,
+        driver_node_count=0,
+        nodes=8,
+        patched_verifiers=Path("/tmp/verifiers"),
+        omni_env_path=Path("/repo/environments/omni_math2_singleturn"),
+        disable_router=False,
+        router_policy="round_robin",
+        compare_output=Path("/tmp/compare.md"),
+        steps=[75, 25],
+    )
+
+    rendered = launch._offline_eval_env_script(args, command=["uv", "run", "ok"])
+
+    assert "offline eval weight preflight" in rendered
+    assert "outputs/run/run_default/broadcasts/step_25" in rendered
+    assert "outputs/run/run_default/broadcasts/step_75" in rendered
+    assert "missing requested checkpoint directory" in rendered
+    assert "compgen -G" in rendered

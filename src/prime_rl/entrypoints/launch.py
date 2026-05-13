@@ -164,6 +164,7 @@ def _offline_eval_env_script(args: argparse.Namespace, *, command: Sequence[str]
     weights_root = args.weights_root or args.run_root / "broadcasts"
     output_dir = args.output_dir or args.run_root.parent / "offline_eval_600x8_all_ckpts"
     log_dir = output_dir / "logs"
+    requested_steps = tuple(sorted(set(args.steps or ())))
     wait_block = ""
     if args.wait_step is not None:
         wait_block = textwrap.dedent(
@@ -172,6 +173,35 @@ def _offline_eval_env_script(args: argparse.Namespace, *, command: Sequence[str]
             echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] waiting for $wait_path"
             while [[ ! -f "$wait_path" ]]; do
                 sleep 30
+            done
+            """
+        ).strip()
+    weight_preflight_block = ""
+    if requested_steps:
+        step_dirs = " ".join(_q(weights_root / f"step_{step}") for step in requested_steps)
+        weight_preflight_block = textwrap.dedent(
+            f"""
+            echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] offline eval weight preflight: {_q(weights_root)}"
+            print_available_weights() {{
+                echo "available stable checkpoint markers under {_q(weights_root)}:" >&2
+                find {_q(weights_root)} -maxdepth 2 \\( -name STABLE -o -name 'model.safetensors.index.json' -o -name '*.safetensors' \\) -printf '%p\\n' >&2 || true
+            }}
+            for step_dir in {step_dirs}; do
+                if [[ ! -d "$step_dir" ]]; then
+                    echo "missing requested checkpoint directory: $step_dir" >&2
+                    print_available_weights
+                    exit 6
+                fi
+                if [[ ! -f "$step_dir/STABLE" ]]; then
+                    echo "requested checkpoint is not marked STABLE: $step_dir" >&2
+                    print_available_weights
+                    exit 6
+                fi
+                if [[ ! -f "$step_dir/model.safetensors.index.json" ]] && ! compgen -G "$step_dir/*.safetensors" >/dev/null; then
+                    echo "requested checkpoint has no safetensors manifest or shards: $step_dir" >&2
+                    print_available_weights
+                    exit 6
+                fi
             done
             """
         ).strip()
@@ -225,6 +255,7 @@ def _offline_eval_env_script(args: argparse.Namespace, *, command: Sequence[str]
 
         mkdir -p {_q(log_dir)}
         {wait_block}
+        {weight_preflight_block}
 
         log_path={_q(log_dir)}/launcher_$(date -u '+%Y%m%dT%H%M%SZ').log
         echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] logging to $log_path"

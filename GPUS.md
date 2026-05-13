@@ -720,3 +720,35 @@ Current corrected `1e-6` targets:
 
 `3e-6` targets remain `25`, `50`, `75`, and `100`; all four stable broadcasts
 exist under `lr3e6_28i4t_refill_shared_submit_20260512_2155/run_default/broadcasts`.
+
+Update at `2026-05-13 12:07 UTC`: checkpoint discovery failures were not
+limited to `1e-6`. `3e-6` step `25` also failed after readiness with no
+matching stable checkpoint, while local files are present. A second issue hit
+`3e-6` step `75`: one backend node (`nid010501`) failed vLLM engine-core
+initialization, so the job was cancelled and retried.
+
+Added an offline-eval sbatch preflight in `src/prime_rl/entrypoints/launch.py`
+for explicit `--steps`: verify `step_N/STABLE` plus a safetensors manifest or
+shards before starting vLLM. This is not a throughput improvement; it prevents
+burning 8 nodes for several minutes before discovering an invalid or invisible
+checkpoint.
+
+Current retry set:
+
+| arm | checkpoint | job | note |
+|---|---:|---:|---|
+| `1e-6` refill | 25 | `4585323` | running; preflight passed |
+| `1e-6` refill | 50 | `4585069` | running; partial rows |
+| `1e-6` refill | 75 | `4585649` | queued retry with preflight |
+| `1e-6` refill | 85 | `4585324` | running; actual final checkpoint |
+| `3e-6` refill | 25 | `4585647` | running retry with preflight |
+| `3e-6` refill | 50 | `4585073` | running; partial rows |
+| `3e-6` refill | 75 | `4585648` | queued retry after vLLM init failure |
+| `3e-6` refill | 100 | `4585071` | running; partial rows |
+
+Persistent monitor:
+
+```text
+outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md
+outputs/omni_math2_rlvr_canary/monitors/postrun_eval_monitor_20260513_stepsplit.pid
+```
