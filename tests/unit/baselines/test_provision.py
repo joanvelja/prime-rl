@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from prime_rl.baselines.config import BaselineConfig, LaunchConfig
-from prime_rl.baselines.provision import DP_COORDINATOR_STARTUP_TIMEOUT, InferenceProvisioner
+from prime_rl.baselines.provision import DP_COORDINATOR_STARTUP_TIMEOUT, InferenceProvisioner, _find_vllm_router
 
 
 def test_external_provisioner_uses_configured_wait_timeout(monkeypatch, tmp_path: Path):
@@ -152,3 +154,38 @@ def test_srun_provisioner_pins_local_endpoint_to_current_slurm_node(monkeypatch,
     assert "--nodes=1" in cmd
     assert "--jobid=4441280" in cmd
     assert "--nodelist=nid000123" in cmd
+
+
+def test_find_vllm_router_falls_back_to_project_venv(monkeypatch, tmp_path: Path):
+    router = tmp_path / ".venv" / "bin" / "vllm-router"
+    router.parent.mkdir(parents=True)
+    router.write_text("#!/usr/bin/env bash\n")
+    router.chmod(0o755)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("prime_rl.baselines.provision.shutil.which", lambda _: None)
+
+    assert _find_vllm_router() == str(router)
+
+
+def test_srun_multinode_requires_router_unless_explicitly_overridden(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("prime_rl.baselines.provision._find_vllm_router", lambda: None)
+    monkeypatch.setattr("prime_rl.baselines.provision._multinode_hostnames", lambda job_id=None: ["nid1", "nid2"])
+    monkeypatch.delenv("PRIME_RL_ALLOW_DIRECT_BACKEND", raising=False)
+    config = BaselineConfig(
+        env_id="hf_singleturn",
+        model="model",
+        output_dir=tmp_path,
+        api_key_var="VLLM_API_KEY",
+        launch=LaunchConfig(
+            mode="srun_multinode",
+            nodes=2,
+            gpus_per_node=4,
+            dp=8,
+            data_parallel_size_local=4,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="vllm-router is required"):
+        with InferenceProvisioner(config):
+            pass

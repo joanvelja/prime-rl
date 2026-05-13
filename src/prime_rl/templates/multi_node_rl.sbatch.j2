@@ -71,6 +71,7 @@ configure_prime_rl_runtime() {
     module load brics/aws-ofi-nccl 2>/dev/null || true
 
     cd "$PROJECT_DIR"
+    export PATH="$PROJECT_DIR/.venv/bin:$PATH"
     set -a
     [ -f .env ] && source .env
     set +a
@@ -151,6 +152,7 @@ if [ "${PRIME_RL_DISABLE_VLLM_ROUTER:-0}" = "1" ]; then
 elif [ -n "$VLLM_ROUTER_BIN" ]; then
     USE_VLLM_ROUTER=1
 fi
+export VLLM_ROUTER_POLICY="${PRIME_RL_VLLM_ROUTER_POLICY:-round_robin}"
 
 {% if wandb_shared -%}
 export WANDB_SHARED_MODE=1
@@ -171,12 +173,21 @@ if [ "$USE_VLLM_ROUTER" -ne 1 ]; then
     exit 1
 fi
 {%- else -%}
+if [ "$USE_VLLM_ROUTER" -ne 1 ]; then
+    if [ "${PRIME_RL_ALLOW_DIRECT_BACKEND:-0}" = "1" ] && [ "$NODES_PER_INFER_REPLICA" -eq 1 ] && [ "$INFERENCE_DP_LOCAL" -eq 1 ]; then
+        echo "PRIME_RL_ALLOW_DIRECT_BACKEND=1; using direct backend for a single-server inference replica."
+    else
+        echo "vllm-router is required for non-disaggregated multi-node inference. Direct-backend fallback silently under-balances multi-server vLLM; set PRIME_RL_ALLOW_DIRECT_BACKEND=1 only for a deliberate single-server debug run."
+        exit 1
+    fi
+fi
 if [ "$USE_VLLM_ROUTER" -ne 1 ] && [ "$NODES_PER_INFER_REPLICA" -ne 1 ]; then
-    echo "vllm-router is unavailable and direct-backend fallback is only valid for one-node inference replicas."
+    echo "direct-backend fallback is only valid for one-node inference replicas."
     exit 1
 fi
 {%- endif %}
 echo "USE_VLLM_ROUTER=${USE_VLLM_ROUTER} VLLM_ROUTER_BIN=${VLLM_ROUTER_BIN:-none}"
+echo "VLLM_ROUTER_POLICY=${VLLM_ROUTER_POLICY}"
 
 # Build per-replica router URLs, admin URLs, and backend args for the router
 INFER_URLS=""
@@ -391,12 +402,13 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
         "$VLLM_ROUTER_BIN" \
-            --policy consistent_hash \
+            --policy "$VLLM_ROUTER_POLICY" \
             --vllm-pd-disaggregation \
             $REPLICA_ROUTER_ARGS \
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
             --intra-node-data-parallel-size {{ dp_per_node }} \
+            --api-key "${VLLM_API_KEY:-EMPTY}" \
             --worker-startup-timeout-secs 4200 \
             >> $ROUTER_LOG 2>&1 &
     fi
@@ -418,11 +430,12 @@ if [ "$SLURM_PROCID" -lt "$NUM_INFER_NODES" ]; then
         REPLICA_ROUTER_ARGS=$(echo "$ALL_ROUTER_ARGS" | cut -d"|" -f$((REPLICA_IDX + 1)))
 
         "$VLLM_ROUTER_BIN" \
-            --policy consistent_hash \
+            --policy "$VLLM_ROUTER_POLICY" \
             --worker-urls $REPLICA_ROUTER_ARGS \
             --host 0.0.0.0 \
             --port $ROUTER_PORT \
             --intra-node-data-parallel-size {{ dp_per_node }} \
+            --api-key "${VLLM_API_KEY:-EMPTY}" \
             --worker-startup-timeout-secs 4200 \
             >> $ROUTER_LOG 2>&1 &
     elif [ "$RANK_IN_REPLICA" -eq 0 ]; then

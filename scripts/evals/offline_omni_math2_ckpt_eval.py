@@ -8,7 +8,6 @@ import multiprocessing
 import os
 import queue
 import re
-import shutil
 import time
 import traceback
 from collections.abc import Iterable
@@ -16,10 +15,18 @@ from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from prime_rl.baselines.benchmark import artifact_complete, expected_rollouts
 from prime_rl.baselines.config import BaselineConfig, load_config
 from prime_rl.baselines.metrics import summarize_records
-from prime_rl.baselines.provision import Endpoint, InferenceProvisioner, wait_for_endpoint
+from prime_rl.baselines.provision import (
+    Endpoint,
+    InferenceProvisioner,
+    _find_vllm_router,
+    _router_health_url,
+    wait_for_endpoint,
+)
 from prime_rl.baselines.runner import _eval_examples, _example_id, prepare_import_paths, run_baseline
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.client import setup_admin_clients, update_weights
@@ -489,7 +496,7 @@ def _derive_generation_urls(
 ) -> list[str]:
     disable_router = os.environ.get("PRIME_RL_DISABLE_VLLM_ROUTER") == "1"
     if config is not None and config.launch.mode == "srun_multinode" and (
-        disable_router or shutil.which("vllm-router") is None
+        disable_router or _find_vllm_router() is None
     ):
         return [_normal_generation_url(url) for url in admin_urls]
     return [_normal_generation_url(endpoint.base_url)]
@@ -500,10 +507,29 @@ def _wait_for_all_endpoints(
     urls: Iterable[str],
     api_key_var: str,
     timeout_s: float,
+    router_urls: Iterable[str] = (),
 ) -> None:
+    router_set = {_normal_generation_url(url) for url in router_urls}
+    headers = {"Authorization": f"Bearer {os.environ.get(api_key_var, 'EMPTY')}"}
     for url in sorted(set(urls)):
         print(f"waiting for inference endpoint {url}")
-        wait_for_endpoint(url, api_key_var, timeout_s)
+        if _normal_generation_url(url) not in router_set:
+            wait_for_endpoint(url, api_key_var, timeout_s)
+            continue
+
+        deadline = time.time() + timeout_s
+        last_error: Exception | None = None
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            while time.time() < deadline:
+                try:
+                    response = client.get(_router_health_url(url))
+                    response.raise_for_status()
+                    break
+                except Exception as exc:
+                    last_error = exc
+                time.sleep(1.0)
+            else:
+                raise RuntimeError(f"Inference router {url} did not become ready. Last error: {last_error}")
 
 
 async def _update_endpoint_weights(
@@ -773,6 +799,7 @@ def main() -> None:
             urls=[*generation_urls, *admin_urls],
             api_key_var=endpoint.api_key_var,
             timeout_s=args.launch_wait_timeout_s,
+            router_urls=[] if args.base_url else [endpoint.base_url],
         )
 
         for arm, run_root in runs:

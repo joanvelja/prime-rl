@@ -1,11 +1,11 @@
 # Handoff: Omni-MATH-2 OLMo3 RLVR Canaries
 
-> Last updated: 2026-05-12 20:31 UTC
+> Last updated: 2026-05-13 09:46 UTC
 > Session focus: 8-node Isambard smoke/probe work for OLMo3 RLVR utilization,
 > with solved-only filtering preserved and no hard-threshold quarantine.
 > Trial journal: append to `TRIALS.md` after each material run/config/code trial.
 
-## 2026-05-12 20:31 UTC Current State
+## 2026-05-12 21:56 UTC Current State
 
 Do not touch the GPUs in the live allocation unless the user explicitly asks.
 The user is also working in parallel there.
@@ -22,33 +22,41 @@ Live `1e-6` refill run:
   `rollouts_per_example=8`, `max_inflight_rollouts=768`,
   `max_async_level=4`, filesystem broadcast, prefix caching off,
   solved-only filtering (`easy_threshold=1.0`, no `hard_threshold`).
-- Latest read-only check: trainer step 36 completed at `20:30:17`, MFU `11.5%`,
-  peak trainer memory `84.0 GiB`; orchestrator was working on step 37.
+- Latest read-only check: trainer step 53 completed at `21:39:54`, MFU `10.4%`,
+  peak trainer memory `84.0 GiB`; orchestrator was working on step 55.
+- Last 15 completed orchestrator steps averaged `238.21s`, reward `0.4077`,
+  and mean sequence length `5829` tokens/sample.
+- Last 15 completed trainer steps averaged `227.58s`, `5940 tok/s`, and
+  `10.51%` MFU.
 - This live run is pre-`c8a5b8307` adaptive refill patch. Its refill path still
   draws full candidate batches for each retry.
 
-Queued parallel LR arm:
+Parallel LR arm status:
 
-- Slurm job: `4572407`
-- Status at launch: pending `(Priority)`.
-- Submit dir:
+- Failed first submission: Slurm job `4572407`, state `FAILED`, elapsed `44s`,
+  exit `15:0`. `sacct` showed `.0` completed and `.1` failed, so the failure
+  was in the main multi-node `srun` phase, before meaningful RL runtime. The
+  submit dir was under node-local `/tmp`, so durable logs were not available;
+  do not reuse that path:
   `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029`
+- Active retry: Slurm job `4574276`, job name
+  `olmo3-28i4t-refill-lr3e6b`, pending on priority at `21:54 UTC`.
+- Durable submit dir:
+  `/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_20260512_2155`
 - Temp config:
-  `tmp/olmo3_28i4t_refill_patch_lr3e6_100step_20260512.toml`
+  `tmp/olmo3_28i4t_refill_patch_lr3e6_100step_shared_20260512_2150.toml`
 - Tmux watcher: `joanv_cc_8node:6 lr3e6-watch`
 - Shape: same as the live run except `trainer.optim.lr = 3e-6` and it uses
-  the patched adaptive refill code from commit `c8a5b8307`.
+  the patched adaptive refill code.
 - This is a separate `sbatch`; it does not use the live allocation.
 
 Code state:
 
-- Commit `c8a5b8307 Optimize DAPO refill candidate batching` was pushed to
-  `joanvelja/feat/omni-math2-olmo3-rlvr-canary`.
-- Local `git status` may still show `[ahead 1]` because updating
-  `.git/refs/remotes/...` failed on a read-only filesystem after the push.
-  The remote push itself succeeded (`3a375ab48..c8a5b8307`).
-- Unrelated dirty files remain and were intentionally not included:
-  `configs/baselines/omni_math2_perfectible_olmo3_fp8kv.toml` and
+- Adaptive refill code is present in the current working tree. Current HEAD at
+  the last check was `e5c993ede feat(baselines): re-add FP8 KV + prefix caching
+  + stream_interval to omni-math2 olmo3 config`.
+- Unrelated dirty files remain and were intentionally not included in this LR
+  work: `src/prime_rl/baselines/provision.py` and
   `docs/plans/2026-05-07-fused-mlp-kernels.md`.
 
 Verification for `c8a5b8307`:
@@ -57,26 +65,33 @@ Verification for `c8a5b8307`:
 - Ruff on touched files: passed.
 - Dry-run:
   `/tmp/olmo3_refill_bottleneck_patch_explicit_dryrun_20260512T2021`.
-- LR-arm dry-run:
+- Failed LR-arm dry-run used `/tmp`:
   `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029`.
+- Durable LR-arm dry-run:
+  `/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_20260512_2155`.
 - Generated LR-arm configs confirmed `lr=3e-06`, `batch_size=256`,
   `max_inflight_rollouts=768`, `max_async_level=4`, `num_workers=28`,
   `gpu_memory_utilization=0.95`, `online_difficulty_filtering=true`,
   `easy_threshold=1.0`, no `hard_threshold`, `candidate_groups_per_round=32`,
   `max_candidate_groups=128`.
-- Generated LR-arm `rl.sbatch` passed `bash -n`.
+- Generated durable LR-arm `rl.sbatch` uses absolute shared output paths and
+  passed `bash -n`.
 
 Next checks:
 
-1. Wait for `4572407` to start; verify worker count, router/backend URLs,
+1. Wait for `4574276` to start; verify worker count, router/backend URLs,
    first trainer step, and W&B run id.
-2. Compare `4572407` vs `4570549` on:
+2. If `4574276` fails before startup, read the durable job log first:
+   `/lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl/outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_20260512_2155/job_4574276.log`.
+   Prediction: if `.0` succeeds and `.1` fails, this is main `srun` launch/env,
+   not LR/refill behavior.
+3. Compare `4574276` vs `4570549` on:
    `train_batch_refill/reward_unconditioned_on_filtering/mean`,
    `train_batch_refill/reward_conditioned_on_filtering/mean`,
    `train_batch_refill/prompts_consumed_per_accepted_group`,
    `train_batch_refill/overflow_groups`, step time, trainer MFU, and eventual
    offline eval.
-3. Treat `4570549` vs `4572407` as a bundled comparison
+4. Treat `4570549` vs `4574276` as a bundled comparison
    (`1e-6 + old refill scheduler` vs `3e-6 + adaptive refill scheduler`).
    If this looks good or ambiguous, run a patched `1e-6` control before making
    a clean LR-only claim.
@@ -3478,3 +3493,130 @@ Updated launch plan for 8 nodes:
 - Observed clean-launch GPU state: `nid010685` driver-only with no vLLM GPU
   residency; all 28 vLLM GPUs at 100% util / about 88.5 GiB used after
   generation started.
+
+2026-05-12 22:22 UTC post-run offline eval automation:
+
+- Added durable comparator:
+  `scripts/evals/compare_omni_math2_offline_evals.py`.
+  It writes
+  `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`,
+  pulling the user-provided raw OLMo Inst DPO reference plus existing
+  `600x8` offline eval summaries for non-filtering 14i/2t and 28i/4t runs.
+  It will pick up DAPO refill eval summaries as soon as they appear.
+- Added reusable Slurm submitter:
+  `scripts/evals/submit_omni_math2_postrun_offline_eval.sh`.
+  It submits an 8-node dependent eval job, keeps the batch driver off the 7
+  vLLM nodes via `PRIME_RL_MULTINODE_HOSTS`, disables `vllm-router`, evaluates
+  stable checkpoints on the 25-step grid up to 100, then reruns the comparator.
+- Live `1e-6` DAPO refill run:
+  - training job: `4570549`
+  - post-run eval job: `4574647`
+  - dependency: `afterany:4570549`
+  - eval output:
+    `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_refill_20260512_1745/offline_eval_600x8_7node_clean`
+  - submission record:
+    `.../offline_eval_600x8_7node_clean/POSTRUN_EVAL_SUBMISSION.md`
+- LR `3e-6` arm:
+  - current job: `4574276`, still pending on priority at setup time.
+  - supervisor pane: `joanv_cc_8node:6 lr3e6-supervise`.
+  - supervisor status:
+    `outputs/omni_math2_rlvr_canary/lr3e6_supervisor_20260512/status.md`.
+  - The supervisor now submits the matching post-run offline eval for whatever
+    final LR Slurm job ID it is actually supervising, so retry job IDs do not
+    strand an `afterok` dependency on the wrong job.
+- Codex-side read-only monitor session `13539` polls the two training jobs,
+  live post-run eval job, LR supervisor status, and comparison markdown every
+  120 seconds.
+
+2026-05-13 09:30 UTC morning update:
+
+- Active goal was recreated after context transition: continue OmniMath2 OLMo3
+  RLVR without GIGO, finish DAPO refill evals, compare `1e-6` vs `3e-6` and
+  non-filter baselines, keep docs current.
+- `1e-6` refill training job `4570549` timed out after 6h. Usable stable
+  checkpoints: `25,50,75`; no `step_100`.
+- `3e-6` refill training job `4574276` timed out after 8h at Slurm level, but
+  logs and stable broadcasts reached `step_100`.
+- First `1e-6` post-run eval job `4574647` failed due a vLLM worker port bind
+  collision (`EADDRINUSE`), not a model quality failure.
+- Retried `1e-6` eval: Slurm job `4582655`, running.
+- Submitted missing `3e-6` eval: Slurm job `4582691`, running.
+- Visible monitor pane: `tmux attach -t joanv_cc_8node`, window
+  `4:eval-watch`.
+- Monitor status file:
+  `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513.md`
+- Comparison report:
+  `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`
+- New reusable monitor script:
+  `scripts/evals/monitor_omni_math2_postrun_offline_evals.sh`
+- Stale item: the old `lr3e6_supervisor_20260512/status.md` stopped updating
+  around `2026-05-13T04:59Z`; ignore it unless cross-checking historical state.
+
+2026-05-13 09:46 UTC refill/MFU correction:
+
+- Corrected an earlier bad inference: `1e-6` job `4570549` was **not**
+  non-refill. It used the first DAPO-style refill implementation from commit
+  `0470684cb`, with full `batch_size=256` candidate batches per refill round.
+  Its old warning string
+  `Attempt ... filtered out all 256 rollouts - retrying batch generation` is
+  misleading because the refill branch could still accept partial groups before
+  falling through to that warning path.
+- `3e-6` job `4574276` used the later optimized candidate-batched refill from
+  commit `c8a5b8307`, with `candidate_groups_per_round=32` and
+  `max_candidate_groups=128`.
+- Generated config evidence:
+  - `1e-6`: `[train_batch_refill] enabled = true`, `max_refill_rounds = 4`,
+    no candidate-group budget fields.
+  - `3e-6`: same refill enabled plus `candidate_groups_per_round = 32` and
+    `max_candidate_groups = 128`.
+- Parsed trainer MFU:
+  - non-refill `28i/4t bs256`, steps `25-74`: `49.6s` mean step time,
+    `28.70%` mean trainer MFU, `16,156` tok/s.
+  - `1e-6` refill v1, steps `25-74`: `230.0s`, `10.82%`, `6,119` tok/s.
+  - `3e-6` refill v2, steps `25-74`: `191.6s`, `12.40%`, `6,990` tok/s.
+- Parsed refill metrics:
+  - `1e-6` refill v1, steps `25-74`: `65.28` candidate groups, `32.00`
+    accepted groups, `25.40` filtered groups, `2.04` prompts per accepted
+    group, unconditioned reward `0.248`, conditioned reward `0.408`.
+  - `3e-6` refill v2, steps `25-74`: `55.26` candidate groups, `32.00`
+    accepted groups, `21.80` filtered groups, `1.73` prompts per accepted
+    group, unconditioned reward `0.258`, conditioned reward `0.418`.
+- Interpretation: optimized refill reduced candidate waste relative to v1, but
+  it still did **not** improve MFU versus the non-refill 28i/4t baseline.
+  Current open question is quality/pass@k from the running offline evals.
+
+2026-05-13 10:45 UTC launch-command cleanup:
+
+- Added a canonical launch entrypoint:
+  `uv run --no-sync python -m prime_rl.entrypoints.launch`.
+- Subcommands:
+  - `rlvr`: one command for PrimeRL RLVR launches/dry-runs.
+  - `offline-eval`: one command for in-allocation or dependent-sbatch
+    OmniMath2 checkpoint evals.
+  - `data`: one command for baseline rollout generation and/or perfectible
+    dataset filtering.
+- Added `docs/launch.md` with the current recipes.
+- Updated `skills/entrypoints/SKILL.md` so future agents stop recreating the
+  call shape.
+- `scripts/evals/run_omni_math2_offline_eval_28i4t.sh` and
+  `scripts/evals/submit_omni_math2_postrun_offline_eval.sh` remain for
+  compatibility, but now delegate to `prime_rl.entrypoints.launch`.
+- Verified:
+  ```bash
+  uv run --no-sync ruff check src/prime_rl/entrypoints/launch.py \
+    tests/unit/test_launch_entrypoint.py scripts/evals/offline_omni_math2_ckpt_eval.py \
+    scripts/evals/compare_omni_math2_offline_evals.py tests/unit/baselines/test_provision.py
+  uv run --no-sync pytest tests/unit/test_launch_entrypoint.py tests/unit/baselines/test_provision.py
+  bash -n scripts/evals/run_omni_math2_offline_eval_28i4t.sh \
+    scripts/evals/submit_omni_math2_postrun_offline_eval.sh
+  uv run --no-sync python -m prime_rl.entrypoints.launch rlvr \
+    --config configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml \
+    --dry-run --output-dir /tmp/prime-launch-rlvr-real
+  bash -n /tmp/prime-launch-rlvr-real/rl.sbatch
+  ```
+- Active routed eval relaunches:
+  - `4583877`: `1e-6` DAPO refill offline eval, true 8-node routed route.
+  - `4583883`: `3e-6` DAPO refill offline eval, true 8-node routed route.
+  - Both routers reached 8 healthy hosts and expanded to 32 DP-aware workers.
+  - Both are currently on `step_25` after successful backend
+    pause/update/resume.

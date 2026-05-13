@@ -49,6 +49,7 @@ trainer = "prime_rl.trainer.rl.train:main"
 orchestrator = "prime_rl.orchestrator.orchestrator:main"
 env-server = "prime_rl.orchestrator.env_server.env_server:main"
 baseline-eval = "prime_rl.baselines.cli:main"
+prime-launch = "prime_rl.entrypoints.launch:main"
 
 [project.entry-points."vllm.general_plugins"]
 prime_rl = "prime_rl.inference.patches:transformers_v5_compat"

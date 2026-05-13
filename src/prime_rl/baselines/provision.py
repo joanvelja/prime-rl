@@ -36,6 +36,13 @@ def _health_url(base_url: str) -> str:
     return f"{root}/v1/models"
 
 
+def _router_health_url(base_url: str) -> str:
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    return f"{root}/health"
+
+
 def _api_key(api_key_var: str) -> str:
     return os.environ.get(api_key_var, "EMPTY")
 
@@ -86,6 +93,32 @@ def _wait_for_local_endpoint(
     raise RuntimeError(f"Inference endpoint {base_url} did not become ready. Last error: {last_error}")
 
 
+def _wait_for_local_router(
+    base_url: str,
+    timeout_s: float,
+    proc: subprocess.Popen[str],
+    log_path: Path,
+) -> None:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+    with httpx.Client(timeout=10.0) as client:
+        while time.time() < deadline:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                raise RuntimeError(
+                    f"Inference process exited with code {exit_code} before router became ready. "
+                    f"Last error: {last_error}. See {log_path}"
+                )
+            try:
+                response = client.get(_router_health_url(base_url))
+                response.raise_for_status()
+                return
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.0)
+    raise RuntimeError(f"Inference router {base_url} did not become ready. Last error: {last_error}")
+
+
 def _log_has_dp_coordinator_startup_timeout(log_path: Path) -> bool:
     return log_path.exists() and DP_COORDINATOR_STARTUP_TIMEOUT in log_path.read_text(errors="replace")
 
@@ -108,6 +141,16 @@ def _multinode_hostnames(job_id: str | None = None) -> list[str]:
     if override := os.environ.get("PRIME_RL_MULTINODE_HOSTS"):
         return override.split()
     return _slurm_hostnames(job_id)
+
+
+def _find_vllm_router() -> str | None:
+    if router_bin := shutil.which("vllm-router"):
+        return router_bin
+
+    local_router = Path.cwd() / ".venv" / "bin" / "vllm-router"
+    if local_router.is_file() and os.access(local_router, os.X_OK):
+        return str(local_router)
+    return None
 
 
 def write_inference_config(config: BaselineConfig) -> Path:
@@ -182,8 +225,10 @@ ENABLE_MULTINODE_TP={1 if _uses_multinode_tensor_parallel(config) else 0}
 USE_ROUTER={1 if use_router else 0}
 
 cd "$PROJECT_DIR"
+export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 [ -f .env ] && source .env
 mkdir -p "$OUTPUT_DIR"
+ROUTER_POLICY="${{PRIME_RL_VLLM_ROUTER_POLICY:-round_robin}}"
 
 if [ -n "${{PRIME_RL_MULTINODE_HOSTS:-}}" ]; then
     read -ra HOSTNAMES <<< "$PRIME_RL_MULTINODE_HOSTS"
@@ -204,6 +249,22 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 # observed to crash vLLM v1 mid-run with api_server_count>1). Trainer uses
 # True, but the baselines path is inference-only.
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
+# Avoid HF Hub 429 rate-limit storms during cold start. Gemma tokenizer init
+# calls model_info() to probe "is this a Mistral base model?"; with 8 nodes ×
+# 4 DP cores starting in parallel we exhaust the 1000-req/5min quota. Weights
+# are pre-cached at HF_HUB_CACHE (Lustre), so offline mode is safe.
+export HF_HUB_OFFLINE="${{HF_HUB_OFFLINE:-1}}"
+export TRANSFORMERS_OFFLINE="${{TRANSFORMERS_OFFLINE:-1}}"
+# Put torch.compile / triton caches on each node's local tmpfs to avoid the
+# Lustre "Stale file handle" race when 32 workers autotune the same kernels
+# in parallel on a cold cache. /tmp is 334G tmpfs per node on Isambard.
+# Include job + hostname so concurrent jobs on shared nodes don't collide.
+export TORCHINDUCTOR_CACHE_DIR="${{TORCHINDUCTOR_CACHE_DIR:-/tmp/torch_inductor_${{SLURM_JOB_ID:-${{USER}}}}_$(hostname -s)}}"
+export TRITON_CACHE_DIR="${{TRITON_CACHE_DIR:-/tmp/triton_cache_${{SLURM_JOB_ID:-${{USER}}}}_$(hostname -s)}}"
+# vLLM keeps its own torch.compile cache at $VLLM_CACHE_ROOT/torch_compile_cache;
+# default is ~/.cache/vllm (Lustre on Isambard). Redirect to /tmp too.
+export VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT:-/tmp/vllm_cache_${{SLURM_JOB_ID:-${{USER}}}}_$(hostname -s)}}"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$VLLM_CACHE_ROOT"
 
 module load brics/nccl 2>/dev/null || true
 module load brics/aws-ofi-nccl 2>/dev/null || true
@@ -249,12 +310,14 @@ if [ "$USE_ROUTER" -eq 1 ] && [ "$INFER_NODE_RANK" -eq 0 ]; then
     ROUTER_LOG="$OUTPUT_DIR/router.log"
     echo "Starting vllm-router on $LOCAL_IP:$ROUTER_PORT for $ROUTER_ARGS" | tee "$ROUTER_LOG"
     vllm-router \\
-        --policy consistent_hash \\
+        --policy "$ROUTER_POLICY" \\
         --worker-urls $ROUTER_ARGS \\
         --host 0.0.0.0 \\
         --port "$ROUTER_PORT" \\
+        --intra-node-data-parallel-size "$DP_LOCAL" \\
+        --api-key "${{VLLM_API_KEY:-EMPTY}}" \\
         --worker-startup-timeout-secs 4200 \\
-        --log-level debug \\
+        --log-level info \\
         >> "$ROUTER_LOG" 2>&1 &
 elif [ "$INFER_NODE_RANK" -eq 0 ]; then
     echo "vllm-router unavailable; exposing head backend directly on $LOCAL_IP:$BACKEND_PORT" | tee "$OUTPUT_DIR/router.log"
@@ -324,6 +387,12 @@ CPU_ARGS=()
 if [ -n "$CPUS_PER_TASK" ]; then
     CPU_ARGS=(--cpus-per-task="$CPUS_PER_TASK")
 fi
+OVERLAP_ARGS=()
+EXCLUSIVE_ARGS=(--exclusive)
+if [ "${{PRIME_RL_SRUN_STEP_OVERLAP:-1}}" = "1" ]; then
+    OVERLAP_ARGS=(--overlap)
+    EXCLUSIVE_ARGS=()
+fi
 
 cleanup() {{
     for pid in "${{PIDS[@]:-}}"; do
@@ -334,7 +403,7 @@ trap cleanup TERM INT EXIT
 
 for idx in "${{!HOSTS[@]}}"; do
     host="${{HOSTS[$idx]}}"
-    srun $JOB_ARG \\
+    srun "${{OVERLAP_ARGS[@]}}" $JOB_ARG \\
         "${{NETWORK_ARGS[@]}}" \\
         --nodes=1 \\
         --ntasks=1 \\
@@ -342,7 +411,7 @@ for idx in "${{!HOSTS[@]}}"; do
         --nodelist="$host" \\
         --gpus-per-task="$GPUS_PER_NODE" \\
         "${{CPU_ARGS[@]}}" \\
-        --exclusive \\
+        "${{EXCLUSIVE_ARGS[@]}}" \\
         bash "$NODE_SCRIPT" "$idx" &
     PIDS+=("$!")
 done
@@ -386,11 +455,25 @@ class InferenceProvisioner(AbstractContextManager[Endpoint]):
             if launch.nodes < 2:
                 raise ValueError("launch.nodes must be >= 2 when launch.mode='srun_multinode'")
             disable_router = os.environ.get("PRIME_RL_DISABLE_VLLM_ROUTER") == "1"
+            allow_direct_backend = os.environ.get("PRIME_RL_ALLOW_DIRECT_BACKEND") == "1"
+            uses_multinode_tp = _uses_multinode_tensor_parallel(self.config)
+            router_bin = _find_vllm_router()
             use_router = (
                 not disable_router
-                and shutil.which("vllm-router") is not None
-                and not _uses_multinode_tensor_parallel(self.config)
+                and router_bin is not None
+                and not uses_multinode_tp
             )
+            if not use_router and not uses_multinode_tp and not allow_direct_backend:
+                reason = (
+                    "PRIME_RL_DISABLE_VLLM_ROUTER=1"
+                    if disable_router
+                    else "vllm-router was not found on PATH or in .venv/bin"
+                )
+                raise RuntimeError(
+                    "vllm-router is required for srun_multinode inference. "
+                    "Direct-backend fallback silently under-balances multi-server vLLM; "
+                    f"{reason}. Set PRIME_RL_ALLOW_DIRECT_BACKEND=1 only for a deliberate debug run."
+                )
             multinode_hostnames = _multinode_hostnames(launch.srun_job_id)
             if len(multinode_hostnames) < launch.nodes:
                 raise RuntimeError(f"Requested {launch.nodes} nodes but Slurm exposes only {multinode_hostnames}")
@@ -452,13 +535,21 @@ class InferenceProvisioner(AbstractContextManager[Endpoint]):
                 start_new_session=True,
             )
             try:
-                _wait_for_local_endpoint(
-                    base_url,
-                    self.config.api_key_var,
-                    timeout_s=launch.wait_timeout_s,
-                    proc=self.proc,
-                    log_path=log_path,
-                )
+                if launch.mode == "srun_multinode" and use_router:
+                    _wait_for_local_router(
+                        base_url,
+                        timeout_s=launch.wait_timeout_s,
+                        proc=self.proc,
+                        log_path=log_path,
+                    )
+                else:
+                    _wait_for_local_endpoint(
+                        base_url,
+                        self.config.api_key_var,
+                        timeout_s=launch.wait_timeout_s,
+                        proc=self.proc,
+                        log_path=log_path,
+                    )
                 return Endpoint(base_url=base_url, api_key_var=self.config.api_key_var)
             except RuntimeError as exc:
                 last_error = exc

@@ -6,21 +6,18 @@ utilization.
 
 ## Current Jobs
 
-As of 2026-05-12 20:31 UTC:
+As of 2026-05-13 09:46 UTC:
 
 | field | value |
 |---|---|
-| live run job | `4570549` |
-| live run name | `olmo3-default-28i4t-refill` |
-| live run nodes | `nid[010571,010577,010597-010601,010603]` |
-| live run status | running; trainer step 36 completed at `20:30:17 UTC` |
-| live run recipe | 28 inference GPUs / 4 trainer GPUs, `batch_size=256`, `max_inflight_rollouts=768`, `rollouts_per_example=8`, `max_async_level=4` |
-| live run caveat | pre-`c8a5b8307`; refill retries draw full candidate batches |
-| parallel LR job | `4572407` |
-| parallel LR status | pending on priority at submission |
-| parallel LR submit dir | `/tmp/olmo3_refill_patch_lr3e6_100step_submit_20260512T2029` |
-| parallel LR recipe | same shape as live run, `lr=3e-6`, adaptive refill patch |
-| parallel LR tmux watcher | `joanv_cc_8node:6 lr3e6-watch` |
+| `1e-6` refill train job | `4570549`, timed out after 6h with stable checkpoints `25,50,75` |
+| `1e-6` refill eval job | `4582655`, running on a separate 8-node allocation |
+| `3e-6` refill train job | `4574276`, timed out at Slurm level after reaching `step_100` in RL logs |
+| `3e-6` refill eval job | `4582691`, running on a separate 8-node allocation |
+| live interactive allocation | `4574749` / `joanv_cc_8node`; user may be working on these GPUs |
+| monitor pane | `joanv_cc_8node:4 eval-watch` |
+| comparison report | `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md` |
+| refill caveat | `1e-6` used refill v1/full-candidate-batch; `3e-6` used optimized candidate-batched refill |
 
 The live allocation is shared with the user. Do not run cleanup, `srun`, or GPU
 probes against it without explicit confirmation. Read-only log inspection and
@@ -584,3 +581,57 @@ Conclusion: for offline eval in the current tmux-on-compute-node setup, use
 the 7-node clean route for apples-to-apples comparisons. A true 32/32 eval
 needs the driver moved off the inference nodes or a more robust remote driver
 path; otherwise "all 32 GPUs" can silently turn into partial failed shards.
+
+## 2026-05-13 DAPO Refill MFU Correction
+
+The overnight `1e-6` and `3e-6` runs were both DAPO-style drop/refill runs.
+The difference is implementation version, not refill on/off:
+
+| run | implementation | candidate behavior |
+|---|---|---|
+| `4570549` / `1e-6` | refill v1 from `0470684cb` | full `batch_size=256` candidate batches per refill round |
+| `4574276` / `3e-6` | optimized refill from `c8a5b8307` | smaller top-up candidate batches with `candidate_groups_per_round=32` |
+
+Trainer MFU from parsed trainer logs:
+
+| run | window | mean step time | mean trainer MFU | mean trainer tok/s |
+|---|---:|---:|---:|---:|
+| non-refill `28i/4t bs256` | steps `25-74` | `49.6s` | `28.70%` | `16,156` |
+| `1e-6` refill v1 | steps `25-74` | `230.0s` | `10.82%` | `6,119` |
+| `3e-6` refill v2 | steps `25-74` | `191.6s` | `12.40%` | `6,990` |
+| `3e-6` refill v2 | steps `75-99` | `194.0s` | `11.90%` | `6,710` |
+
+Refill accounting from per-step `train_filter_metrics.json`:
+
+| run | window | candidate groups | accepted groups | filtered groups | rounds | prompts / accepted group | unconditioned reward | conditioned reward |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `1e-6` refill v1 | steps `25-74` | `65.28` | `32.00` | `25.40` | `2.04` | `2.04` | `0.248` | `0.408` |
+| `3e-6` refill v2 | steps `25-74` | `55.26` | `32.00` | `21.80` | `2.44` | `1.73` | `0.258` | `0.418` |
+| `3e-6` refill v2 | steps `75-99` | `57.44` | `32.00` | `24.16` | `2.64` | `1.79` | `0.242` | `0.413` |
+
+Conclusion: the optimized refill path reduced candidate waste relative to v1,
+but current refill is still a throughput loss versus the non-refill 28i/4t
+baseline. Quality must be judged by the running offline evals, not accepted
+train reward alone.
+
+## 2026-05-13 Routed 8-Node Offline Eval Relaunch
+
+The direct-backend DAPO eval route was killed and relaunched with
+`vllm-router` enabled on all 8 nodes.
+
+Current jobs:
+
+| job | arm | route | status at relaunch check |
+|---:|---|---|---|
+| `4583877` | `1e-6` refill | 8 nodes × 4 DP-aware vLLM workers through router | running `step_25` |
+| `4583883` | `3e-6` refill | 8 nodes × 4 DP-aware vLLM workers through router | running `step_25` |
+
+Both router logs showed:
+
+- 8 out of 8 unique hosts healthy.
+- each host expanded to ranks `0..3`.
+- total routed worker set size: 32 DP-aware endpoints.
+
+This is the first DAPO offline eval route in this sequence that should be
+trusted for throughput/load-balance conclusions if it completes without backend
+errors.

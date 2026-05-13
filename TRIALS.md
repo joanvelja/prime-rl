@@ -2612,3 +2612,258 @@ Status at relaunch validation:
 - `nid010685` is driver-only and has no GPU-resident vLLM.
 - All 28 vLLM GPUs were observed at 100% util / ~88.5 GiB used shortly after
   generation started.
+
+### 2026-05-12 22:22 UTC - Persistent post-run offline eval + comparison
+
+Added durable automation so tomorrow's comparison is not dependent on session
+memory:
+
+- Comparator:
+  `scripts/evals/compare_omni_math2_offline_evals.py`
+- Report:
+  `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`
+- Post-run eval submitter:
+  `scripts/evals/submit_omni_math2_postrun_offline_eval.sh`
+
+The comparator currently includes:
+
+- User-provided raw OLMo Inst DPO reference:
+  p@1 `0.367`, p@2 `0.458`, p@3 `0.506`, p@4 `0.539`, p@5 `0.562`,
+  p@6 `0.581`, p@8 `0.610`.
+- Existing non-filtering 14i/2t `600x8` offline eval rows for steps
+  `300,350,400,450`.
+- Existing non-filtering 28i/4t clean 7-node offline eval rows for steps
+  `25,50,75`.
+- DAPO refill rows will be picked up automatically when their summary files
+  land under the post-run eval output directories.
+
+Queued live `1e-6` DAPO refill offline eval:
+
+- Training job: `4570549`
+- Eval job: `4574647`
+- Dependency: `afterany:4570549`
+- Eval route: 8-node Slurm allocation with the batch driver excluded from the
+  7 vLLM nodes through `PRIME_RL_MULTINODE_HOSTS`; `vllm-router` disabled.
+- Checkpoint filter: stable checkpoints on the 25-step grid, min `25`, max
+  `100`; this avoids waiting forever for `step_100` if the training allocation
+  times out before that checkpoint.
+
+Updated the LR `3e-6` supervisor so that after the final supervised training
+job ends, it submits the matching post-run offline eval against the actual
+current job ID/output root. This is deliberately in the supervisor rather than
+a static `afterok:4574276`, because the LR launcher can retry transient
+pre-runtime failures under a new Slurm job ID.
+
+### 2026-05-13 09:30 UTC - Morning status: DAPO evals running, supervisor gap patched
+
+Training outcomes from overnight:
+
+- `1e-6` job `4570549` timed out at the allocation limit after `06:00:20`.
+  Stable broadcast/checkpoint grid exists for `25,50,75`, plus late filesystem
+  broadcast snapshots through the mid-80s, but no `step_100`.
+- `3e-6` DAPO refill job `4574276` also shows Slurm `TIMEOUT` at `08:00:28`,
+  but the RL logs reached `step_100` and produced stable broadcasts through
+  `step_100`. Treat this as a successful 100-step LR arm unless eval reveals
+  quality collapse.
+- The old tmux LR supervisor window disappeared before submitting the LR
+  offline eval. Do not rely on
+  `outputs/omni_math2_rlvr_canary/lr3e6_supervisor_20260512/status.md` after
+  `2026-05-13T04:59:31Z`; it is stale.
+
+Offline eval status:
+
+- First `1e-6` post-run eval job `4574647` failed after `00:38:48` because one
+  vLLM worker hit an internal port bind collision:
+  `EADDRINUSE, address already in use`. No DAPO quality summaries were written.
+- Retried `1e-6` eval as Slurm job `4582655`; it is running on a separate
+  8-node allocation.
+- Submitted `3e-6` eval as Slurm job `4582691`; it is running on a separate
+  8-node allocation.
+- Added visible tmux monitor `joanv_cc_8node:4 eval-watch`.
+  It writes:
+  `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513.md`
+  and reruns:
+  `scripts/evals/compare_omni_math2_offline_evals.py`
+  whenever new summaries land.
+- Added reusable monitor script:
+  `scripts/evals/monitor_omni_math2_postrun_offline_evals.sh`
+
+At `2026-05-13T09:30Z`, no DAPO offline eval summary rows had landed yet.
+The comparison report still contains only the raw OLMo DPO baseline plus the
+non-filtering eval rows.
+
+### 2026-05-13 09:35 UTC - MFU/refill correction
+
+The `1e-6` and `3e-6` runs are both DAPO-style drop/refill runs, but they used
+different implementation versions:
+
+- `1e-6` job `4570549` used the first refill implementation from commit
+  `0470684cb`. It generated a full 256-rollout candidate batch on each refill
+  round. Its log emitted the old warning string
+  `Attempt ... filtered out all 256 rollouts - retrying batch generation`, but
+  per-step `train_filter_metrics.json` files confirm refill metrics were
+  written and accepted groups were backfilled.
+- `3e-6` job `4574276` used the optimized candidate-batched refill path from
+  commit `c8a5b8307`. It generated smaller top-up candidate batches and logged
+  `train_batch_refill attempt ... accepted ... drawing more`.
+
+Trainer MFU comparison from parsed trainer logs:
+
+| run | window | mean step time | mean trainer MFU | mean trainer tok/s |
+|---|---:|---:|---:|---:|
+| non-refill `28i/4t bs256` | steps `25-74` | `49.6s` | `28.70%` | `16,156` |
+| `1e-6` DAPO refill v1/full-batch candidates | steps `25-74` | `230.0s` | `10.82%` | `6,119` |
+| `3e-6` DAPO refill | steps `25-74` | `191.6s` | `12.40%` | `6,990` |
+| `3e-6` DAPO refill | steps `75-99` | `194.0s` | `11.90%` | `6,710` |
+
+Refill metrics from per-step `train_filter_metrics.json`:
+
+| run | window | candidate groups | accepted groups | filtered groups | rounds | prompts / accepted group | unconditioned reward | conditioned reward |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `1e-6` refill v1 | steps `25-74` | `65.28` | `32.00` | `25.40` | `2.04` | `2.04` | `0.248` | `0.408` |
+| `3e-6` refill v2 | steps `25-74` | `55.26` | `32.00` | `21.80` | `2.44` | `1.73` | `0.258` | `0.418` |
+| `3e-6` refill v2 | steps `75-99` | `57.44` | `32.00` | `24.16` | `2.64` | `1.79` | `0.242` | `0.413` |
+
+Conclusion: the optimized refill path reduced the refill tax relative to v1
+(`~1.7-1.8` vs `~2.0` candidate prompts per accepted group), but it still did
+**not** improve MFU relative to the non-refill 28i/4t baseline. The quality
+question still depends on offline eval; the throughput question is already
+negative for refill in its current form.
+
+### 2026-05-13 09:50 UTC - DAPO offline eval health check
+
+Checked why no DAPO rows had appeared yet in
+`outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`.
+
+Conclusion: the evals were not wedged. They were still generating/scoring
+`step_25`; no `summary.json` exists until all `600x8 = 4800` rollouts for a
+checkpoint finish.
+
+Evidence:
+
+- `1e-6` eval job `4582655` still `RUNNING` at `00:26:31`.
+  Launcher progress was around `1524/4800` on `step_25`.
+- `3e-6` eval job `4582691` still `RUNNING` at `00:23:10`.
+  Launcher progress was around `1655/4800` on `step_25`.
+- Partial rollout JSONL files were actively growing under both eval output
+  trees.
+- Error grep over both eval dirs found no traceback, `EADDRINUSE`,
+  `APIConnectionError`, connection failure, or runtime failure. Static timeout
+  strings in generated launch scripts were the only timeout matches.
+
+Operational note: absence of DAPO rows in the comparator before a checkpoint
+summary lands is expected. Treat the first completed `step_25/summary.json` as
+the next material quality signal.
+
+### 2026-05-13 09:52 UTC - DAPO offline eval throughput bottleneck
+
+The running DAPO offline evals are alive but **not** maxing the inference GPUs.
+
+Evidence:
+
+- Read-only `nvidia-smi` through the eval job allocations showed all vLLM GPUs
+  had model/KV memory resident (`~88.6/97.9 GiB`), but instantaneous GPU util
+  was only:
+  - `1e-6` eval job `4582655`: mean `45.2%`, median `42%`, min `13%`,
+    max `88%` over the sampled GPUs.
+  - `3e-6` eval job `4582691`: mean `40.2%`, median `37.5%`, min `10%`,
+    max `80%`.
+- vLLM `/metrics` on sampled nodes showed per-engine imbalance. Example
+  `1e-6` node `nid010415` had one engine at `30` running requests and
+  `99.4%` KV cache usage while sibling engines were around `10-11` running
+  requests and `30-40%` KV usage. Example `3e-6` node `nid010288` had engine
+  `3` at `34` running / `88.6%` KV while engine `2` had `1` running /
+  `4.4%` KV.
+- The eval route was using direct backend URLs. `router.log` said
+  `vllm-router unavailable; exposing head backend directly...`, and the submit
+  wrapper explicitly exported `PRIME_RL_DISABLE_VLLM_ROUTER=1`.
+- Partial rollout timing shows the current DAPO evals are slower per request
+  than the previous clean non-filter eval despite shorter outputs:
+  - non-filter step 25: mean `5721` output tokens, mean generation `95.4s`.
+  - `1e-6` DAPO partial step 25: mean `4821` output tokens, mean generation
+    `202.6s`.
+  - `3e-6` DAPO partial step 25: mean `4751` output tokens, mean generation
+    `201.7s`.
+
+Interpretation: this is a routing/load-balancing bottleneck, not just longer
+answers or scorer overhead. The current jobs may still finish, but they are
+not a max-throughput eval route.
+
+Fix applied for future eval launches:
+
+- `src/prime_rl/baselines/provision.py` now puts
+  `$PROJECT_DIR/.venv/bin` on the generated multinode launcher `PATH`, so the
+  vendored aarch64 `vllm-router` can be found inside Slurm node scripts.
+- The baseline multinode router command now passes
+  `--intra-node-data-parallel-size "$DP_LOCAL"`, matching the RL launcher
+  shape and allowing the router to reason about the 4 local DP engines.
+- `scripts/evals/submit_omni_math2_postrun_offline_eval.sh` and
+  `scripts/evals/run_omni_math2_offline_eval_28i4t.sh` now default
+  `PRIME_RL_DISABLE_VLLM_ROUTER=0` instead of disabling the router.
+
+Verification:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/baselines/provision.py
+bash -n scripts/evals/submit_omni_math2_postrun_offline_eval.sh \
+  scripts/evals/run_omni_math2_offline_eval_28i4t.sh
+```
+
+Both passed. Current running eval jobs are unchanged; use the fixed route for
+any relaunch or timeout retry.
+
+### 2026-05-13 10:45 UTC - Canonical launch surface
+
+Occam cleanup: added one canonical launch entrypoint instead of continuing to
+hand-write RLVR/eval/data commands.
+
+New entrypoint:
+
+```bash
+uv run --no-sync python -m prime_rl.entrypoints.launch <rlvr|offline-eval|data> ...
+```
+
+What changed:
+
+- `src/prime_rl/entrypoints/launch.py` centralizes three common workflows:
+  - `rlvr`: delegates to the existing `rl` entrypoint with config composition,
+    `--dry-run`, and `--output-dir`.
+  - `offline-eval`: runs in-allocation routed checkpoint evals or submits an
+    sbatch dependency job; defaults to the current 8-node routed route
+    (`nodes=8`, `4` GPUs/node, DP local `4`, router policy `round_robin`).
+  - `data`: runs `baseline-eval` and/or filters baseline rollouts into a
+    perfectible dataset through `make_perfectible_subset`.
+- `scripts/evals/run_omni_math2_offline_eval_28i4t.sh` and
+  `scripts/evals/submit_omni_math2_postrun_offline_eval.sh` are now
+  compatibility shims over `prime_rl.entrypoints.launch`, not independent
+  topology implementations.
+- Added `docs/launch.md` and updated `skills/entrypoints/SKILL.md`.
+- Added `tests/unit/test_launch_entrypoint.py` for the command construction
+  pieces, including the important `$SLURM_JOB_ID` shell-expansion case.
+
+Verification:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/entrypoints/launch.py \
+  tests/unit/test_launch_entrypoint.py scripts/evals/offline_omni_math2_ckpt_eval.py \
+  scripts/evals/compare_omni_math2_offline_evals.py tests/unit/baselines/test_provision.py
+uv run --no-sync pytest tests/unit/test_launch_entrypoint.py tests/unit/baselines/test_provision.py
+bash -n scripts/evals/run_omni_math2_offline_eval_28i4t.sh \
+  scripts/evals/submit_omni_math2_postrun_offline_eval.sh
+uv run --no-sync python -m prime_rl.entrypoints.launch rlvr \
+  --config configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml \
+  --dry-run --output-dir /tmp/prime-launch-rlvr-real
+bash -n /tmp/prime-launch-rlvr-real/rl.sbatch
+```
+
+All passed. The RLVR dry-run produced `/tmp/prime-launch-rlvr-real/rl.sbatch`
+and preserved the expected routed multi-node values (`max_async_level=4`,
+`batch_size=256`, `easy_threshold=1.0`, no `hard_threshold`).
+
+Live routed eval status at this point:
+
+- `4583877` (`1e-6`) and `4583883` (`3e-6`) are both running on true 8-node
+  routed eval allocations.
+- Both routers reached 8 healthy hosts and expanded to 32 DP-aware workers.
+- Both jobs are evaluating `step_25` after successful pause/update/resume of
+  all eight backend admin endpoints.
