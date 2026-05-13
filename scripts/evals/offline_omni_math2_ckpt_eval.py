@@ -606,6 +606,8 @@ def _run_one_checkpoint(
 
     if len(generation_urls) == 1:
         eval_config.base_url = generation_urls[0]
+        if generation_urls[0] == endpoint.base_url and len(admin_urls) > 1:
+            eval_config.launch.external_health_check = "router_health"
         run_baseline(eval_config)
     else:
         record_ids = _eval_record_ids(eval_config)

@@ -635,3 +635,10 @@ Both router logs showed:
 This is the first DAPO offline eval route in this sequence that should be
 trusted for throughput/load-balance conclusions if it completes without backend
 errors.
+
+Update: jobs `4583877` and `4583883` did not complete. They proved router
+startup and 32 DP-aware worker expansion, but then failed at the baseline
+runner readiness layer because `vllm-router /v1/models` returns 500. The fix is
+to treat provisioned router generation URLs as router-health endpoints for
+external baseline readiness. Relaunch required before drawing throughput
+conclusions.

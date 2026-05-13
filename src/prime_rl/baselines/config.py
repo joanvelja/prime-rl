@@ -9,6 +9,7 @@ from typing import Any, Literal
 from prime_rl.baselines.metrics import DEFAULT_KS
 
 LaunchMode = Literal["external", "local", "srun", "srun_multinode"]
+ExternalHealthCheck = Literal["models", "router_health"]
 ProgressMode = Literal["auto", "none"]
 
 
@@ -39,6 +40,7 @@ class LaunchConfig:
     launch_prefix: list[str] = field(default_factory=list)
     wait_timeout_s: float = 900.0
     server_start_retries: int = 1
+    external_health_check: ExternalHealthCheck = "models"
     extra_args: list[str] = field(default_factory=list)
     vllm_extra: dict[str, Any] = field(default_factory=dict)
 
@@ -120,6 +122,7 @@ def _coerce_launch(raw: dict[str, Any]) -> LaunchConfig:
         launch_prefix=list(prefix),
         wait_timeout_s=float(raw.get("wait_timeout_s", 900.0)),
         server_start_retries=int(raw.get("server_start_retries", 1)),
+        external_health_check=raw.get("external_health_check", "models"),
         extra_args=list(extra_args),
         vllm_extra=dict(raw.get("vllm_extra", {})),
     )

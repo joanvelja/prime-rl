@@ -47,13 +47,17 @@ def _api_key(api_key_var: str) -> str:
     return os.environ.get(api_key_var, "EMPTY")
 
 
-def wait_for_endpoint(base_url: str, api_key_var: str, timeout_s: float) -> None:
+def wait_for_endpoint(base_url: str, api_key_var: str, timeout_s: float, *, health_check: str = "models") -> None:
     deadline = time.time() + timeout_s
     last_error: Exception | None = None
     headers = {"Authorization": f"Bearer {_api_key(api_key_var)}"}
     with httpx.Client(timeout=10.0, headers=headers) as client:
         while time.time() < deadline:
             try:
+                if health_check == "router_health":
+                    response = client.get(_router_health_url(base_url))
+                    response.raise_for_status()
+                    return
                 response = client.get(_health_url(base_url))
                 response.raise_for_status()
                 if response.json().get("data"):
@@ -439,7 +443,12 @@ class InferenceProvisioner(AbstractContextManager[Endpoint]):
             if not self.config.base_url:
                 raise ValueError("base_url is required when launch.mode='external'")
             base_url = _normal_base_url(self.config.base_url)
-            wait_for_endpoint(base_url, self.config.api_key_var, timeout_s=launch.wait_timeout_s)
+            wait_for_endpoint(
+                base_url,
+                self.config.api_key_var,
+                timeout_s=launch.wait_timeout_s,
+                health_check=launch.external_health_check,
+            )
             return Endpoint(base_url=base_url, api_key_var=self.config.api_key_var)
 
         if launch.mode not in {"local", "srun", "srun_multinode"}:

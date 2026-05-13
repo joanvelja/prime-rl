@@ -34,6 +34,7 @@ gpus = "0,1,2,3"
 launch_prefix = "srun --ntasks=1 --gpus=4 --exclusive"
 wait_timeout_s = 120.0
 server_start_retries = 3
+external_health_check = "router_health"
 chat_template = "configs/baselines/base_text_chat_template.jinja"
 vllm_extra = {skip_mm_profiling = true}
 """.strip()
@@ -52,5 +53,6 @@ vllm_extra = {skip_mm_profiling = true}
     assert config.launch.launch_prefix == ["srun", "--ntasks=1", "--gpus=4", "--exclusive"]
     assert config.launch.wait_timeout_s == 120.0
     assert config.launch.server_start_retries == 3
+    assert config.launch.external_health_check == "router_health"
     assert config.launch.chat_template == "configs/baselines/base_text_chat_template.jinja"
     assert config.launch.vllm_extra == {"skip_mm_profiling": True}

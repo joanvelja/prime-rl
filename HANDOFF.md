@@ -3620,3 +3620,26 @@ Updated launch plan for 8 nodes:
   - Both routers reached 8 healthy hosts and expanded to 32 DP-aware workers.
   - Both are currently on `step_25` after successful backend
     pause/update/resume.
+
+2026-05-13 10:50 UTC routed eval correction:
+
+- The routed eval jobs `4583877` and `4583883` failed after reaching
+  `step_25`; no summaries landed.
+- Failure mode: `run_baseline()` re-entered `InferenceProvisioner` in external
+  mode and checked router `/v1/models`; current `vllm-router` returns 500
+  there, while `/health` works.
+- Patch applied:
+  - `BaselineConfig.launch.external_health_check` now supports
+    `"models"` (default) and `"router_health"`.
+  - External `InferenceProvisioner` can wait on router `/health`.
+  - Offline checkpoint eval marks the generation endpoint as
+    `router_health` when it is the provisioned router and admin URLs are the
+    direct backends.
+- Verified:
+  ```bash
+  uv run --no-sync ruff check src/prime_rl/baselines/config.py \
+    src/prime_rl/baselines/provision.py scripts/evals/offline_omni_math2_ckpt_eval.py \
+    tests/unit/baselines/test_config.py tests/unit/baselines/test_provision.py
+  uv run --no-sync pytest tests/unit/baselines/test_config.py \
+    tests/unit/baselines/test_provision.py tests/unit/test_launch_entrypoint.py
+  ```

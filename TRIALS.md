@@ -2867,3 +2867,55 @@ Live routed eval status at this point:
 - Both routers reached 8 healthy hosts and expanded to 32 DP-aware workers.
 - Both jobs are evaluating `step_25` after successful pause/update/resume of
   all eight backend admin endpoints.
+
+### 2026-05-13 10:50 UTC - Routed eval readiness bug
+
+The true 8-node routed eval jobs failed before producing summaries:
+
+- `4583877` (`1e-6`) failed after `00:22:08`.
+- `4583883` (`3e-6`) failed after `00:22:01`.
+
+Both jobs successfully:
+
+- started `vllm-router`;
+- reached 8 healthy backend hosts;
+- expanded to 32 DP-aware router workers;
+- updated `step_25` weights across all eight backend admin endpoints.
+
+Failure:
+
+```text
+RuntimeError: Inference endpoint http://<router-host>:9800/v1 did not become ready.
+Last error: Server error '500 Internal Server Error' for url 'http://<router-host>:9800/v1/models'
+```
+
+Cause: `scripts/evals/offline_omni_math2_ckpt_eval.py` launches vLLM once,
+then `run_baseline()` re-enters `InferenceProvisioner` in external mode for
+the already-running generation endpoint. The external provisioner used
+`/v1/models` readiness unconditionally. That is valid for direct vLLM
+backends, but not for the current `vllm-router` build: router `/health` works,
+router `/v1/models` returns 500.
+
+Fix applied:
+
+- `src/prime_rl/baselines/config.py`: added
+  `launch.external_health_check = "models" | "router_health"` with default
+  `"models"`.
+- `src/prime_rl/baselines/provision.py`: external mode can now wait on router
+  `/health` instead of `/v1/models`.
+- `scripts/evals/offline_omni_math2_ckpt_eval.py`: single-generation-URL evals
+  that route through the provisioned router set
+  `external_health_check = "router_health"` before calling `run_baseline()`.
+
+Verification:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/baselines/config.py \
+  src/prime_rl/baselines/provision.py scripts/evals/offline_omni_math2_ckpt_eval.py \
+  tests/unit/baselines/test_config.py tests/unit/baselines/test_provision.py
+uv run --no-sync pytest tests/unit/baselines/test_config.py \
+  tests/unit/baselines/test_provision.py tests/unit/test_launch_entrypoint.py
+```
+
+Both passed. Replacement eval jobs should use this patch; do not retry the old
+jobs unchanged.
