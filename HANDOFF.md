@@ -3947,6 +3947,9 @@ Updated launch plan for 8 nodes:
   - `4586970`: `3e-6` step `50`.
   - `4586976`: `3e-6` step `75`.
   - `4586975`: `3e-6` step `100`.
-- At submit time all replacements were pending on priority. Monitor is now a
-  detached host process PID `132730`, tracking old + replacement jobs at:
+- At submit time all replacements were pending on priority. After cleaning up
+  duplicate monitor loops, the monitor is detached host process PID `143599`,
+  tracking old + replacement jobs at:
   `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
+  Its `Resume Evidence` section greps worker logs for
+  `resuming N/4800 completed baseline rollouts` once a replacement starts.
