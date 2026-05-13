@@ -225,7 +225,11 @@ async def check_health(
         logger.debug("Starting pinging /health to check health")
         while wait_time < timeout:
             try:
-                await admin_client.get("/health")
+                response = await admin_client.get("/health")
+                if response.status_code == 404:
+                    logger.warning("The route /health does not exist. Skipping health check.")
+                    return
+                response.raise_for_status()
                 logger.debug(f"Inference pool is ready after {wait_time} seconds")
                 return
             except NotFoundError:

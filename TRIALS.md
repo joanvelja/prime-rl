@@ -3298,3 +3298,33 @@ Current target partial rows:
 
 Between `12:28:00` and `12:30:20`, target rows rose from `2938` to `3293`,
 about `152 rows/min` across all eight jobs. No summaries had landed yet.
+
+Follow-up at `12:36 UTC`: all eight target eval jobs were still running with
+exit `0:0`. Target partial rows:
+
+```text
+1e-6 step25:    233
+1e-6 step50:   1039
+1e-6 step75:    142
+1e-6 step85:    236
+3e-6 step25:    253
+3e-6 step50:    911
+3e-6 step75:    248
+3e-6 step100:  1051
+```
+
+No summaries had landed.
+
+Also patched `src/prime_rl/utils/client.py` readiness behavior: `/health` now
+must return a 2xx response before an inference endpoint is considered ready.
+The previous code accepted any HTTP response object, so a router/backend
+returning `500` could be treated as healthy. Preserved the existing compatibility
+behavior that a `404` `/health` route is skipped.
+
+Verified:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/utils/client.py \
+  tests/unit/utils/test_client.py
+uv run --no-sync pytest tests/unit/utils/test_client.py
+```

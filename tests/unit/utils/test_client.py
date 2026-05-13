@@ -11,6 +11,7 @@ from prime_rl.utils.client import (
     _is_retryable_admin_error,
     _is_retryable_lora_error,
     _post_admin_control,
+    check_health,
     load_lora_adapter,
     setup_clients,
     update_weights,
@@ -83,6 +84,29 @@ def test_post_admin_control_retries_transport_error(monkeypatch):
     asyncio.run(_post_admin_control(mock_client, "/pause", operation="pause inference engine"))
 
     assert mock_client.post.call_count == 2
+
+
+def test_check_health_requires_2xx_status(monkeypatch):
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", no_sleep)
+    request = httpx.Request("GET", "http://test/health")
+    mock_client = AsyncMock()
+    mock_client.base_url = "http://test"
+    mock_client.get.return_value = httpx.Response(500, request=request)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(check_health([mock_client], interval=1, timeout=1))
+
+
+def test_check_health_skips_missing_route():
+    request = httpx.Request("GET", "http://test/health")
+    mock_client = AsyncMock()
+    mock_client.base_url = "http://test"
+    mock_client.get.return_value = httpx.Response(404, request=request)
+
+    asyncio.run(check_health([mock_client], interval=1, timeout=1))
 
 
 def test_update_weights_resumes_after_pause_failure(monkeypatch):
