@@ -786,3 +786,8 @@ the expected checkpoint selection line in their Slurm logs:
 ```
 
 New partial rollout files are being written for the corrected retry outputs.
+
+At `2026-05-13 12:30 UTC`, all eight target eval jobs were still running and
+writing partials. Target rows moved from `2938` at `12:28:00` to `3293` at
+`12:30:20`, approximately `152 rows/min` aggregate across the eight jobs. No
+summary files had landed yet.
