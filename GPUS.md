@@ -679,3 +679,25 @@ Each job requests 8 nodes for 8 hours and evaluates exactly one checkpoint.
 As of `2026-05-13 11:29 UTC`, all eight were pending on priority. `squeue
 --start` estimated the first two starts around `13:43 UTC` and the final
 group around `16:06-16:10 UTC`.
+
+Update at `2026-05-13 11:42 UTC`: the first split job, `4584726`, failed in
+43 seconds because the stale-cleanup backport self-killed the remote cleanup
+task. The fix is in `src/prime_rl/baselines/provision.py`: cleanup now excludes
+its own process group before killing stale vLLM/prime-rl processes.
+
+Resubmitted jobs:
+
+| arm | checkpoint | job | status at `11:40 UTC` |
+|---|---:|---:|---|
+| `1e-6` refill | 100 | `4585067` | running; router/backends starting cleanly |
+| `1e-6` refill | 25 | `4585068` | running; router/backends starting cleanly |
+| `1e-6` refill | 50 | `4585069` | running; router/backends starting cleanly |
+| `1e-6` refill | 75 | `4585070` | pending on resources |
+| `3e-6` refill | 100 | `4585071` | pending on priority |
+| `3e-6` refill | 25 | `4585072` | pending on priority |
+| `3e-6` refill | 50 | `4585073` | pending on priority |
+| `3e-6` refill | 75 | `4585074` | pending on priority |
+
+The running shard logs show `nccl_net=AWS Libfabric`, 8 backend hosts, and
+vLLM router startup. Monitor status is written to
+`outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.

@@ -405,8 +405,17 @@ cleanup() {{
 }}
 trap cleanup TERM INT EXIT
 
-echo "[prime-rl] cleaning stale node-local inference state on ${{#HOSTS[@]}} hosts"
+LOCAL_HOST_SHORT="$(hostname -s)"
+echo "[prime-rl] cleaning stale node-local inference state on ${{#HOSTS[@]}} hosts (skipping local: $LOCAL_HOST_SHORT)"
 for host in "${{HOSTS[@]}}"; do
+    # Skip the local host: the cleanup pkill matches "python.*prime_rl" cmdline, which
+    # ALSO matches the launcher CLI process itself if it runs on a node in HOSTS. The
+    # caller is responsible for cleaning the local host before invoking this driver
+    # (or accepting that local stale state is theirs).
+    if [ "$host" = "$LOCAL_HOST_SHORT" ] || [ "$host" = "$(hostname)" ]; then
+        echo "[node-cleanup] $host (local, skipped — launcher PID is here)"
+        continue
+    fi
     srun "${{OVERLAP_ARGS[@]}}" $JOB_ARG \\
         "${{NETWORK_ARGS[@]}}" \\
         --nodes=1 \\
@@ -414,13 +423,11 @@ for host in "${{HOSTS[@]}}"; do
         --ntasks-per-node=1 \\
         --nodelist="$host" \\
         bash -c '
-            pkill -9 -f "[p]ython.*prime_rl" 2>/dev/null || true
-            pkill -9 -f "[t]orchrun" 2>/dev/null || true
-            pkill -9 -f "[v]llm-router" 2>/dev/null || true
-            pkill -9 -f "[v]llm" 2>/dev/null || true
-            pkill -9 -f "[p]rime_rl" 2>/dev/null || true
-            pkill -9 "vllm" 2>/dev/null || true
-            pkill -9 "vllm::.*" 2>/dev/null || true
+            self_pgid=$(ps -o pgid= -p "$$" | tr -d " ")
+            ps -eo pid=,pgid=,args= | awk -v self_pgid="$self_pgid" '"'"'
+                $2 == self_pgid {{ next }}
+                /python.*prime_rl|torchrun|vllm-router|vllm|prime_rl/ {{ print $1 }}
+            '"'"' | xargs -r kill -9
             sleep 2
             rm -rf /dev/shm/vllm-* /dev/shm/vllm_* /tmp/vllm-* /tmp/vllm_* /tmp/torch-* /tmp/torchelastic_* /tmp/vllm_cache_* /tmp/triton_cache_* /tmp/torch_inductor_* 2>/dev/null || true
             procs=$(ps -eo comm,args | grep -E "python|torchrun|vllm|vllm::" | grep -v grep | wc -l)

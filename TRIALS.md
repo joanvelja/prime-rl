@@ -18,6 +18,65 @@ Do not keep a change just because it launched. Keep it when it improves a target
 metric, removes a real blocker, or creates useful observability. Mark weak or
 failed trials explicitly so future agents do not re-run them by accident.
 
+## 2026-05-13: fp32 lm-head + perfectible 512/16 RLVR recipe
+
+**Hypothesis**: Enabling PR #2441's native bf16xbf16 -> fp32 lm-head path should
+reduce rollout-vs-trainer logprob drift from inference-side bf16 truncation,
+making importance sampling less brittle. Moving to the OLMo3-perfectible
+dataset plus `3e-6` LR and `512/16` rollouts keeps 32 prompt groups/update while
+testing a higher-group-size quality signal.
+
+**Change**:
+
+- Ported merged upstream PR `PrimeIntellect-ai/prime-rl#2441` locally because
+  this branch did not yet contain `inference.enable_fp32_lm_head`.
+- Touched code paths:
+  `src/prime_rl/configs/inference.py`,
+  `src/prime_rl/inference/patches.py`,
+  `src/prime_rl/inference/vllm/worker/__init__.py`,
+  `tests/unit/test_configs.py`.
+- Updated
+  `configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml`:
+  `enable_fp32_lm_head=true`, dataset
+  `joanvelja/omni-math2-olmo3-perfectible-seed42`, `lr=3e-6`,
+  `batch_size=512`, `rollouts_per_example=16`,
+  `max_inflight_rollouts=1536`.
+- Retained DAPO-like refill/filtering:
+  `candidate_groups_per_round=32`, `max_candidate_groups=128`,
+  `easy_threshold=1.0`, no `hard_threshold`,
+  `online_difficulty_filtering=true`.
+
+**Evidence**:
+
+- Ruff passed on touched code/test files:
+  `uv run --no-sync ruff check src/prime_rl/configs/inference.py src/prime_rl/inference/patches.py src/prime_rl/inference/vllm/worker/__init__.py tests/unit/test_configs.py`.
+- New config-threading unit test passed:
+  `uv run --no-sync pytest tests/unit/test_configs.py::test_inference_fp32_lm_head_threads_through_vllm_additional_config`
+  -> `1 passed`.
+- Direct RL dry-run passed:
+  `/tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135`.
+- Canonical launcher dry-run passed:
+  `/tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1137`.
+- `bash -n` passed for the generated direct dry-run `rl.sbatch`.
+- Resolved config confirmed `trainer.lr=3e-06`,
+  `inference.enable_fp32_lm_head=true`, `batch_size=512`,
+  `max_inflight_rollouts=1536`, `rollouts_per_example=16`,
+  dataset `joanvelja/omni-math2-olmo3-perfectible-seed42`,
+  `easy_threshold=1.0`, no `hard_threshold`,
+  `online_difficulty_filtering=true`, `candidate_groups_per_round=32`, and
+  `max_candidate_groups=128`.
+- HF dataset smoke passed only with `.env` loaded and caches redirected to
+  `/tmp`; raw shell access fails because the repo is private/no token visible.
+
+**Verdict**: `launchable but unproven`. Static config and dataset access checks
+pass under the launch-style environment, but the fp32 lm-head effect still needs
+runtime logprob-gap and learning evidence.
+
+**Next action**: launch visibly in tmux from an allocation, confirm the worker
+prints `fp32 lm_head ENABLED`, check first-step trainer/orchestrator startup,
+then compare logprob-gap/importance-ratio stability against the prior refill
+runs.
+
 ## 2026-05-12: DAPO Refill Candidate Batching Patch
 
 **Hypothesis**: The DAPO-style refill path is wasting wall-clock by drawing full
@@ -3030,3 +3089,49 @@ output root and `08:00:00` wall time:
 All eight were pending on priority immediately after submission. The comparator
 now globs `offline_eval_600x8_8node_router*` so these step-split outputs will
 be included.
+
+### 2026-05-13 11:42 UTC - Fixed cleanup self-kill and resubmitted split evals
+
+The first step-split job to start, `4584726` (`1e-6`, step 25), failed in
+`00:00:43` before router readiness:
+
+```text
+RuntimeError: Inference process exited with code 137 before router became ready.
+srun: error: nid010645: task 0: Killed
+```
+
+Cause: the first stale-cleanup backport used `pkill -f` patterns inside a
+remote `bash -c` command whose own argv also contained vLLM/prime-rl strings,
+so the cleanup could kill its own Slurm task. Cancelled the seven still-pending
+jobs from that batch (`4584727`, `4584733`, `4584739`, `4584740`, `4584741`,
+`4584743`, `4584744`) before they could burn allocations.
+
+Patch:
+
+- `src/prime_rl/baselines/provision.py`: remote cleanup now enumerates PIDs via
+  `ps`, excludes the cleanup task's own process group, and kills matching stale
+  inference/router/python processes only outside that process group.
+
+Verified:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/baselines/provision.py \
+  tests/unit/baselines/test_provision.py
+uv run --no-sync pytest tests/unit/baselines/test_provision.py \
+  tests/unit/test_launch_entrypoint.py
+```
+
+Resubmitted the eight one-checkpoint routed evals:
+
+- `1e-6`: step `100` -> `4585067`.
+- `1e-6`: step `25` -> `4585068`.
+- `1e-6`: step `50` -> `4585069`.
+- `1e-6`: step `75` -> `4585070`.
+- `3e-6`: step `100` -> `4585071`.
+- `3e-6`: step `25` -> `4585072`.
+- `3e-6`: step `50` -> `4585073`.
+- `3e-6`: step `75` -> `4585074`.
+
+At the follow-up check, `4585067`, `4585068`, and `4585069` were running. Their
+server logs showed remote cleanup completion, vLLM router startup, 8 backend
+hosts, and `nccl_net=AWS Libfabric`; this clears the self-kill failure mode.
