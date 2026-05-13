@@ -3836,3 +3836,28 @@ Updated launch plan for 8 nodes:
   `4585073`, `4585323`, `4585324`, and `4585647`; `4585648` and `4585649`
   were queued. Partial rows were `1e-6 step50=429`,
   `3e-6 step100=289`, and `3e-6 step50=230`.
+
+2026-05-13 12:16 UTC correction:
+
+- The checkpoint discovery failures were not compute-side filesystem
+  visibility. Actual bug: `scripts/evals/offline_omni_math2_ckpt_eval.py`
+  still applied default `--step-interval 50` when `--steps` was explicit. That
+  filtered out explicit steps `25`, `75`, and `85` after vLLM startup.
+- Patched the eval script so explicit `--steps` disables interval/min/max
+  filters. Added `tests/unit/test_offline_omni_math2_ckpt_eval.py`.
+- Verified:
+  - `uv run --no-sync ruff check scripts/evals/offline_omni_math2_ckpt_eval.py
+    tests/unit/test_offline_omni_math2_ckpt_eval.py
+    src/prime_rl/entrypoints/launch.py tests/unit/test_launch_entrypoint.py`
+  - `uv run --no-sync pytest tests/unit/test_offline_omni_math2_ckpt_eval.py
+    tests/unit/test_launch_entrypoint.py`
+- Cancelled pre-patch doomed jobs: `4585323`, `4585648`, `4585649`.
+- Already failed pre-patch jobs from this same bug: `4585324`, `4585647`.
+- Submitted corrected retries:
+  - `4586007`: `1e-6` step `25`.
+  - `4586010`: `1e-6` step `75`.
+  - `4585994`: `1e-6` step `85`.
+  - `4586008`: `3e-6` step `25`.
+  - `4586009`: `3e-6` step `75`.
+- Monitor PID is now `44199`; status file remains
+  `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.

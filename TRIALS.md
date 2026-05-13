@@ -3225,3 +3225,44 @@ Partial rollout rows at that refresh:
 3e-6 step100: 289
 3e-6 step50: 230
 ```
+
+### 2026-05-13 12:16 UTC - Root-caused explicit-step discovery failures
+
+The compute-side visibility explanation above was wrong. Actual root cause:
+`scripts/evals/offline_omni_math2_ckpt_eval.py` kept applying the parser's
+default `--step-interval 50` even when `--steps` was explicit. Therefore
+explicit checkpoints `25`, `75`, and `85` were rejected after vLLM startup;
+`50` and `100` only worked because they are divisible by `50`.
+
+Patched the eval script so explicit `--steps` disables interval/min/max range
+filters before `_discover_weight_steps()`. Added unit tests for this exact
+case.
+
+Verified:
+
+```bash
+uv run --no-sync ruff check scripts/evals/offline_omni_math2_ckpt_eval.py \
+  tests/unit/test_offline_omni_math2_ckpt_eval.py \
+  src/prime_rl/entrypoints/launch.py tests/unit/test_launch_entrypoint.py
+uv run --no-sync pytest tests/unit/test_offline_omni_math2_ckpt_eval.py \
+  tests/unit/test_launch_entrypoint.py
+```
+
+Cancelled jobs that launched before this patch and were doomed by the interval
+filter:
+
+```text
+4585323 4585648 4585649
+```
+
+Submitted corrected retries:
+
+| arm | checkpoint | job | output suffix |
+|---|---:|---:|---|
+| `1e-6` refill | 25 | `4586007` | `offline_eval_600x8_8node_router_step25_retry2` |
+| `1e-6` refill | 75 | `4586010` | `offline_eval_600x8_8node_router_step75_retry2` |
+| `1e-6` refill | 85 | `4585994` | `offline_eval_600x8_8node_router_step85_retry1` |
+| `3e-6` refill | 25 | `4586008` | `offline_eval_600x8_8node_router_step25_retry2` |
+| `3e-6` refill | 75 | `4586009` | `offline_eval_600x8_8node_router_step75_retry2` |
+
+Monitor restarted with PID `44199`.
