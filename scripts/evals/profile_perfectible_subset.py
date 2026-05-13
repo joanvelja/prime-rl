@@ -411,6 +411,22 @@ def main() -> int:
 
     # === README ===
     readme = []
+    # YAML frontmatter for HF dataset card indexing
+    readme.append(
+        "---\n"
+        "language:\n- en\n"
+        "task_categories:\n- question-answering\n- text-generation\n"
+        "tags:\n"
+        "- math\n"
+        "- mathematical-reasoning\n"
+        "- omni-math2\n"
+        "- hendrycks-sanity\n"
+        "- perfectible-subset\n"
+        "- rl-diagnostic\n"
+        "size_categories:\n- n<1K\n"
+        "pretty_name: omni-math2 OLMo3 perfectible subset\n"
+        "---\n\n"
+    )
     repo_header = f"# {args.hf_repo}\n\n" if args.hf_repo else "# Perfectible subset\n\n"
     readme.append(repo_header)
     readme.append(
