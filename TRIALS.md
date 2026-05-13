@@ -3266,3 +3266,18 @@ Submitted corrected retries:
 | `3e-6` refill | 75 | `4586009` | `offline_eval_600x8_8node_router_step75_retry2` |
 
 Monitor restarted with PID `44199`.
+
+Follow-up at `12:24 UTC`: all five corrected retry jobs passed the live gate
+that failed before. Each printed `evaluating ... step {25,75,85}` in its
+Slurm log:
+
+```text
+4586007: 1e-6 step 25
+4586010: 1e-6 step 75
+4585994: 1e-6 step 85
+4586008: 3e-6 step 25
+4586009: 3e-6 step 75
+```
+
+Partial rollout files also appeared for `4586007`, `4585994`, `4586008`, and
+`4586009`. This confirms the explicit-step fix in the real Slurm path.

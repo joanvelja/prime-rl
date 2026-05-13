@@ -3861,3 +3861,14 @@ Updated launch plan for 8 nodes:
   - `4586009`: `3e-6` step `75`.
 - Monitor PID is now `44199`; status file remains
   `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
+
+2026-05-13 12:24 UTC live confirmation:
+
+- Corrected retry jobs all reached checkpoint evaluation in their Slurm logs:
+  - `4586007`: `1e-6` step `25`.
+  - `4586010`: `1e-6` step `75`.
+  - `4585994`: `1e-6` step `85`.
+  - `4586008`: `3e-6` step `25`.
+  - `4586009`: `3e-6` step `75`.
+- Partial rollout files have appeared for the corrected retry outputs, so the
+  explicit-step fix is validated in the live Slurm path.

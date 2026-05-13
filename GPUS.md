@@ -773,3 +773,16 @@ Current corrected retry jobs:
 | `3e-6` refill | 75 | `4586009` |
 
 The monitor was restarted with PID `44199`.
+
+Live confirmation at `2026-05-13 12:24 UTC`: all corrected retry jobs reached
+the expected checkpoint selection line in their Slurm logs:
+
+```text
+4586007 -> 1e-6 step 25
+4586010 -> 1e-6 step 75
+4585994 -> 1e-6 step 85
+4586008 -> 3e-6 step 25
+4586009 -> 3e-6 step 75
+```
+
+New partial rollout files are being written for the corrected retry outputs.
