@@ -642,3 +642,62 @@ runner readiness layer because `vllm-router /v1/models` returns 500. The fix is
 to treat provisioned router generation URLs as router-health endpoints for
 external baseline readiness. Relaunch required before drawing throughput
 conclusions.
+
+## 2026-05-13 Routed Eval Step-Split Correction
+
+The corrected 8-node routed eval path did use all 32 DP-aware workers, but a
+serial `600x8` eval over checkpoints `25,50,75,100` cannot fit in a single
+6-hour allocation at observed throughput.
+
+Observed on the `1e-6` routed eval before cancellation:
+
+| signal | value |
+|---|---:|
+| active workers | 32 DP-aware endpoints |
+| active requests | 63-64 |
+| queued requests | 0 |
+| generated token throughput | ~2,120 tok/s across 32 GPUs |
+| step-25 rollout rows after ~25 min | 228 / 4,800 |
+
+Interpretation: the router was no longer the bottleneck; the workload was
+long-tail decode-bound at full-context `600x8`.
+
+Action taken:
+
+| arm | checkpoint | job | output suffix |
+|---|---:|---:|---|
+| `1e-6` refill | 25 | `4584726` | `offline_eval_600x8_8node_router_step25` |
+| `1e-6` refill | 50 | `4584727` | `offline_eval_600x8_8node_router_step50` |
+| `1e-6` refill | 75 | `4584733` | `offline_eval_600x8_8node_router_step75` |
+| `1e-6` refill | 100 | `4584739` | `offline_eval_600x8_8node_router_step100` |
+| `3e-6` refill | 25 | `4584740` | `offline_eval_600x8_8node_router_step25` |
+| `3e-6` refill | 50 | `4584741` | `offline_eval_600x8_8node_router_step50` |
+| `3e-6` refill | 75 | `4584743` | `offline_eval_600x8_8node_router_step75` |
+| `3e-6` refill | 100 | `4584744` | `offline_eval_600x8_8node_router_step100` |
+
+Each job requests 8 nodes for 8 hours and evaluates exactly one checkpoint.
+As of `2026-05-13 11:29 UTC`, all eight were pending on priority. `squeue
+--start` estimated the first two starts around `13:43 UTC` and the final
+group around `16:06-16:10 UTC`.
+
+Update at `2026-05-13 11:42 UTC`: the first split job, `4584726`, failed in
+43 seconds because the stale-cleanup backport self-killed the remote cleanup
+task. The fix is in `src/prime_rl/baselines/provision.py`: cleanup now excludes
+its own process group before killing stale vLLM/prime-rl processes.
+
+Resubmitted jobs:
+
+| arm | checkpoint | job | status at `11:40 UTC` |
+|---|---:|---:|---|
+| `1e-6` refill | 100 | `4585067` | running; router/backends starting cleanly |
+| `1e-6` refill | 25 | `4585068` | running; router/backends starting cleanly |
+| `1e-6` refill | 50 | `4585069` | running; router/backends starting cleanly |
+| `1e-6` refill | 75 | `4585070` | pending on resources |
+| `3e-6` refill | 100 | `4585071` | pending on priority |
+| `3e-6` refill | 25 | `4585072` | pending on priority |
+| `3e-6` refill | 50 | `4585073` | pending on priority |
+| `3e-6` refill | 75 | `4585074` | pending on priority |
+
+The running shard logs show `nccl_net=AWS Libfabric`, 8 backend hosts, and
+vLLM router startup. Monitor status is written to
+`outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.

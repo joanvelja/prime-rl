@@ -1,9 +1,46 @@
 # Handoff: Omni-MATH-2 OLMo3 RLVR Canaries
 
-> Last updated: 2026-05-13 09:46 UTC
-> Session focus: 8-node Isambard smoke/probe work for OLMo3 RLVR utilization,
-> with solved-only filtering preserved and no hard-threshold quarantine.
+> Last updated: 2026-05-13 11:40 UTC
+> Session focus: 8-node Isambard OLMo3 RLVR config refresh for fp32 lm-head
+> inference, private perfectible dataset, LR `3e-6`, and 512/16 rollout groups.
 > Trial journal: append to `TRIALS.md` after each material run/config/code trial.
+
+## 2026-05-13 11:40 UTC Checked-In Next RLVR Recipe
+
+Active config:
+`configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml`.
+
+Recipe now targets:
+
+- 28 inference GPUs / 4 trainer GPUs via `multi_node`.
+- `inference.enable_fp32_lm_head = true`, ported locally from merged upstream
+  PR `PrimeIntellect-ai/prime-rl#2441`.
+- Dataset: private HF repo
+  `joanvelja/omni-math2-olmo3-perfectible-seed42`.
+- `trainer.optim.lr = 3e-6`.
+- `batch_size = 512`, `rollouts_per_example = 16`, so still 32 prompt
+  groups/update.
+- `max_inflight_rollouts = 1536` to preserve the previous 3x in-flight factor.
+- DAPO-like refill/filtering is preserved:
+  `train_batch_refill.enabled=true`, `candidate_groups_per_round=32`,
+  `max_candidate_groups=128`, `easy_threshold=1.0`,
+  `online_difficulty_filtering=true`, and no `hard_threshold`.
+
+Verification just run:
+
+- `uv run --no-sync ruff check src/prime_rl/configs/inference.py src/prime_rl/inference/patches.py src/prime_rl/inference/vllm/worker/__init__.py tests/unit/test_configs.py`
+- `uv run --no-sync pytest tests/unit/test_configs.py::test_inference_fp32_lm_head_threads_through_vllm_additional_config`
+- `uv run --no-sync rl @ configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135`
+- `uv run --no-sync python -m prime_rl.entrypoints.launch rlvr --config configs/omni_math2/rl_olmo3_dpo_default_8node_28i4t_compile_fsasync4_refill.toml --dry-run --output-dir /tmp/prime_launch_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1137`
+- `bash -n /tmp/olmo3_fp32lmhead_perfectible_lr3e6_bs512_gs16_dryrun_20260513T1135/rl.sbatch`
+- HF smoke passed only after sourcing `.env` and redirecting caches to writable
+  `/tmp`: the dataset has 340 train rows and columns
+  `answer,difficulty,domain,id,problem,solution,source,tags`.
+
+Launch caveat: the dataset repo is private. A raw shell without `.env`/HF token
+gets `DatasetNotFoundError`; the Slurm script sources `.env`, so make sure the
+allocation environment still has the Hugging Face token and that cache paths are
+writable on compute nodes.
 
 ## 2026-05-12 21:56 UTC Current State
 
@@ -3676,3 +3713,75 @@ Updated launch plan for 8 nodes:
   - `4584395` (`3e-6`) is still listed as running but has one failed backend
     task (`4584395.7`) and is likely doomed unless vLLM/router tolerates the
     missing node. If it fails, retry with the cleanup patch above.
+
+2026-05-13 11:31 UTC eval restart:
+
+- Cancelled doomed `3e-6` eval job `4584395`; it was stuck before `step_25`
+  after backend task `4584395.7` failed on `nid010069`.
+- Re-submitted the same routed `3e-6` eval sbatch after the cleanup patch.
+  New job id: `4584655`.
+- Live evals to monitor:
+  - `4584396`: `1e-6` routed refill eval, running.
+  - `4584655`: `3e-6` routed refill eval retry, pending/running depending on
+    queue state.
+- Check with:
+  ```bash
+  squeue -j 4584396,4584655 -o '%.18i %.9P %.40j %.10T %.10M %.9l %.6D %R'
+  sacct -j 4584396,4584655 --format=JobID,JobName%40,State,ExitCode,Elapsed,NodeList%80 -P
+  ```
+
+2026-05-13 11:35 UTC eval split:
+
+- Cancelled serial routed evals `4584396` and `4584655`. The `1e-6` job had
+  only `228/4800` rollout rows for `step_25` after about 25 minutes; at the
+  observed `~2.1k` generated tok/s across 32 eval GPUs, four checkpoints in
+  one 6h allocation was not viable.
+- Submitted one `600x8` routed job per checkpoint with `08:00:00` wall time:
+  - `1e-6`: `4584726` step 25, `4584727` step 50, `4584733` step 75,
+    `4584739` step 100.
+  - `3e-6`: `4584740` step 25, `4584741` step 50, `4584743` step 75,
+    `4584744` step 100.
+- Output dirs are `offline_eval_600x8_8node_router_step{25,50,75,100}` under
+  each arm's run root.
+- `scripts/evals/compare_omni_math2_offline_evals.py` now globs
+  `offline_eval_600x8_8node_router*`, so the step-split summaries are included.
+- Monitor with:
+  ```bash
+  squeue -j 4584726,4584727,4584733,4584739,4584740,4584741,4584743,4584744 \
+    -o '%.18i %.9P %.40j %.10T %.10M %.9l %.6D %R'
+  ```
+
+2026-05-13 11:42 UTC correction:
+
+- `4584726` started and failed in `00:00:43` with exit `1:0` because the
+  stale-cleanup backport killed its own remote cleanup `srun` task
+  (`srun: error: nid010645: task 0: Killed`; endpoint wait saw code `137`).
+- Cancelled the seven pending jobs from that broken batch:
+  `4584727`, `4584733`, `4584739`, `4584740`, `4584741`, `4584743`,
+  `4584744`.
+- Patched `src/prime_rl/baselines/provision.py`: remote cleanup now uses
+  `ps`/`awk` to collect stale PIDs while excluding the cleanup task's own
+  process group, instead of `pkill -f` patterns that can match the cleanup
+  command line.
+- Verified:
+  ```bash
+  uv run --no-sync ruff check src/prime_rl/baselines/provision.py \
+    tests/unit/baselines/test_provision.py
+  uv run --no-sync pytest tests/unit/baselines/test_provision.py \
+    tests/unit/test_launch_entrypoint.py
+  ```
+- Resubmitted split routed evals:
+  - `1e-6`: `4585067` step 100, `4585068` step 25, `4585069` step 50,
+    `4585070` step 75.
+  - `3e-6`: `4585071` step 100, `4585072` step 25, `4585073` step 50,
+    `4585074` step 75.
+- At `11:40 UTC`, `4585067`, `4585068`, and `4585069` were running and had
+  passed the previous failure point: remote cleanup completed, router launched,
+  8 backend hosts were listed, and logs showed `nccl_net=AWS Libfabric`.
+- Persistent monitor was restarted outside the sandbox:
+  - pid file:
+    `outputs/omni_math2_rlvr_canary/monitors/postrun_eval_monitor_20260513_stepsplit.pid`
+  - status:
+    `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`
+  - comparison:
+    `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`
