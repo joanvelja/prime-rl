@@ -796,3 +796,11 @@ At `2026-05-13 12:36 UTC`, all eight target eval jobs were still running and
 writing partials. Aggregate target rows were `4113`; no summary files had
 landed yet. This is progress, not completion: the target per checkpoint is
 `600 × 8 = 4800` raw rollouts.
+
+At `2026-05-13 12:43 UTC`, live offline-eval metrics on job `4585069` showed
+the router path is healthy but capped by client concurrency, not KV capacity:
+8 backend hosts expanded to 32 DP-aware workers; sampled running requests
+across hosts summed to exactly `64`, with `0` waiting; sampled KV usage on a
+backend was only about `0.05-0.08`, and preemptions were `0`. The canonical
+launcher default was patched from `64` to `256` for future `offline-eval`
+launches. Current jobs keep the old cap because they already launched.

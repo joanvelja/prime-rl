@@ -78,6 +78,22 @@ def test_offline_eval_args_default_to_routed_multinode() -> None:
     assert "${SLURM_JOB_ID}" in rendered
 
 
+def test_offline_eval_parser_defaults_to_high_concurrency(monkeypatch) -> None:
+    monkeypatch.delenv("OFFLINE_EVAL_MAX_CONCURRENCY", raising=False)
+
+    args = launch.build_parser().parse_args(
+        [
+            "offline-eval",
+            "--arm",
+            "arm",
+            "--run-root",
+            "outputs/run/run_default",
+        ]
+    )
+
+    assert args.max_concurrency == 256
+
+
 def test_offline_eval_env_script_preflights_requested_weights() -> None:
     args = argparse.Namespace(
         root=Path("/repo"),
