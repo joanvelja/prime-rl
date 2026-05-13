@@ -3405,7 +3405,9 @@ so the patched runner can resume from those partials:
 | `3e-6` refill | 75 | `4586009` | `4586976` | `offline_eval_600x8_8node_router_step75_retry2` |
 | `3e-6` refill | 100 | `4585071` | `4586975` | `offline_eval_600x8_8node_router_step100` |
 
-At submit time the replacement jobs were pending on priority. The monitor was
-restarted outside the sandbox as PID `132730` and now tracks old cancelled jobs
-plus replacements in
+At submit time the replacement jobs were pending on priority. After cleaning up
+duplicate monitor loops, the monitor is PID `143599` and now tracks old
+cancelled jobs plus replacements in
 `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
+The monitor also includes a `Resume Evidence` section that greps worker logs
+for `resuming N/4800 completed baseline rollouts` once any replacement starts.

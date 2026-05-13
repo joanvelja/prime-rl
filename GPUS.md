@@ -834,6 +834,10 @@ the same output directories:
 4586975 -> 3e-6 step100
 ```
 
-At submit time these replacements were pending on priority. The monitor process
-is PID `132730` and status is still written to
+At submit time these replacements were pending on priority. After cleaning up
+duplicate monitor loops, the monitor process is PID `143599` and status is
+still written to
 `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
+The monitor now includes a `Resume Evidence` section that will show the worker
+log `resuming N/4800 completed baseline rollouts` lines once replacements
+start.
