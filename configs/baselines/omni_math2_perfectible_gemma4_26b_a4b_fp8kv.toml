@@ -6,8 +6,11 @@ dataset = "omni_math2_train_excluding_baseline600"
 seed = 42
 num_examples = 3828
 rollouts_per_example = 40
-max_concurrency = 256
-score_max_concurrency = 256
+# max_concurrency bumped to 1536 per 2026-05-13 BOTEC. This is already past
+# the dense active-read B*≈30.5/GPU, so treat it as the first empirical MoE
+# point rather than a below-knee guarantee.
+max_concurrency = 1536
+score_max_concurrency = 1536
 max_retries = 1
 ks = [1, 2, 4, 8, 16, 32, 40]
 success_threshold = 1.0
@@ -70,7 +73,12 @@ backend_port = 9900
 gpu_memory_utilization = 0.95
 max_model_len = 16384
 enforce_eager = false
-# Gemma 4 26B-A4B is MoE: enable_moe_block=True, 128 experts, top_k_experts=8, moe_intermediate_size=704.
-# enable_expert_parallel routes experts across the 4 local DP ranks to fit the 26B weights
-# (~52GB at bf16) inside the 96GB GH200 per-rank budget without going to tp=2.
-vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm", kv_cache_dtype = "fp8", calculate_kv_scales = true, enable_prefix_caching = true, stream_interval = 10, enable_expert_parallel = true }
+router_extra_args = ["--max-concurrent-requests", "1536", "--queue-size", "3072", "--queue-timeout-secs", "600", "--request-timeout-secs", "3600"]
+# Gemma 4 26B-A4B is MoE: 128 experts, top_k=8. enable_expert_parallel routes experts across
+# the 4 local DP ranks to fit the 26B weights inside the 96GB GH200 budget without tp=2.
+# kv_cache_dtype="fp8" disabled: Gemma 4 has heterogeneous head_dim (256/512). TRITON_ATTN
+# segfaults under FP8 KV; FLASHINFER rejects with "head_size not supported" (FlashInfer max
+# head_dim=256, FA3-Hopper max=256 — neither handles 512). No Hopper kernel supports this
+# combo in vLLM 0.20.1 (May 2026). See gemma4_e4b config for full diagnosis.
+# Default generation_config="auto" reads model gen_config.json (correct EOS — same lesson as rnj-1).
+vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", enable_prefix_caching = true, stream_interval = 10, enable_expert_parallel = true, enable_ep_weight_filter = true }

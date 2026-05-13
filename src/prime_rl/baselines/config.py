@@ -41,6 +41,7 @@ class LaunchConfig:
     wait_timeout_s: float = 900.0
     server_start_retries: int = 1
     external_health_check: ExternalHealthCheck = "models"
+    router_extra_args: list[str] = field(default_factory=list)
     extra_args: list[str] = field(default_factory=list)
     vllm_extra: dict[str, Any] = field(default_factory=dict)
 
@@ -93,6 +94,9 @@ def _coerce_launch(raw: dict[str, Any]) -> LaunchConfig:
     extra_args = raw.get("extra_args", [])
     if isinstance(extra_args, str):
         extra_args = shlex.split(extra_args)
+    router_extra_args = raw.get("router_extra_args", [])
+    if isinstance(router_extra_args, str):
+        router_extra_args = shlex.split(router_extra_args)
     return LaunchConfig(
         mode=raw.get("mode", "external"),
         port=int(raw.get("port", 8000)),
@@ -124,6 +128,7 @@ def _coerce_launch(raw: dict[str, Any]) -> LaunchConfig:
         wait_timeout_s=float(raw.get("wait_timeout_s", 900.0)),
         server_start_retries=int(raw.get("server_start_retries", 1)),
         external_health_check=raw.get("external_health_check", "models"),
+        router_extra_args=list(router_extra_args),
         extra_args=list(extra_args),
         vllm_extra=dict(raw.get("vllm_extra", {})),
     )

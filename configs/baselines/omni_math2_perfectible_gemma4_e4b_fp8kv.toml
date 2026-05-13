@@ -6,8 +6,10 @@ dataset = "omni_math2_train_excluding_baseline600"
 seed = 42
 num_examples = 3828
 rollouts_per_example = 40
-max_concurrency = 256
-score_max_concurrency = 256
+# max_concurrency bumped to 4096 per 2026-05-13 BOTEC. With 8 nodes x 4 GPUs,
+# active/GPU≈128, still below the E4B bf16-KV B*≈200 and well below KV capacity.
+max_concurrency = 4096
+score_max_concurrency = 4096
 max_retries = 1
 ks = [1, 2, 4, 8, 16, 32, 40]
 success_threshold = 1.0
@@ -72,6 +74,15 @@ backend_port = 9900
 gpu_memory_utilization = 0.95
 max_model_len = 16384
 enforce_eager = false
-# Same FP8 KV + prefix caching stack as OLMo3. language_model_only=true skips the VLM vision tower
-# (gemma-4-E4B-it is multimodal: text + vision + audio); for math reasoning we only need the LM head.
-vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm", kv_cache_dtype = "fp8", calculate_kv_scales = true, enable_prefix_caching = true, stream_interval = 10 }
+router_extra_args = ["--max-concurrent-requests", "4096", "--queue-size", "8192", "--queue-timeout-secs", "600", "--request-timeout-secs", "3600"]
+# Gemma 4 FP8 KV is BLOCKED at the kernel level on Hopper (vLLM 0.20.1, May 2026):
+#   - TRITON_ATTN (vLLM's default for Gemma 4 due to heterogeneous head_dim=256 local/512 global):
+#       q_scale assertion + SIGSEGV during memory profiling under kv_cache_dtype="fp8"
+#   - FLASHINFER backend: "ValueError: head_size not supported" — FlashInfer supports
+#       head_dim ∈ {64,128,256}; FA3 on Hopper supports {64,96,128,192,256}. Neither handles 512.
+# The vLLM mixed-attention guard is NOT a paranoia knob — it reflects a real kernel gap.
+# Fall back to bf16 KV; cost is ~2× KV memory per token (~75x concurrency at 16k ctx vs ~150x
+# with FP8) — still well above our max_num_seqs=192 request budget on 96GB GH200.
+# When upstream FlashAttention / FlashInfer add head_dim=512 support, re-test FP8 KV.
+# language_model_only=true skips the VLM vision/audio towers — math reasoning is text-only.
+vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", enable_prefix_caching = true, stream_interval = 10 }

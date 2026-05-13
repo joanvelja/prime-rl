@@ -6,8 +6,11 @@ dataset = "omni_math2_train_excluding_baseline600"
 seed = 42
 num_examples = 3828
 rollouts_per_example = 40
-max_concurrency = 256
-score_max_concurrency = 256
+# max_concurrency bumped to 1536 for short-output perfectible extraction.
+# This is deliberately higher than the long-RLVR-eval default of 512. If live
+# output lengths look like RLVR p95/max tails, lower this back to 512-1024.
+max_concurrency = 1536
+score_max_concurrency = 1536
 max_retries = 1
 ks = [1, 2, 4, 8, 16, 32, 40]
 success_threshold = 1.0
@@ -70,5 +73,6 @@ backend_port = 9900
 gpu_memory_utilization = 0.95
 max_model_len = 16384
 enforce_eager = false
+router_extra_args = ["--max-concurrent-requests", "1536", "--queue-size", "3072", "--queue-timeout-secs", "600", "--request-timeout-secs", "3600"]
 # Phase 2: prod baseline + FP8 KV cache + prefix caching (40 rollouts/problem share prompts) + stream_interval=10 (batch workload).
 vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm", kv_cache_dtype = "fp8", calculate_kv_scales = true, enable_prefix_caching = true, stream_interval = 10 }

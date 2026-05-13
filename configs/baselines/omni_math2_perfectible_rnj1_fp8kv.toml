@@ -1,13 +1,20 @@
 env_id = "omni_math2_singleturn"
-model = "EssentialAI/rnj-1"
-output_dir = "outputs/baselines/omni-math2-rnj1-perfectible-40r"
+# EssentialAI/rnj-1 (no suffix) is the BASE pretrain (8.4T tokens, no SFT) — never
+# trained on chat-format EOS supervision → rambles indefinitely past the answer.
+# The INSTRUCT variant has the SFT stage (150B tokens) and reliably emits <|eot_id|>.
+# Per EssentialAI's HF card, rnj-1-instruct is the right choice for inference.
+model = "EssentialAI/rnj-1-instruct"
+output_dir = "outputs/baselines/omni-math2-rnj1-instruct-perfectible-40r"
 protocol = "maj_at_n"
 dataset = "omni_math2_train_excluding_baseline600"
 seed = 42
 num_examples = 3828
 rollouts_per_example = 40
-max_concurrency = 256
-score_max_concurrency = 256
+# max_concurrency bumped to 3072 per corrected RNJ BOTEC. Runtime bf16 weights
+# are ~15.48 GiB despite fp32 safetensors on disk, giving B*≈127/GPU at L≈2000
+# with FP8 KV; 3072 is below-knee on 8 nodes, while 4096 is at/past the knee.
+max_concurrency = 3072
+score_max_concurrency = 3072
 max_retries = 1
 ks = [1, 2, 4, 8, 16, 32, 40]
 success_threshold = 1.0
@@ -45,13 +52,16 @@ judge_cache_enabled = true
 judge_cache_size = 100000
 judge_max_retries = 2
 judge_retry_delay_s = 0.5
-judge_persistent_cache_path = "outputs/baselines/judge-cache/omni-math2-rnj1-perfectible-gpt54mini.sqlite3"
+judge_persistent_cache_path = "outputs/baselines/judge-cache/omni-math2-rnj1-instruct-perfectible-gpt54mini.sqlite3"
 judge_persistent_cache_min_samples = 1
 judge_rubric_family = "omni_math2_hybrid_math_v1"
 judge_variant_id = "gpt-5.4-mini_default_grader_v5_flexible-final-answer"
 math_verify_timeout_seconds = 5
 math_verify_max_workers = 50
 
+# Paper-faithful Hendrycks Sanity sampling: t=1.0 for solve-rate estimator diversity.
+# (EssentialAI recommends t ∈ [0, 0.6] for production chat — that's quality tuning;
+# for unbiased Bernoulli-trial solve probability estimation we want stochastic decode.)
 [sampling]
 temperature = 1.0
 top_p = 0.95
@@ -70,7 +80,15 @@ backend_port = 9900
 gpu_memory_utilization = 0.95
 max_model_len = 16384
 enforce_eager = false
-# tokenizer = joanvelja/sft-tokenizer-rnj-1 — upstream EssentialAI/rnj-1 has wrong EOS
-# (eos_token=<|end_of_text|> 128001, but chat template ends in <|eot_id|> 128009 → never terminates cleanly).
-# The patched joanvelja repo (2026-04-17, re-verified 2026-05-13) has eos_token=<|eot_id|>.
-vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 192, max_num_batched_tokens = 65536, performance_mode = "throughput", generation_config = "vllm", kv_cache_dtype = "fp8", calculate_kv_scales = true, enable_prefix_caching = true, stream_interval = 10, tokenizer = "joanvelja/sft-tokenizer-rnj-1" }
+router_extra_args = ["--max-concurrent-requests", "3072", "--queue-size", "6144", "--queue-timeout-secs", "600", "--request-timeout-secs", "3600"]
+# NOTE: NO tokenizer override and NO generation_config="vllm" for this model.
+# rnj-1-instruct ships the standard Llama-3 dual-EOS idiom: tokenizer_config.json has
+# eos_token="<|end_of_text|>" (128001, the pretrain end-of-text) while generation_config.json
+# sets eos_token_id=128009 ("<|eot_id|>", the chat-template turn terminator). Both files are
+# CORRECT — the model's intended inference path is to read generation_config.json. Setting
+# generation_config="vllm" tells vLLM to ignore it and fall back to tokenizer.eos_token_id
+# (128001), which the chat-trained model never emits → indefinite rambling. Default
+# generation_config="auto" picks up gen_config.json's 128009 cleanly.
+# (OLMo3 / Gemma-4 happen to work with "vllm" because their tokenizer.eos_token_id matches
+# the chat-template terminator; only Llama-3-family models use the dual-EOS idiom.)
+vllm_extra = { language_model_only = true, skip_mm_profiling = true, mm_processor_cache_gb = 0.0, max_num_seqs = 256, max_num_batched_tokens = 65536, performance_mode = "throughput", kv_cache_dtype = "fp8", enable_prefix_caching = true, stream_interval = 10 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -214,6 +215,7 @@ def write_srun_multinode_script(config: BaselineConfig, config_path: Path, *, us
     router_port = launch.router_port or launch.port
     backend_port = launch.backend_port or (launch.port + 100)
     dp_local = launch.data_parallel_size_local or gpus_per_node
+    router_extra_args = " ".join(shlex.quote(str(arg)) for arg in launch.router_extra_args)
     script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -233,6 +235,7 @@ export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 [ -f .env ] && source .env
 mkdir -p "$OUTPUT_DIR"
 ROUTER_POLICY="${{PRIME_RL_VLLM_ROUTER_POLICY:-round_robin}}"
+ROUTER_EXTRA_ARGS=( {router_extra_args} )
 
 if [ -n "${{PRIME_RL_MULTINODE_HOSTS:-}}" ]; then
     read -ra HOSTNAMES <<< "$PRIME_RL_MULTINODE_HOSTS"
@@ -322,6 +325,7 @@ if [ "$USE_ROUTER" -eq 1 ] && [ "$INFER_NODE_RANK" -eq 0 ]; then
         --api-key "${{VLLM_API_KEY:-EMPTY}}" \\
         --worker-startup-timeout-secs 4200 \\
         --log-level info \\
+        "${{ROUTER_EXTRA_ARGS[@]}}" \\
         >> "$ROUTER_LOG" 2>&1 &
 elif [ "$INFER_NODE_RANK" -eq 0 ]; then
     echo "vllm-router unavailable; exposing head backend directly on $LOCAL_IP:$BACKEND_PORT" | tee "$OUTPUT_DIR/router.log"
@@ -405,17 +409,8 @@ cleanup() {{
 }}
 trap cleanup TERM INT EXIT
 
-LOCAL_HOST_SHORT="$(hostname -s)"
-echo "[prime-rl] cleaning stale node-local inference state on ${{#HOSTS[@]}} hosts (skipping local: $LOCAL_HOST_SHORT)"
+echo "[prime-rl] cleaning stale node-local inference state on ${{#HOSTS[@]}} hosts"
 for host in "${{HOSTS[@]}}"; do
-    # Skip the local host: the cleanup pkill matches "python.*prime_rl" cmdline, which
-    # ALSO matches the launcher CLI process itself if it runs on a node in HOSTS. The
-    # caller is responsible for cleaning the local host before invoking this driver
-    # (or accepting that local stale state is theirs).
-    if [ "$host" = "$LOCAL_HOST_SHORT" ] || [ "$host" = "$(hostname)" ]; then
-        echo "[node-cleanup] $host (local, skipped — launcher PID is here)"
-        continue
-    fi
     srun "${{OVERLAP_ARGS[@]}}" $JOB_ARG \\
         "${{NETWORK_ARGS[@]}}" \\
         --nodes=1 \\
@@ -423,14 +418,20 @@ for host in "${{HOSTS[@]}}"; do
         --ntasks-per-node=1 \\
         --nodelist="$host" \\
         bash -c '
+            # Target ONLY stale inference processes. Three layers of self-protection:
+            #   1. Bracket-trick patterns ([V]LLM::APIServer etc) — the regex char class [V]
+            #      matches "V" but the literal cmdline of this srun contains "[V]LLM" with
+            #      brackets, so the regex does not match its own outer srun parent process.
+            #   2. pgid filter skips bash/awk/ps subprocesses spawned by this script.
+            #   3. Patterns are specific to inference subprocesses; baselines.cli is NEVER matched.
             self_pgid=$(ps -o pgid= -p "$$" | tr -d " ")
             ps -eo pid=,pgid=,args= | awk -v self_pgid="$self_pgid" '"'"'
                 $2 == self_pgid {{ next }}
-                /python.*prime_rl|torchrun|vllm-router|vllm|prime_rl/ {{ print $1 }}
+                /[V]LLM::|[E]ngineCore_DP|[P]RIME-RL::Infer|[v]llm-router|[p]rime_rl\\.entrypoints\\.inference/ {{ print $1 }}
             '"'"' | xargs -r kill -9
             sleep 2
             rm -rf /dev/shm/vllm-* /dev/shm/vllm_* /tmp/vllm-* /tmp/vllm_* /tmp/torch-* /tmp/torchelastic_* /tmp/vllm_cache_* /tmp/triton_cache_* /tmp/torch_inductor_* 2>/dev/null || true
-            procs=$(ps -eo comm,args | grep -E "python|torchrun|vllm|vllm::" | grep -v grep | wc -l)
+            procs=$(ps -eo comm,args | grep -E "[V]LLM::|[E]ngineCore_DP|[P]RIME-RL::Infer" | wc -l)
             gpu=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk "{{s+=\\$1}} END {{print s}}")
             echo "[node-cleanup] $(hostname) procs=$procs gpu_mem=${{gpu}}MiB"
         '
@@ -515,13 +516,34 @@ class InferenceProvisioner(AbstractContextManager[Endpoint]):
                     f"{reason}. Set PRIME_RL_ALLOW_DIRECT_BACKEND=1 only for a deliberate debug run."
                 )
             multinode_hostnames = _multinode_hostnames(launch.srun_job_id)
-            if len(multinode_hostnames) < launch.nodes:
-                raise RuntimeError(f"Requested {launch.nodes} nodes but Slurm exposes only {multinode_hostnames}")
+            # Optional: exclude the local hostname from the inference HOSTS list. Required on
+            # Isambard, where running inference srun on the same node as the launcher CLI causes
+            # the inference's DP coordinator to be SIGKILL'd at the ~4-minute mark under sustained
+            # load (reproduced across 6+ attempts; smokes barely survive because they finish at
+            # ~4 min; full runs always crash). Root cause not fully isolated (likely cgroup or
+            # GPU-context contention with the interactive shell step on the same node). The fix
+            # is operational: keep launcher + vllm-router on the local node, inference on others.
+            effective_nodes = launch.nodes
+            if os.environ.get("PRIME_RL_EXCLUDE_LOCAL_FROM_HOSTS") == "1":
+                import socket
+                local_short = socket.gethostname().split(".")[0]
+                filtered = [h for h in multinode_hostnames if h.split(".")[0] != local_short]
+                if len(filtered) < len(multinode_hostnames):
+                    print(
+                        f"[prime-rl] PRIME_RL_EXCLUDE_LOCAL_FROM_HOSTS=1: dropping local host "
+                        f"{local_short!r}; effective nodes = {len(filtered)} (was {launch.nodes})"
+                    )
+                    multinode_hostnames = filtered
+                    effective_nodes = min(effective_nodes, len(multinode_hostnames))
+            if len(multinode_hostnames) < effective_nodes:
+                raise RuntimeError(
+                    f"Requested {effective_nodes} nodes but Slurm exposes only {multinode_hostnames}"
+                )
             launch_script = write_srun_multinode_script(self.config, config_path, use_router=use_router)
             driver_script = write_srun_multinode_driver_script(
                 self.config,
                 launch_script,
-                hostnames=multinode_hostnames[: launch.nodes],
+                hostnames=multinode_hostnames[: effective_nodes],
             )
             cmd = ["bash", str(driver_script)]
         elif launch.mode == "srun":
