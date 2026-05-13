@@ -3883,3 +3883,18 @@ Updated launch plan for 8 nodes:
   - `3e-6`: step25 `151`, step50 `818`, step75 `156`, step100 `927`.
 - Aggregate target rows moved from `2938` at `12:28:00` to `3293` at
   `12:30:20`, about `152 rows/min`. No summaries had landed yet.
+
+2026-05-13 12:36 UTC monitoring/readiness update:
+
+- All eight target eval jobs were still running with exit `0:0`.
+- Target partial rows:
+  - `1e-6`: step25 `233`, step50 `1039`, step75 `142`, step85 `236`.
+  - `3e-6`: step25 `253`, step50 `911`, step75 `248`, step100 `1051`.
+- No summary files had landed yet.
+- `src/prime_rl/utils/client.py` now requires `/health` to return a 2xx
+  response before treating an inference endpoint as ready. The old code
+  accepted any response object, including `500`. The `404` "route absent"
+  compatibility path is preserved.
+- Verified:
+  - `uv run --no-sync ruff check src/prime_rl/utils/client.py tests/unit/utils/test_client.py`
+  - `uv run --no-sync pytest tests/unit/utils/test_client.py`

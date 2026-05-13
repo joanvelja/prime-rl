@@ -791,3 +791,8 @@ At `2026-05-13 12:30 UTC`, all eight target eval jobs were still running and
 writing partials. Target rows moved from `2938` at `12:28:00` to `3293` at
 `12:30:20`, approximately `152 rows/min` aggregate across the eight jobs. No
 summary files had landed yet.
+
+At `2026-05-13 12:36 UTC`, all eight target eval jobs were still running and
+writing partials. Aggregate target rows were `4113`; no summary files had
+landed yet. This is progress, not completion: the target per checkpoint is
+`600 × 8 = 4800` raw rollouts.
