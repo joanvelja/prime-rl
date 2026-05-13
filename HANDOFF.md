@@ -3643,3 +3643,36 @@ Updated launch plan for 8 nodes:
   uv run --no-sync pytest tests/unit/baselines/test_config.py \
     tests/unit/baselines/test_provision.py tests/unit/test_launch_entrypoint.py
   ```
+- Replacement eval jobs:
+  - `4584396`: `1e-6` refill, pending on priority at submission.
+  - `4584395`: `3e-6` refill, pending on priority at submission.
+
+2026-05-13 11:15 UTC upstream check and routed eval state:
+
+- Upstream `PrimeIntellect-ai/prime-rl` `main` is currently
+  `e4330c2d2ca4fc4af46b1dfed2e6541489f52cbb`.
+- There is no exact upstream cherry-pick for the local offline-eval
+  router-readiness bug: upstream does not have our `src/prime_rl/baselines/*`
+  provisioner path. The local `external_health_check="router_health"` patch is
+  still the right narrow fix.
+- Upstream does have directly relevant stale-node cleanup in `c3a24c3`
+  (`feat(slurm): cleanup stale node-local state before launch`). The new
+  `3e-6` replacement eval `4584395` hit that class of failure on `nid010069`:
+  `RuntimeError: DP Coordinator process failed to report ZMQ addresses during startup`.
+- Applied a narrow backport to `src/prime_rl/baselines/provision.py`: the
+  offline-eval `srun_multinode` driver now runs a per-node cleanup step before
+  starting vLLM/router.
+- Verified:
+  ```bash
+  uv run --no-sync ruff check src/prime_rl/baselines/provision.py \
+    tests/unit/baselines/test_provision.py
+  uv run --no-sync pytest tests/unit/baselines/test_provision.py \
+    tests/unit/test_launch_entrypoint.py
+  bash -n /tmp/provision-driver-t2k0y0jc/inference/launch_multinode_driver.sh
+  ```
+- Current eval state at the time of the check:
+  - `4584396` (`1e-6`) is running and has reached `step_25` eval after
+    successful pause/update/resume.
+  - `4584395` (`3e-6`) is still listed as running but has one failed backend
+    task (`4584395.7`) and is likely doomed unless vLLM/router tolerates the
+    missing node. If it fails, retry with the cleanup patch above.

@@ -2919,3 +2919,57 @@ uv run --no-sync pytest tests/unit/baselines/test_config.py \
 
 Both passed. Replacement eval jobs should use this patch; do not retry the old
 jobs unchanged.
+
+Replacement eval jobs submitted with the patched router-health readiness path:
+
+- `4584396`: `1e-6` refill, output
+  `outputs/omni_math2_rlvr_canary/default_8node_28i4t_compile_fsasync4_refill_20260512_1745/offline_eval_600x8_8node_router`.
+- `4584395`: `3e-6` refill, output
+  `outputs/omni_math2_rlvr_canary/lr3e6_28i4t_refill_shared_submit_20260512_2155/offline_eval_600x8_8node_router`.
+
+Both were pending on priority at submission time.
+
+### 2026-05-13 11:15 UTC - Upstream router/stale-cleanup check
+
+Checked upstream `PrimeIntellect-ai/prime-rl` `main` at
+`e4330c2d2ca4fc4af46b1dfed2e6541489f52cbb` against the local router-health
+failure.
+
+Findings:
+
+- No exact upstream fix exists for the local offline-eval failure. Upstream
+  does not have this repo's `src/prime_rl/baselines/*` offline-eval
+  provisioner, and it does not implement a router `/health` readiness mode for
+  that path.
+- Upstream already has the right production design pattern: inference requests
+  may go through `router_url`, while admin/model checks use direct
+  `admin_base_url` backend URLs. The local router-health patch is consistent
+  with that split rather than a wholesale upstream cherry-pick.
+- Upstream commit `0660a9b` pins Triton JIT cache to node-local `/tmp`. The
+  local offline-eval provisioner already has a stronger version covering
+  TorchInductor and vLLM cache roots too.
+- Upstream commit `c3a24c3` adds stale node-local cleanup before Slurm
+  launches. That is directly relevant to the replacement `3e-6` routed eval:
+  job `4584395` lost backend task `4584395.7` on `nid010069` with
+  `RuntimeError: DP Coordinator process failed to report ZMQ addresses during startup`.
+
+Patch applied for the next retry:
+
+- `src/prime_rl/baselines/provision.py`: `srun_multinode` driver now runs a
+  per-node cleanup step before launching backend vLLM: kills stale
+  python/torchrun/vLLM/router processes and removes stale vLLM/Torch IPC/cache
+  files under `/dev/shm` and `/tmp`.
+
+Verification:
+
+```bash
+uv run --no-sync ruff check src/prime_rl/baselines/provision.py \
+  tests/unit/baselines/test_provision.py
+uv run --no-sync pytest tests/unit/baselines/test_provision.py \
+  tests/unit/test_launch_entrypoint.py
+uv run --no-sync python -c 'from pathlib import Path; from prime_rl.baselines.config import BaselineConfig, LaunchConfig; from prime_rl.baselines.provision import write_srun_multinode_driver_script; import tempfile; d=Path(tempfile.mkdtemp(prefix="provision-driver-", dir="/tmp")); (d/"inference").mkdir(); cfg=BaselineConfig(env_id="hf_singleturn", model="model", output_dir=d, launch=LaunchConfig(mode="srun_multinode", nodes=2, gpus_per_node=4, dp=8, data_parallel_size_local=4, srun_job_id="123")); p=write_srun_multinode_driver_script(cfg, d/"node.sh", hostnames=["nid1","nid2"]); print(p)'
+bash -n /tmp/provision-driver-t2k0y0jc/inference/launch_multinode_driver.sh
+```
+
+The generated driver syntax passed. Do not re-run the `3e-6` routed eval
+without this cleanup patch if `4584395` times out/fails.

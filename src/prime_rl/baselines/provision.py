@@ -405,6 +405,30 @@ cleanup() {{
 }}
 trap cleanup TERM INT EXIT
 
+echo "[prime-rl] cleaning stale node-local inference state on ${{#HOSTS[@]}} hosts"
+for host in "${{HOSTS[@]}}"; do
+    srun "${{OVERLAP_ARGS[@]}}" $JOB_ARG \\
+        "${{NETWORK_ARGS[@]}}" \\
+        --nodes=1 \\
+        --ntasks=1 \\
+        --ntasks-per-node=1 \\
+        --nodelist="$host" \\
+        bash -c '
+            pkill -9 -f "[p]ython.*prime_rl" 2>/dev/null || true
+            pkill -9 -f "[t]orchrun" 2>/dev/null || true
+            pkill -9 -f "[v]llm-router" 2>/dev/null || true
+            pkill -9 -f "[v]llm" 2>/dev/null || true
+            pkill -9 -f "[p]rime_rl" 2>/dev/null || true
+            pkill -9 "vllm" 2>/dev/null || true
+            pkill -9 "vllm::.*" 2>/dev/null || true
+            sleep 2
+            rm -rf /dev/shm/vllm-* /dev/shm/vllm_* /tmp/vllm-* /tmp/vllm_* /tmp/torch-* /tmp/torchelastic_* /tmp/vllm_cache_* /tmp/triton_cache_* /tmp/torch_inductor_* 2>/dev/null || true
+            procs=$(ps -eo comm,args | grep -E "python|torchrun|vllm|vllm::" | grep -v grep | wc -l)
+            gpu=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk "{{s+=\\$1}} END {{print s}}")
+            echo "[node-cleanup] $(hostname) procs=$procs gpu_mem=${{gpu}}MiB"
+        '
+done
+
 for idx in "${{!HOSTS[@]}}"; do
     host="${{HOSTS[$idx]}}"
     srun "${{OVERLAP_ARGS[@]}}" $JOB_ARG \\
