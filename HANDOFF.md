@@ -3898,3 +3898,23 @@ Updated launch plan for 8 nodes:
 - Verified:
   - `uv run --no-sync ruff check src/prime_rl/utils/client.py tests/unit/utils/test_client.py`
   - `uv run --no-sync pytest tests/unit/utils/test_client.py`
+
+2026-05-13 12:43 UTC offline-eval throughput note:
+
+- Current routed jobs are running with `--max-concurrency 64` because
+  `prime_rl.entrypoints.launch offline-eval` defaulted to `64`, overriding the
+  underlying eval script's `256` default.
+- Live metrics on job `4585069`: router health OK; 8 backend hosts expanded to
+  32 DP-aware workers; sampled aggregate running requests across the 8 hosts
+  was exactly `64`, with `0` waiting; sampled KV usage was only about
+  `0.05-0.08`; preemptions were `0`.
+- Interpretation: current jobs are client-concurrency capped, not KV capped.
+- Patched `src/prime_rl/entrypoints/launch.py` so future `offline-eval`
+  launches default to `OFFLINE_EVAL_MAX_CONCURRENCY` or `256`. Added a parser
+  unit test.
+- Verified:
+  - `uv run --no-sync ruff check src/prime_rl/entrypoints/launch.py tests/unit/test_launch_entrypoint.py src/prime_rl/utils/client.py tests/unit/utils/test_client.py`
+  - `uv run --no-sync pytest tests/unit/test_launch_entrypoint.py tests/unit/utils/test_client.py`
+- Current jobs are still using the old `64` cap because their launch arguments
+  are fixed. At `12:43 UTC`, aggregate target rows were `5669`; no summaries
+  had landed yet.

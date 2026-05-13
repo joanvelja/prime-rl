@@ -16,6 +16,7 @@ DEFAULT_MODEL = "allenai/Olmo-3-7B-Instruct-DPO"
 DEFAULT_COMPARE_OUTPUT = REPO_ROOT / "outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md"
 DEFAULT_PATCHED_VERIFIERS = Path("/lus/lfs1aip2/projects/a6r/joanv.a6r/tmp/verifiers-hf-task-envs")
 DEFAULT_OMNI_ENV = REPO_ROOT / "environments/omni_math2_singleturn"
+DEFAULT_OFFLINE_EVAL_MAX_CONCURRENCY = 256
 
 
 def _q(value: object) -> str:
@@ -494,7 +495,11 @@ def _add_common_offline_eval_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=int(os.environ.get("OFFLINE_EVAL_ROLLOUTS_PER_EXAMPLE", "8")),
     )
-    parser.add_argument("--max-concurrency", type=int, default=int(os.environ.get("OFFLINE_EVAL_MAX_CONCURRENCY", "64")))
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=int(os.environ.get("OFFLINE_EVAL_MAX_CONCURRENCY", str(DEFAULT_OFFLINE_EVAL_MAX_CONCURRENCY))),
+    )
     parser.add_argument(
         "--score-max-concurrency",
         type=int,
