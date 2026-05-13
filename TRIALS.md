@@ -3281,3 +3281,20 @@ Slurm log:
 
 Partial rollout files also appeared for `4586007`, `4585994`, `4586008`, and
 `4586009`. This confirms the explicit-step fix in the real Slurm path.
+
+Follow-up at `12:30 UTC`: all eight target eval jobs were still running.
+Current target partial rows:
+
+```text
+1e-6 step25:   130
+1e-6 step50:   926
+1e-6 step75:    47
+1e-6 step85:   138
+3e-6 step25:   151
+3e-6 step50:   818
+3e-6 step75:   156
+3e-6 step100:  927
+```
+
+Between `12:28:00` and `12:30:20`, target rows rose from `2938` to `3293`,
+about `152 rows/min` across all eight jobs. No summaries had landed yet.

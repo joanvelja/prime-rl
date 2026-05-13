@@ -3872,3 +3872,14 @@ Updated launch plan for 8 nodes:
   - `4586009`: `3e-6` step `75`.
 - Partial rollout files have appeared for the corrected retry outputs, so the
   explicit-step fix is validated in the live Slurm path.
+
+2026-05-13 12:30 UTC monitoring snapshot:
+
+- All eight target eval jobs were running:
+  `4585069`, `4585071`, `4585073`, `4585994`, `4586007`, `4586008`,
+  `4586009`, `4586010`.
+- Target partial rows:
+  - `1e-6`: step25 `130`, step50 `926`, step75 `47`, step85 `138`.
+  - `3e-6`: step25 `151`, step50 `818`, step75 `156`, step100 `927`.
+- Aggregate target rows moved from `2938` at `12:28:00` to `3293` at
+  `12:30:20`, about `152 rows/min`. No summaries had landed yet.
