@@ -701,3 +701,22 @@ Resubmitted jobs:
 The running shard logs show `nccl_net=AWS Libfabric`, 8 backend hosts, and
 vLLM router startup. Monitor status is written to
 `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`.
+
+Update at `2026-05-13 11:50 UTC`: `1e-6` step `100` was a bad target; the run
+has no stable `step_100` broadcast and stopped at `step_85`. Job `4585067`
+failed after readiness with no matching stable checkpoint. Job `4585068`
+(`step_25`) also failed after readiness with the same message, but the local
+checkpoint discovery path sees `step_25`, so it was retried as a likely
+compute-side filesystem visibility miss.
+
+Current corrected `1e-6` targets:
+
+| checkpoint | job | note |
+|---:|---:|---|
+| 25 | `4585323` | retry after false missing-checkpoint failure |
+| 50 | `4585069` | running; reached pause/update/resume and partial rollouts |
+| 75 | `4585070` | valid, pending/running by scheduler state |
+| 85 | `4585324` | actual final stable broadcast for the `1e-6` run |
+
+`3e-6` targets remain `25`, `50`, `75`, and `100`; all four stable broadcasts
+exist under `lr3e6_28i4t_refill_shared_submit_20260512_2155/run_default/broadcasts`.

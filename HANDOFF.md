@@ -3785,3 +3785,25 @@ Updated launch plan for 8 nodes:
     `outputs/omni_math2_rlvr_canary/postrun_eval_monitor_20260513_stepsplit.md`
   - comparison:
     `outputs/omni_math2_rlvr_canary/offline_eval_comparison_20260512.md`
+
+2026-05-13 11:50 UTC correction:
+
+- `1e-6` step `100` is invalid: that run stopped at step `85`. Job `4585067`
+  reached readiness and failed with `No matching stable weight checkpoints
+  found`.
+- `1e-6` step `25` job `4585068` also failed after readiness with the same
+  discovery error, but local inspection shows
+  `run_default/broadcasts/step_25/{STABLE,model-00001..00003-of-00003.safetensors}`.
+  Local `_discover_weight_steps(..., steps={25})` returns the checkpoint, so
+  this was treated as a transient compute-side visibility failure and retried.
+- `1e-6` step `50` job `4585069` is the first valid split eval actively
+  generating; it reached pause/update/resume and has partial rollouts under
+  `offline_eval_600x8_8node_router_step50/refill_lr1e6_28i4t/step_000050/`.
+- Valid stable `1e-6` broadcast steps are `25`, `50`, `75`, and final `85`
+  for the comparison; there are also per-step final broadcasts `81-84`.
+- Submitted:
+  - `4585323`: `1e-6` step `25` retry.
+  - `4585324`: `1e-6` final step `85`.
+- Monitor PID was replaced with `279784`; it now tracks:
+  `4585067`, `4585068`, `4585069`, `4585070`, `4585071`, `4585072`,
+  `4585073`, `4585074`, `4585323`, `4585324`.

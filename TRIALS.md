@@ -3135,3 +3135,40 @@ Resubmitted the eight one-checkpoint routed evals:
 At the follow-up check, `4585067`, `4585068`, and `4585069` were running. Their
 server logs showed remote cleanup completion, vLLM router startup, 8 backend
 hosts, and `nccl_net=AWS Libfabric`; this clears the self-kill failure mode.
+
+### 2026-05-13 11:50 UTC - Corrected invalid 1e-6 final step
+
+The `1e-6` step-split retry exposed a second issue:
+
+- `4585067` (`1e-6`, requested step `100`) reached router/backend readiness
+  but failed with `No matching stable weight checkpoints found`; this is
+  expected because the `1e-6` run stopped at step `85`, not step `100`.
+- `4585068` (`1e-6`, requested step `25`) also reached readiness and then
+  failed with the same discovery error, even though the step `25` broadcast dir
+  now has `STABLE` and all three safetensor shards. Local verifier:
+  `_discover_weight_steps(..., steps={25})` returns step `25`; this looks like
+  a transient filesystem visibility issue from the compute-side run, so it was
+  retried.
+- `4585069` (`1e-6`, step `50`) reached pause/update/resume and began writing
+  partial rollouts under
+  `offline_eval_600x8_8node_router_step50/refill_lr1e6_28i4t/step_000050/`.
+- `4585070` (`1e-6`, step `75`) remained pending/running and is valid.
+
+Actual stable `1e-6` broadcast steps at this point:
+
+```text
+25 50 75 81 82 83 84 85
+```
+
+Submitted replacements:
+
+- `4585323`: `1e-6` step `25` retry,
+  `offline_eval_600x8_8node_router_step25_retry1`.
+- `4585324`: `1e-6` final step `85`,
+  `offline_eval_600x8_8node_router_step85`.
+
+Updated the persistent monitor to track:
+
+```text
+4585067 4585068 4585069 4585070 4585071 4585072 4585073 4585074 4585323 4585324
+```
