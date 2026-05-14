@@ -533,7 +533,23 @@ class InferenceConfig(BaseConfig):
             value = rgetattr(self, config_key.replace("-", "_"))
             rsetattr(namespace, vllm_key, value)
 
-        # Set `logprobs_mode` to `processed_logprobs` by default
+        # `processed_logprobs` returns log mu(a) under the actual inference
+        # sampling distribution -- post-temperature, post-penalty/bad_words,
+        # post-top-p/k. That is the BEHAVIOR-POLICY logprob the trainer needs to
+        # compute a correct IS ratio: ratio = pi_full(a) / mu(a), where the
+        # trainer computes pi_full(a) = log_softmax(logits/T) over the full
+        # vocabulary. The standard PG estimator
+        #     E_{a ~ mu}[ ratio * A * grad log pi(a) ]
+        # is then unbiased for grad J(pi_full) -- any asymmetry between the
+        # trainer's full-vocab target policy and inference's filtered behavior
+        # policy is absorbed by the IS ratio. Importance ratios will not center
+        # on 1 in this setup (with top_p < 1 they center at ~ Z_topp / Z_full,
+        # which is expected and correct, not a "gradient attenuation").
+        # Switching to `raw_logprobs` would compute pi(a) on both sides, making
+        # the ratio meaningless w.r.t. the actual sampling restriction.
+        # Env-var overrides are useful for diagnostic canary bisection, but do
+        # not use raw_logprobs for real training; it breaks the IS ratio's
+        # behavior-policy semantics.
         rsetattr(namespace, "logprobs_mode", "processed_logprobs")
 
         # Remove chat_template if not set (vLLM doesn't accept None)

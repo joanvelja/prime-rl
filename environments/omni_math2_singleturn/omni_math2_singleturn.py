@@ -10,7 +10,6 @@ from datasets import Dataset
 from verifiers.clients.openai_chat_completions_client import OpenAIChatCompletionsClient
 from verifiers.parsers.maybe_think_parser import MaybeThinkParser
 from verifiers.types import ClientConfig
-from verifiers.utils.data_utils import extract_boxed_answer
 from verifiers.utils.hf_tasks import (
     DEFAULT_JUDGE_PROMPT_PACK,
     JudgePromptKind,
@@ -50,6 +49,48 @@ def _message_content(messages: vf.Messages) -> str:
         if role == "user" and isinstance(content, str):
             parts.append(content)
     return "\n".join(parts)
+
+
+def _assistant_text(messages: vf.Messages) -> str:
+    if isinstance(messages, str):
+        return messages
+    parts: list[str] = []
+    for message in messages:
+        if isinstance(message, dict):
+            content = message.get("content", "")
+            role = message.get("role")
+        else:
+            content = getattr(message, "content", "")
+            role = getattr(message, "role", None)
+        if role == "assistant" and isinstance(content, str):
+            parts.append(content)
+    return "\n".join(parts)
+
+
+def _first_boxed_content(text: str) -> str | None:
+    """Return inner content of the FIRST balanced \\boxed{...} occurrence, or None.
+
+    The upstream `verifiers.extract_boxed_answer` uses `rfind` -- it picks the
+    LAST boxed. Combined with on-policy RL on a binary correctness reward, that
+    setup directly rewards paraphrastic looping (the model emits multiple
+    \\boxed{} restatements and keeps getting scored on whichever it lands last).
+    First-boxed semantics anchor the score to the model's initial answer.
+    """
+    marker = "\\boxed{"
+    search_from = 0
+    while (idx := text.find(marker, search_from)) != -1:
+        start = idx + len(marker)
+        depth = 1
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i]
+        search_from = idx + len(marker)
+    return None
 
 
 def _canonical_answer_text(text: str) -> str:
@@ -101,17 +142,17 @@ def _strip_answer_fence(text: str) -> str:
     return text.strip().strip(".;,")
 
 
-def extract_omni_math2_answer(text: str, *, strict: bool = True) -> str | None:
-    boxed = extract_boxed_answer(text, strict=strict)
+def extract_omni_math2_answer(text: str) -> str | None:
+    boxed = _first_boxed_content(text)
     if boxed:
         return boxed
 
     tail = text[-4000:]
-    for match in reversed(list(FINAL_ANSWER_RE.finditer(tail))):
+    for match in FINAL_ANSWER_RE.finditer(tail):
         answer = _strip_answer_fence(match.group("answer"))
         if NO_SOLUTION_RE.search(answer):
             return "no such n"
-        boxed = extract_boxed_answer(answer, strict=strict)
+        boxed = _first_boxed_content(answer)
         if boxed:
             return boxed
         if answer and len(answer) <= MAX_FALLBACK_ANSWER_CHARS:
@@ -295,13 +336,25 @@ class MathVerifyThenJudgeRubric(vf.Rubric):
         state["judge_score"] = score
         return score
 
-    async def correct_answer(self, state: vf.State, **kwargs: Any) -> float:
-        return float(
+    async def correct_answer(self, completion: vf.Messages, state: vf.State, **kwargs: Any) -> float:
+        base = float(
             state.get("math_verify_score", 0.0)
             or state.get("choice_alias_score", 0.0)
             or state.get("text_alias_score", 0.0)
             or state.get("judge_score", 0.0)
         )
+        # Paraphrastic-looping penalty: a completion with more than one \boxed{}
+        # is the model second-guessing its own first answer. The parser already
+        # scores only the first \boxed (see _first_boxed_content); the multiplier
+        # adds gradient pressure against the looping habit itself.
+        n_boxed = _assistant_text(completion).count("\\boxed{")
+        state["n_boxed"] = n_boxed
+        if n_boxed > 1:
+            base *= 0.5
+            state["multi_boxed_penalty_applied"] = True
+        else:
+            state["multi_boxed_penalty_applied"] = False
+        return base
 
     async def cleanup(self, state: vf.State) -> None:
         await self.math_rubric.cleanup(state)
