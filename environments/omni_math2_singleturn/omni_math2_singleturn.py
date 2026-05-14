@@ -77,19 +77,19 @@ def _first_boxed_content(text: str) -> str | None:
     First-boxed semantics anchor the score to the model's initial answer.
     """
     marker = "\\boxed{"
-    idx = text.find(marker)
-    if idx == -1:
-        return None
-    start = idx + len(marker)
-    depth = 1
-    for i in range(start, len(text)):
-        c = text[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i]
+    search_from = 0
+    while (idx := text.find(marker, search_from)) != -1:
+        start = idx + len(marker)
+        depth = 1
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i]
+        search_from = idx + len(marker)
     return None
 
 
@@ -142,9 +142,7 @@ def _strip_answer_fence(text: str) -> str:
     return text.strip().strip(".;,")
 
 
-def extract_omni_math2_answer(text: str, *, strict: bool = True) -> str | None:
-    # strict kept for caller compatibility; first-boxed semantics make it moot.
-    del strict
+def extract_omni_math2_answer(text: str) -> str | None:
     boxed = _first_boxed_content(text)
     if boxed:
         return boxed
