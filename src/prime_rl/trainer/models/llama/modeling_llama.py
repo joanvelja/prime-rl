@@ -253,6 +253,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             If not provided, the wrapped LM head returns logits only.
         temperature (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
             Per-token temperatures for logprobs/entropy computation when `labels` are provided.
+        cache_position (`torch.LongTensor`, *optional*):
+            Accepted for compatibility with Hugging Face generation APIs; ignored by this custom training model.
 
         Example:
 

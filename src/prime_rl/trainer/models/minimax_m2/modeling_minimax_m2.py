@@ -241,6 +241,8 @@ class MiniMaxM2ForCausalLM(MiniMaxM2PreTrainedModel, GenerationMixin):
             Labels for computing the masked language modeling loss.
         temperature (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
             Per-token temperatures for logprobs/entropy computation.
+        cache_position (`torch.LongTensor`, *optional*):
+            Accepted for compatibility with Hugging Face generation APIs; ignored by this custom training model.
         routed_experts (`torch.LongTensor` of shape `(batch_size, sequence_length, num_hidden_layers, num_experts_per_tok)`, *optional*):
             Routed experts for each token in the sequence. Only used for router replay.
         """

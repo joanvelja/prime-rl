@@ -377,6 +377,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
             (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
         temperature (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
             Per-token temperatures for logprobs/entropy computation.
+        cache_position (`torch.LongTensor`, *optional*):
+            Accepted for compatibility with Hugging Face generation APIs; ignored by this custom training model.
         routed_experts (`torch.LongTensor` of shape `(batch_size, sequence_length, num_hidden_layers, num_experts_per_tok)`, *optional*):
             Routed experts for each token in the sequence. Only used for router replay.
 
