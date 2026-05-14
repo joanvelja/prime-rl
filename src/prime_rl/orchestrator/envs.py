@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import multiprocessing as mp
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from multiprocessing.process import BaseProcess
 from pathlib import Path
@@ -175,7 +176,7 @@ class EvalEnv(Env):
     def __init__(self, config: EvalEnvConfig):
         super().__init__(config)
         self.sampling_args = config.sampling.to_sampling_args()
-        self.examples = self.env.get_eval_dataset(n=config.num_examples).to_list()
+        self.examples = self.env.get_eval_dataset(n=config.num_examples, seed=config.seed).to_list()
 
     async def evaluate(
         self,
@@ -184,6 +185,7 @@ class EvalEnv(Env):
         ckpt_step: int,
         step: int,
         cache_salt: str,
+        eval_clients: Sequence[vf.ClientConfig] | None = None,
     ) -> list[vf.RolloutOutput]:
         num_examples = len(self.examples)
         rollouts_per_example = self.config.rollouts_per_example
@@ -191,13 +193,39 @@ class EvalEnv(Env):
         total_rollouts = num_examples * rollouts_per_example
         pbar = ProgressTracker(total=total_rollouts, desc=f"Evaluating {self.name}")
         eval_start = time.perf_counter()
+        max_concurrent_rollouts_per_client = self.config.max_concurrent_rollouts_per_client
+        eval_jobs: asyncio.Queue[dict | None] = asyncio.Queue()
+        client_load: Counter[tuple[str, str | None]] = Counter()
+
+        def client_identity(client: vf.ClientConfig) -> tuple[str, str | None]:
+            return (client.api_base_url, client.extra_headers.get("X-data-parallel-rank"))
+
+        def acquire_eval_client(cost: int) -> vf.ClientConfig:
+            if not eval_clients:
+                raise RuntimeError("Eval dynamic refill requires at least one eval client")
+            client = min(eval_clients, key=lambda c: client_load[client_identity(c)])
+            client_load[client_identity(client)] += cost
+            return client
+
+        async def acquire_client(cost: int) -> vf.ClientConfig:
+            if max_concurrent_rollouts_per_client is None:
+                return await get_client()
+            return acquire_eval_client(cost)
+
+        def release_client(client: vf.ClientConfig, cost: int) -> None:
+            if max_concurrent_rollouts_per_client is None:
+                return
+            identity = (client.api_base_url, client.extra_headers.get("X-data-parallel-rank"))
+            client_load[identity] -= cost
+            if client_load[identity] <= 0:
+                del client_load[identity]
 
         if self.requires_group_scoring:
 
             async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
                 """Run rollouts_per_example rollouts as a scored group for one example."""
+                client = await acquire_client(rollouts_per_example)
                 try:
-                    client = await get_client()
                     outputs = await self.run_group(
                         client=client,
                         example=example,
@@ -211,15 +239,18 @@ class EvalEnv(Env):
                     get_logger().warning(f"Group failed: {e}")
                     pbar.update(rollouts_per_example)
                     return None
+                finally:
+                    release_client(client, rollouts_per_example)
 
-            coros = [run_with_progress(example) for example in self.examples]
+            jobs = self.examples
+            cost_per_job = rollouts_per_example
 
         else:
 
             async def run_with_progress(example: dict) -> list[vf.RolloutOutput] | None:
                 """Run a single rollout for one example."""
+                client = await acquire_client(1)
                 try:
-                    client = await get_client()
                     output = await self.run_rollout(
                         client=client, example=example, model_name=model_name, cache_salt=cache_salt
                     )
@@ -229,15 +260,51 @@ class EvalEnv(Env):
                     get_logger().warning(f"Rollout failed: {e}")
                     pbar.update(1)
                     return None
+                finally:
+                    release_client(client, 1)
 
-            coros = [run_with_progress(example) for example in self.examples for _ in range(rollouts_per_example)]
+            jobs = [example for example in self.examples for _ in range(rollouts_per_example)]
+            cost_per_job = 1
 
         try:
-            results = await asyncio.gather(*coros)
+            if max_concurrent_rollouts_per_client is None:
+                results = await asyncio.gather(*(run_with_progress(example) for example in jobs))
+            else:
+                if not eval_clients:
+                    eval_clients = [await get_client()]
+
+                worker_count = min(
+                    len(jobs),
+                    max(1, (len(eval_clients) * max_concurrent_rollouts_per_client) // cost_per_job),
+                )
+                for job in jobs:
+                    eval_jobs.put_nowait(job)
+                for _ in range(worker_count):
+                    eval_jobs.put_nowait(None)
+
+                async def worker() -> list[list[vf.RolloutOutput] | None]:
+                    worker_results: list[list[vf.RolloutOutput] | None] = []
+                    while True:
+                        job = await eval_jobs.get()
+                        try:
+                            if job is None:
+                                return worker_results
+                            worker_results.append(await run_with_progress(job))
+                        finally:
+                            eval_jobs.task_done()
+
+                get_logger().info(
+                    f"Eval dynamic refill enabled for {self.name}: "
+                    f"{worker_count} workers across {len(eval_clients)} inference clients"
+                )
+                worker_results = await asyncio.gather(*(worker() for _ in range(worker_count)))
+                results = [result for worker_result in worker_results for result in worker_result]
         finally:
             pbar.close()
 
         successful_outputs = [o for group in results if group is not None for o in group]
+        for output in successful_outputs:
+            output["env_name"] = self.name
         failed_count = total_rollouts - len(successful_outputs)
         eval_time = time.perf_counter() - eval_start
 
@@ -261,6 +328,12 @@ class EvalEnv(Env):
         # Log metrics
         monitor = get_monitor()
 
+        def metric_value(output: vf.RolloutOutput, name: str) -> float | None:
+            value = output.get(name)
+            if value is None:
+                value = (output.get("metrics") or {}).get(name)
+            return float(value) if value is not None else None
+
         rows = [
             {
                 "example_id": o["example_id"],
@@ -269,6 +342,13 @@ class EvalEnv(Env):
                 "is_truncated": o["is_truncated"],
                 "has_error": o.get("error") is not None,
                 "no_response": not o.get("completion"),
+                "stop_condition": o.get("stop_condition"),
+                "generation_ms": (o.get("timing") or {}).get("generation_ms"),
+                "scoring_ms": (o.get("timing") or {}).get("scoring_ms"),
+                "math_verify_score": metric_value(o, "math_verify_score"),
+                "choice_alias_score": metric_value(o, "choice_alias_score"),
+                "text_alias_score": metric_value(o, "text_alias_score"),
+                "judge_score": metric_value(o, "judge_score"),
             }
             for o in successful_outputs
         ]
@@ -312,6 +392,22 @@ class EvalEnv(Env):
             "failed_rollouts": failed_count / total_rollouts,
             "time": eval_time,
         }
+        for column in ("generation_ms", "scoring_ms"):
+            series = results_df[column].dropna()
+            if len(series) > 0:
+                eval_metrics[f"{column}/mean"] = series.mean().item()
+                eval_metrics[f"{column}/p95"] = series.quantile(0.95).item()
+                eval_metrics[f"{column}/max"] = series.max().item()
+        for column in ("math_verify_score", "choice_alias_score", "text_alias_score", "judge_score"):
+            series = results_df[column].dropna()
+            if len(series) > 0:
+                eval_metrics[f"metrics/{column}/mean"] = series.mean().item()
+                eval_metrics[f"metrics/{column}/coverage"] = len(series) / len(results_df)
+        for stop_condition, rate in results_df.stop_condition.dropna().value_counts(normalize=True).items():
+            eval_metrics[f"stop_condition/{stop_condition}"] = rate
+        eval_metrics["stop_condition/generation_truncated"] = (
+            results_df.is_truncated & (results_df.stop_condition != "prompt_too_long")
+        ).mean().item()
         if could_be_binary:
             assert pass_at_k is not None
             eval_metrics.update(pd.Series(pass_at_k.mean()).to_dict())

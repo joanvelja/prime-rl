@@ -5,9 +5,10 @@ import pytest
 import verifiers as vf
 from datasets import Dataset
 
-from prime_rl.configs.orchestrator import BufferConfig, EnvConfig
+from prime_rl.configs.orchestrator import BufferConfig, DefaultAdvantageConfig, EnvConfig
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.envs import Envs, TrainEnv
+from prime_rl.orchestrator.filters import ZeroAdvantageFilter
 
 
 def make_env(name: str, vf_env: vf.Environment, **config_kwargs) -> TrainEnv:
@@ -135,12 +136,95 @@ def test_buffer_online_difficulty_filtering(dummy_envs, make_rollouts):
     """With online_difficulty_filtering=True, only partial reward rollouts are kept."""
     buffer = Buffer(
         dummy_envs,
-        BufferConfig(online_difficulty_filtering=True),
+        BufferConfig(easy_threshold=1.0, hard_threshold=0.0, online_difficulty_filtering=True),
     )
     buffer.update(make_rollouts(buffer, "env_a", list(range(5)), rewards=[1.0, 0.5, 0.0, 0.5, 0.5]))
 
     # Only 3 problems with reward 0.5 -> 6 rollouts kept
     assert len(buffer.rollout_buffer) == 6
+
+
+def test_buffer_can_filter_groups_above_half_solve_rate(dummy_envs, make_rollouts):
+    """REINFORCE1/2 trains on groups with solve rate <= 0.5."""
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(easy_threshold=0.5000001, online_difficulty_filtering=True),
+    )
+    buffer.update(make_rollouts(buffer, "env_a", list(range(4)), rewards=[0.0, 0.5, 0.75, 1.0]))
+
+    # The 0.75 and 1.0 groups are too easy and are not trainable.
+    assert len(buffer.rollout_buffer) == 4
+    assert len(buffer.env_buffers["env_a"].easy_examples) == 2
+
+
+def test_zero_advantage_filter_flags_uniform_reward_groups_without_pool_eviction(dummy_envs):
+    """ZeroAdvantageFilter marks zero-advantage rollouts; examples stay in normal pool."""
+    from prime_rl.orchestrator.advantage import compute_advantages
+    from prime_rl.orchestrator.filters import apply_filters
+
+    buffer = Buffer(
+        dummy_envs,
+        BufferConfig(easy_threshold=1.0, online_difficulty_filtering=True),
+    )
+
+    def make_group(idx: int, rewards: list[float]) -> list[vf.RolloutOutput]:
+        example = list(buffer.env_buffers["env_a"].examples.values())[idx]
+        rollouts = []
+        for reward in rewards:
+            rollout = vf.RolloutOutput(
+                example_id=example["example_id"],
+                task=example["env_name"],
+                prompt=example["prompt"],
+                prompt_ids=[0],
+                prompt_mask=[1],
+                completion_ids=[1],
+                completion_mask=[1],
+                completion_logprobs=[0.0],
+                is_truncated=False,
+                reward=reward,
+                advantage=0.0,
+                metrics={},
+                trajectory=[{"tokens": {"completion_ids": [1], "completion_logprobs": [0.0]}}],
+                group_id=idx,
+            )
+            rollout["env_name"] = "env_a"
+            rollouts.append(rollout)
+        return rollouts
+
+    rollouts = []
+    rollouts.extend(make_group(0, [0.0, 0.0]))  # all-zero: zero advantage
+    rollouts.extend(make_group(1, [1.0, 1.0]))  # all-one: filtered by buffer (easy)
+    rollouts.extend(make_group(2, [0.0, 1.0]))  # mixed: nonzero advantage
+    rollouts.extend(make_group(3, [1.0, 0.0]))  # mixed: nonzero advantage
+
+    # Buffer-level filtering: all-one group goes to easy pool, others stay in buffer
+    buffer.update(rollouts)
+    assert len(buffer.env_buffers["env_a"].easy_examples) == 1
+    assert len(buffer.env_buffers["env_a"].hard_examples) == 0
+    # All-zero example stays in normal pool (not evicted to hard)
+    assert 0 in buffer.env_buffers["env_a"].examples
+
+    # Only non-easy groups land in the rollout buffer
+    candidates = buffer.sample_rollouts(n=6)
+    assert len(candidates) == 6
+
+    # Compute advantages and apply ZeroAdvantageFilter
+    compute_advantages(candidates, 2, DefaultAdvantageConfig())
+    apply_filters([ZeroAdvantageFilter(name="zero_advantage", enforce=True)], candidates)
+
+    # All-zero-reward group has zero advantage → flagged by ZeroAdvantageFilter
+    zero_group = [r for r in candidates if r["example_id"] == 0]
+    assert all(r["is_filtered"] for r in zero_group)
+
+    # Mixed-reward groups have nonzero advantage → not filtered
+    mixed_rollouts = [r for r in candidates if r["example_id"] in (2, 3)]
+    assert not any(r["is_filtered"] for r in mixed_rollouts)
+
+    # Example 0 remains in normal pool — ZeroAdvantageFilter is a batch-level
+    # flag, not a pool eviction. The async primitive relies on oversampling to
+    # compensate for filtered groups.
+    assert 0 in buffer.env_buffers["env_a"].examples
+    assert len(buffer.env_buffers["env_a"].hard_examples) == 0
 
 
 def test_buffer_no_filtering_by_default(dummy_envs, make_rollouts):
