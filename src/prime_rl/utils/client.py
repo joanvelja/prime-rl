@@ -289,7 +289,18 @@ async def _post_admin_control(
 
 
 async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
-    """Pause all inference engines, waiting for in-flight requests to drain."""
+    """Pause inference engines without draining in-flight requests.
+
+    Calls `/pause` with `mode=keep, clear_cache=false`. vLLM sets
+    `PauseState.PAUSED_ALL` (`token_budget=0`), so the scheduler stops issuing
+    new decode steps but does NOT preempt or evict running sequences -- their
+    KV blocks stay resident. The prefix cache is not reset. This is the
+    PipelineRL-style in-flight weight update path: the next /resume continues
+    decoding with the new weights against the existing KV.
+
+    The HTTP call returns after the current decode step has flushed the
+    engine's output queue, which is bounded by one forward pass.
+    """
     logger = get_logger()
     logger.info("Pausing inference engines for weight update")
 
@@ -322,14 +333,15 @@ async def update_weights(
     lora_name: str | None = None,
     step: int = 0,
 ) -> None:
-    """Update weights on static inference servers.
+    """Update weights on static inference servers (in-flight, no drain).
 
-    Pauses all engines first to drain in-flight requests, then performs the
-    weight update, then resumes. This ensures all DP workers are idle and can
-    participate in the collective weight transfer.
-
-    Note: The server-side /update_weights endpoint automatically resets the prefix cache
-    to invalidate any cached KV states computed with the old weights.
+    Pauses the scheduler (`mode=keep, clear_cache=false`) so DP workers are
+    quiescent for the collective weight transfer, performs the in-place
+    `param.copy_()` via NCCL or filesystem load, then resumes. Running
+    sequences keep their KV blocks across the swap and continue decoding
+    under the new weights. The prefix cache is not reset by either the pause
+    or the update path -- correctness relies on `enable_prefix_caching=false`
+    in RL configs to avoid stale-prefix reads from new requests.
     """
     logger = get_logger()
 
@@ -347,7 +359,8 @@ async def update_weights(
                 json={"weight_dir": weight_dir},
             )
 
-        # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
+        # Pause scheduler so DP workers are quiescent for the collective transfer.
+        # Running sequences are NOT drained -- their KV blocks stay resident.
         try:
             await _pause_engines(admin_clients)
         except Exception:
