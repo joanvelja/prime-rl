@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.utils.config import cli
@@ -15,6 +16,9 @@ def setup_vllm_env(config: InferenceConfig):
 
     if config.use_deep_gemm:
         os.environ["VLLM_USE_DEEP_GEMM"] = "1"
+
+    if rpc_base_path := os.environ.get("VLLM_RPC_BASE_PATH"):
+        Path(rpc_base_path).mkdir(parents=True, exist_ok=True)
 
 
 def main():

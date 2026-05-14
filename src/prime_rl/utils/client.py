@@ -11,6 +11,7 @@ import verifiers as vf
 from httpx import AsyncClient
 from openai import NotFoundError
 from tenacity import retry, retry_if_exception, stop_after_attempt, stop_after_delay, wait_exponential
+from verifiers.api_profile import ApiProfile
 
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
@@ -23,6 +24,11 @@ class InferencePool(Protocol):
     @property
     def train_clients(self) -> list[vf.ClientConfig]:
         """Get inference clients."""
+        ...
+
+    @property
+    def eval_clients(self) -> list[vf.ClientConfig]:
+        """Get eval inference clients."""
         ...
 
     @property
@@ -182,6 +188,7 @@ def setup_clients(
 ) -> list[vf.ClientConfig]:
     clients = []
     client_idx = 0
+    profile = ApiProfile(client_config.api_profile) if client_config.api_profile is not None else None
     for base_url in client_config.base_url:
         for dp_rank in range(client_config.dp_rank_count):
             headers = client_config.headers.copy()
@@ -196,6 +203,7 @@ def setup_clients(
                     renderer_pool_size=renderer_pool_size,
                     tool_parser=tool_parser,
                     reasoning_parser=reasoning_parser,
+                    profile=profile,
                     api_base_url=base_url,
                     api_key_var=client_config.api_key_var,
                     timeout=client_config.timeout,
@@ -264,7 +272,11 @@ async def check_health(
         logger.debug("Starting pinging /health to check health")
         while wait_time < timeout:
             try:
-                await admin_client.get("/health")
+                response = await admin_client.get("/health")
+                if response.status_code == 404:
+                    logger.warning("The route /health does not exist. Skipping health check.")
+                    return
+                response.raise_for_status()
                 logger.debug(f"Inference pool is ready after {wait_time} seconds")
                 return
             except NotFoundError:
@@ -285,6 +297,42 @@ async def check_health(
 
 
 NCCL_READY_MARKER = "NCCL_READY"
+ADMIN_CONTROL_MAX_ATTEMPTS = 5
+ADMIN_CONTROL_INITIAL_BACKOFF_S = 1.0
+ADMIN_CONTROL_MAX_BACKOFF_S = 8.0
+ADMIN_CONTROL_TIMEOUT = httpx.Timeout(connect=10.0, read=1200.0, write=60.0, pool=10.0)
+
+
+def _is_retryable_admin_error(exception: BaseException) -> bool:
+    if isinstance(exception, httpx.HTTPStatusError):
+        return exception.response.status_code in (408, 409, 425, 429, 500, 502, 503, 504)
+    return isinstance(exception, (httpx.TimeoutException, httpx.TransportError))
+
+
+async def _post_admin_control(
+    client: AsyncClient,
+    path: str,
+    *,
+    operation: str,
+    params: dict[str, str] | None = None,
+    json: dict[str, str | None] | None = None,
+) -> None:
+    logger = get_logger()
+    backoff_s = ADMIN_CONTROL_INITIAL_BACKOFF_S
+    for attempt in range(1, ADMIN_CONTROL_MAX_ATTEMPTS + 1):
+        try:
+            response = await client.post(path, params=params, json=json, timeout=ADMIN_CONTROL_TIMEOUT)
+            response.raise_for_status()
+            return
+        except Exception as e:
+            if attempt == ADMIN_CONTROL_MAX_ATTEMPTS or not _is_retryable_admin_error(e):
+                raise
+            logger.warning(
+                f"{operation} request to {client.base_url} failed on attempt "
+                f"{attempt}/{ADMIN_CONTROL_MAX_ATTEMPTS}; retrying in {backoff_s:.1f}s ({e!r})"
+            )
+            await asyncio.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2, ADMIN_CONTROL_MAX_BACKOFF_S)
 
 
 async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
@@ -293,8 +341,12 @@ async def _pause_engines(admin_clients: list[AsyncClient]) -> None:
     logger.info("Pausing inference engines for weight update")
 
     async def _pause(client: AsyncClient) -> None:
-        response = await client.post("/pause", params={"mode": "keep", "clear_cache": "false"})
-        response.raise_for_status()
+        await _post_admin_control(
+            client,
+            "/pause",
+            operation="pause inference engine",
+            params={"mode": "keep", "clear_cache": "false"},
+        )
 
     await asyncio.gather(*[_pause(client) for client in admin_clients])
     logger.info("All inference engines paused")
@@ -305,8 +357,7 @@ async def _resume_engines(admin_clients: list[AsyncClient]) -> None:
     logger = get_logger()
 
     async def _resume(client: AsyncClient) -> None:
-        response = await client.post("/resume")
-        response.raise_for_status()
+        await _post_admin_control(client, "/resume", operation="resume inference engine")
 
     await asyncio.gather(*[_resume(client) for client in admin_clients])
     logger.info("All inference engines resumed")
@@ -336,11 +387,19 @@ async def update_weights(
     else:
 
         async def _update_weights(admin_client: AsyncClient, weight_dir: str | None) -> None:
-            response = await admin_client.post("/update_weights", json={"weight_dir": weight_dir})
-            response.raise_for_status()
+            await _post_admin_control(
+                admin_client,
+                "/update_weights",
+                operation="update inference weights",
+                json={"weight_dir": weight_dir},
+            )
 
         # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
-        await _pause_engines(admin_clients)
+        try:
+            await _pause_engines(admin_clients)
+        except Exception:
+            await _resume_engines(admin_clients)
+            raise
 
         try:
             # Create ready marker before servers enter receive path (used by NCCL broadcast)
