@@ -88,6 +88,11 @@ class TrainSamplingConfig(BaseConfig):
         ),
     ] = 1.0
 
+    top_p: Annotated[
+        float,
+        Field(description="Nucleus sampling threshold."),
+    ] = 1.0
+
     max_completion_tokens: Annotated[
         int | None,
         Field(
@@ -125,7 +130,7 @@ class TrainSamplingConfig(BaseConfig):
         # Top-level OAI params
         args: dict[str, Any] = {
             "temperature": self.temperature,
-            "top_p": 1.0,
+            "top_p": self.top_p,
             "logprobs": True,
         }
         if self.max_completion_tokens is not None:
@@ -375,6 +380,15 @@ class EvalEnvConfig(EnvConfig):
         ),
     ] = -1
 
+    seed: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Seed for selecting eval examples. Set to None to preserve the environment's default ordering."
+            ),
+        ),
+    ] = None
+
     rollouts_per_example: Annotated[
         int,
         Field(
@@ -382,6 +396,18 @@ class EvalEnvConfig(EnvConfig):
             description="Number of rollouts generated per example. Used for pass@k estimation (e.g. rollouts_per_example=8 enables pass@1 through pass@8).",
         ),
     ] = 1
+
+    max_concurrent_rollouts_per_client: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum number of eval rollouts to keep in flight per inference client. "
+                "If unset, eval launches all rollouts immediately. Setting this enables "
+                "dynamic refill/load balancing across clients and reduces long-tail server bubbles."
+            ),
+        ),
+    ] = None
 
     interval: Annotated[
         int,
@@ -464,10 +490,30 @@ class EvalConfig(BaseConfig):
         ),
     ] = -1
 
+    seed: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Default seed for selecting eval examples. Set to None to preserve each environment's default ordering."
+            ),
+        ),
+    ] = None
+
     rollouts_per_example: Annotated[
         int,
         Field(ge=1, description="Default number of rollouts per example. Can be overridden per env."),
     ] = 1
+
+    max_concurrent_rollouts_per_client: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Default eval rollout concurrency window per inference client. "
+                "Can be overridden per env. If unset, eval launches all rollouts immediately."
+            ),
+        ),
+    ] = None
 
     num_workers: Annotated[
         int | Literal["auto"],
@@ -491,7 +537,7 @@ class EvalConfig(BaseConfig):
 
     @model_validator(mode="after")
     def resolve_env_defaults(self):
-        """Resolve per-env overrides: inherit group-level sampling, num_workers, max_retries, num_examples, rollouts_per_example, and interval. Then resolve auto num_workers."""
+        """Resolve per-env overrides: inherit group-level sampling, num_workers, max_retries, num_examples, seed, rollouts_per_example, and interval. Then resolve auto num_workers."""
         group_sampling = self.sampling.model_dump()
         for env in self.env:
             if "sampling" not in env.model_fields_set:
@@ -501,8 +547,12 @@ class EvalConfig(BaseConfig):
                 env.sampling = EvalSamplingConfig(**merged)
             if "num_examples" not in env.model_fields_set:
                 env.num_examples = self.num_examples
+            if "seed" not in env.model_fields_set:
+                env.seed = self.seed
             if "rollouts_per_example" not in env.model_fields_set:
                 env.rollouts_per_example = self.rollouts_per_example
+            if "max_concurrent_rollouts_per_client" not in env.model_fields_set:
+                env.max_concurrent_rollouts_per_client = self.max_concurrent_rollouts_per_client
             if "interval" not in env.model_fields_set:
                 env.interval = self.interval
             if "num_workers" not in env.model_fields_set:
@@ -651,7 +701,10 @@ class BufferConfig(BaseConfig):
     online_difficulty_filtering: Annotated[
         bool,
         Field(
-            description="Whether to filter rollouts based on difficulty. If True, rollouts with average reward 0.0 or 1.0 are not added to the buffer.",
+            description=(
+                "Whether to filter rollouts based on difficulty. If True, rollouts assigned to easy or hard "
+                "pools by easy_threshold/hard_threshold are not added to the training buffer."
+            ),
         ),
     ] = False
 
@@ -668,6 +721,54 @@ class BufferConfig(BaseConfig):
         if self.easy_threshold is not None and self.hard_threshold is not None:
             assert self.easy_threshold > self.hard_threshold, "easy_threshold must be greater than hard_threshold."
         return self
+
+
+class TrainBatchRefillConfig(BaseConfig):
+    """Configures post-filter refill of train batches."""
+
+    enabled: Annotated[
+        bool,
+        Field(
+            description=(
+                "If True, drop groups whose post-advantage filters leave no trainable units and keep generating "
+                "candidate groups until the rollout batch target is reached or the candidate budget is exhausted. "
+                "Dropped groups are not moved to buffer easy/hard pools."
+            ),
+        ),
+    ] = False
+
+    max_refill_rounds: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Deprecated compatibility knob. When max_candidate_groups is unset, this sets "
+                "max_candidate_groups = max_refill_rounds * target_accepted_groups."
+            ),
+        ),
+    ] = 4
+
+    candidate_groups_per_round: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum candidate prompt groups to consume from the rollout buffer per refill round. "
+                "Defaults to the accepted target group count; adaptive refill may draw fewer groups for top-ups."
+            ),
+        ),
+    ] = None
+
+    max_candidate_groups: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description=(
+                "Maximum candidate prompt groups to consume for one trainer step. Defaults to "
+                "max_refill_rounds * target_accepted_groups."
+            ),
+        ),
+    ] = None
 
 
 class DefaultAdvantageConfig(BaseModel):
@@ -951,6 +1052,9 @@ class OrchestratorConfig(BaseConfig):
     # Data buffer configuration
     buffer: BufferConfig = BufferConfig()
 
+    # Post-filter train batch refill configuration
+    train_batch_refill: TrainBatchRefillConfig = TrainBatchRefillConfig()
+
     # The advantage configuration (stage 3 of the pipeline; see AdvantageConfig
     # docstring). For multi-agent envs, set type="ema_per_member" or "custom";
     # for single-agent envs, set type="default" or "custom".
@@ -1216,6 +1320,27 @@ class OrchestratorConfig(BaseConfig):
                 assert self.max_inflight_rollouts is not None
                 env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_train_batch_refill(self):
+        if self.train_batch_refill.enabled and self.token_batch_size is not None:
+            raise ValueError("train_batch_refill is currently only supported with rollout batch_size")
+        if self.train_batch_refill.enabled:
+            assert self.batch_size is not None
+            if self.batch_size % self.rollouts_per_example != 0:
+                raise ValueError("train_batch_refill requires batch_size to be divisible by rollouts_per_example")
+            target_groups = self.batch_size // self.rollouts_per_example
+            if self.train_batch_refill.candidate_groups_per_round is None:
+                self.train_batch_refill.candidate_groups_per_round = target_groups
+            if self.train_batch_refill.max_candidate_groups is None:
+                self.train_batch_refill.max_candidate_groups = self.train_batch_refill.max_refill_rounds * target_groups
+            if self.train_batch_refill.max_candidate_groups < target_groups:
+                raise ValueError("train_batch_refill.max_candidate_groups must be at least the accepted group target")
+            if self.train_batch_refill.candidate_groups_per_round > self.train_batch_refill.max_candidate_groups:
+                raise ValueError(
+                    "train_batch_refill.candidate_groups_per_round must be <= max_candidate_groups"
+                )
         return self
 
     @model_validator(mode="after")

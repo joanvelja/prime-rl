@@ -1,0 +1,316 @@
+#!/bin/bash
+set -euo pipefail
+
+export PROJECT_DIR={{ project_dir }}
+export CONFIG_DIR={{ config_dir }}
+export OUTPUT_DIR={{ output_dir }}
+export ORCHESTRATOR_OUTPUT_DIR={{ orchestrator_output_dir }}
+export NUM_LAYOUT_NODES={{ num_nodes }}
+export TRAINER_NODE_INDEX={{ trainer_node_idx }}
+export TRAINER_GPU_IDS="{{ trainer_gpu_ids }}"
+export TRAINER_GPU_COUNT={{ trainer_gpu_count }}
+export MASTER_PORT={{ master_port }}
+
+mkdir -p "$OUTPUT_DIR/logs/inference" "$OUTPUT_DIR/logs/trainer/torchrun"
+ln -sfn trainer/node_${TRAINER_NODE_INDEX}.log "$OUTPUT_DIR/logs/trainer.log"
+ln -sfn inference/server_0.log "$OUTPUT_DIR/logs/inference.log"
+
+if [ -n "${GPU_LAYOUT_HOSTS:-}" ]; then
+    read -ra HOSTNAMES <<< "$GPU_LAYOUT_HOSTS"
+else
+    HOSTNAMES=( $(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n "$NUM_LAYOUT_NODES") )
+fi
+
+HOST_COUNT=0
+for _host in "${HOSTNAMES[@]}"; do
+    HOST_COUNT=$((HOST_COUNT + 1))
+done
+if [ "$HOST_COUNT" -ne "$NUM_LAYOUT_NODES" ]; then
+    echo "Expected $NUM_LAYOUT_NODES hosts, got $HOST_COUNT: ${HOSTNAMES[*]}" >&2
+    exit 1
+fi
+
+export MASTER_ADDR="${HOSTNAMES[$TRAINER_NODE_INDEX]}"
+export HOSTNAMES_STR="${HOSTNAMES[*]}"
+
+CURRENT_HOST="$(hostname)"
+CURRENT_HOST_SHORT="$(hostname -s)"
+NODE_INDEX=-1
+for idx in "${!HOSTNAMES[@]}"; do
+    if [ "${HOSTNAMES[$idx]}" = "$CURRENT_HOST" ] || [ "${HOSTNAMES[$idx]}" = "$CURRENT_HOST_SHORT" ]; then
+        NODE_INDEX="$idx"
+        break
+    fi
+done
+if [ "$NODE_INDEX" -lt 0 ]; then
+    echo "Current host ${CURRENT_HOST} is not in GPU layout hosts: ${HOSTNAMES[*]}" >&2
+    exit 1
+fi
+
+INFER_URLS=""
+ADMIN_URLS=""
+{% for server in inference_servers %}
+INFER_URLS="${INFER_URLS:+$INFER_URLS }http://${HOSTNAMES[{{ server.node_idx }}]}:{{ server.port }}/v1"
+ADMIN_URLS="${ADMIN_URLS:+$ADMIN_URLS }http://${HOSTNAMES[{{ server.node_idx }}]}:{{ server.port }}/v1"
+{% endfor %}
+export INFER_URLS
+export ADMIN_URLS
+
+echo "GPU layout hosts: ${HOSTNAMES[*]}"
+echo "NODE_INDEX=${NODE_INDEX}"
+echo "MASTER_ADDR=${MASTER_ADDR}"
+echo "INFER_URLS=${INFER_URLS}"
+echo "ADMIN_URLS=${ADMIN_URLS}"
+
+cd "$PROJECT_DIR"
+set -a
+[ -f .env ] && source .env
+set +a
+source .venv/bin/activate
+
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
+export GIT_LFS_SKIP_SMUDGE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_NO_USAGE_STATS=1
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
+
+{% if wandb_shared -%}
+export WANDB_SHARED_MODE=1
+export WANDB_SHARED_RUN_ID="${WANDB_SHARED_RUN_ID:-$(uv run --no-sync python -c "import uuid; print(uuid.uuid4().hex)")}"
+{%- endif %}
+
+INFERENCE_SPECS=()
+case "$NODE_INDEX" in
+{% for node in range(num_nodes) %}
+    {{ node }})
+{% for server in inference_servers if server.node_idx == node %}
+        INFERENCE_SPECS+=("{{ server.gpu_id }}:{{ server.port }}:{{ server.server_idx }}")
+{% endfor %}
+        ;;
+{% endfor %}
+    *)
+        echo "Unexpected NODE_INDEX=${NODE_INDEX}" >&2
+        exit 1
+        ;;
+esac
+
+stop_file="$OUTPUT_DIR/STOP_INFERENCE"
+failure_file="$OUTPUT_DIR/INFERENCE_FAILED"
+if [ "$NODE_INDEX" -eq "$TRAINER_NODE_INDEX" ]; then
+    rm -f "$stop_file" "$failure_file"
+fi
+
+report_inference_failure() {
+    local message="$1"
+    echo "$message" | tee -a "$failure_file" >&2
+    touch "$stop_file"
+}
+
+run_inference_servers() {
+    local pids=()
+    local pid_specs=()
+    local pid_logs=()
+
+    terminate_servers() {
+        for pid in "${pids[@]:-}"; do
+            kill "$pid" 2>/dev/null || true
+        done
+        wait 2>/dev/null || true
+    }
+    trap terminate_servers TERM INT EXIT
+
+    for spec in "${INFERENCE_SPECS[@]}"; do
+        IFS=: read -r gpu_id port server_idx <<< "$spec"
+        log_file="$OUTPUT_DIR/logs/inference/server_${server_idx}.log"
+        rpc_root="/tmp/vllm-rpc-${USER:-prime}-${SLURM_JOB_ID:-0}-${server_idx}"
+        compile_cache_root="/tmp/prime-rl-vllm-cache-${USER:-prime}-${SLURM_JOB_ID:-0}-${server_idx}"
+        rm -rf "$rpc_root"
+        mkdir -p "$rpc_root"
+        mkdir -p "$compile_cache_root/vllm" "$compile_cache_root/torchinductor" "$compile_cache_root/triton" "$compile_cache_root/xdg"
+        echo "Starting inference server_${server_idx} on $(hostname) gpu=${gpu_id} port=${port}" | tee "$log_file"
+        (
+            export CUDA_VISIBLE_DEVICES="$gpu_id"
+            export VLLM_RPC_BASE_PATH="$rpc_root"
+            export VLLM_CACHE_ROOT="$compile_cache_root/vllm"
+            export TORCHINDUCTOR_CACHE_DIR="$compile_cache_root/torchinductor"
+            export TRITON_CACHE_DIR="$compile_cache_root/triton"
+            export XDG_CACHE_HOME="$compile_cache_root/xdg"
+            uv run --no-sync inference \
+                @ "$CONFIG_DIR/inference.toml" \
+                --server.host 0.0.0.0 \
+                --server.port "$port" \
+                --parallel.tp 1 \
+                --parallel.dp 1
+        ) >> "$log_file" 2>&1 &
+        pids+=("$!")
+        pid_specs+=("server_${server_idx} gpu=${gpu_id} port=${port}")
+        pid_logs+=("$log_file")
+    done
+
+    while true; do
+        if [ -f "$stop_file" ]; then
+            echo "STOP_INFERENCE observed on $(hostname); stopping inference servers"
+            return 0
+        fi
+
+        for i in "${!pids[@]}"; do
+            pid="${pids[$i]}"
+            if ! kill -0 "$pid" 2>/dev/null; then
+                if wait "$pid"; then
+                    status=0
+                else
+                    status=$?
+                fi
+                if [ ! -f "$stop_file" ]; then
+                    {
+                        echo "Inference server manager on $(hostname) observed ${pid_specs[$i]} pid ${pid} exit with status ${status}"
+                        echo "Last 80 log lines from ${pid_logs[$i]}:"
+                        tail -n 80 "${pid_logs[$i]}" 2>/dev/null || true
+                    } | tee -a "$failure_file" >&2
+                    touch "$stop_file"
+                fi
+                return "$status"
+            fi
+        done
+        sleep 5
+    done
+}
+
+run_trainer_and_orchestrator() {
+    local orchestrator_pid=""
+    local trainer_pid=""
+    local train_status=0
+    local orchestrator_status=0
+    local first_status=0
+    local first_exit_kind=""
+
+    touch "$OUTPUT_DIR/logs/trainer/node_${TRAINER_NODE_INDEX}.log"
+
+    finish() {
+        local status=$?
+        touch "$stop_file"
+        if [ -n "$orchestrator_pid" ]; then
+            kill "$orchestrator_pid" 2>/dev/null || true
+        fi
+        if [ -n "$trainer_pid" ]; then
+            pkill -TERM -P "$trainer_pid" 2>/dev/null || true
+            kill "$trainer_pid" 2>/dev/null || true
+        fi
+        exit "$status"
+    }
+    trap finish TERM INT
+
+    ORCHESTRATOR_ARGS="@ $CONFIG_DIR/orchestrator.toml"
+    ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --client.base-url $INFER_URLS"
+    ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --client.admin-base-url $ADMIN_URLS"
+    ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --client.dp-rank-count 1"
+    ORCHESTRATOR_ARGS="$ORCHESTRATOR_ARGS --weight_broadcast.host $MASTER_ADDR"
+
+    {% if wandb_shared %}WANDB_SHARED_LABEL=orchestrator {% endif %}uv run --no-sync orchestrator $ORCHESTRATOR_ARGS \
+        2>&1 | tee "$OUTPUT_DIR/logs/orchestrator.log" &
+    orchestrator_pid=$!
+
+    export CUDA_VISIBLE_DEVICES="$TRAINER_GPU_IDS"
+    export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+    (
+        {% if wandb_shared %}WANDB_SHARED_LABEL=trainer {% endif %}uv run --no-sync torchrun \
+            --role=trainer \
+            --nnodes=1 \
+            --nproc-per-node="$TRAINER_GPU_COUNT" \
+            --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            --rdzv-id="gpu_layout_${SLURM_JOB_ID:-0}_$(basename "$OUTPUT_DIR")" \
+            --log-dir="$OUTPUT_DIR/logs/trainer/torchrun" \
+            --tee=3 \
+            --redirects=3 \
+            --local-ranks-filter={{ ranks_filter }} \
+            -m prime_rl.trainer.rl.train \
+            @ "$CONFIG_DIR/trainer.toml" \
+            --weight_broadcast.host 0.0.0.0 \
+            2>&1 | sed -u 's/^\[[a-zA-Z]*[0-9]*\]://' | tee -a "$OUTPUT_DIR/logs/trainer/node_${TRAINER_NODE_INDEX}.log"
+    ) &
+    trainer_pid=$!
+
+    while true; do
+        if [ -f "$failure_file" ]; then
+            first_status=1
+            first_exit_kind="inference"
+            break
+        fi
+        if ! kill -0 "$trainer_pid" 2>/dev/null; then
+            if wait "$trainer_pid"; then
+                first_status=0
+            else
+                first_status=$?
+            fi
+            first_exit_kind="trainer"
+            break
+        fi
+        if ! kill -0 "$orchestrator_pid" 2>/dev/null; then
+            if wait "$orchestrator_pid"; then
+                first_status=0
+            else
+                first_status=$?
+            fi
+            first_exit_kind="orchestrator"
+            break
+        fi
+        sleep 5
+    done
+
+    if [ "$first_exit_kind" = "inference" ]; then
+        echo "Inference failure observed; stopping orchestrator and trainer" | tee -a "$OUTPUT_DIR/logs/trainer/node_${TRAINER_NODE_INDEX}.log"
+        cat "$failure_file" | tee -a "$OUTPUT_DIR/logs/trainer/node_${TRAINER_NODE_INDEX}.log" || true
+        touch "$stop_file"
+        kill "$orchestrator_pid" 2>/dev/null || true
+        pkill -TERM -P "$trainer_pid" 2>/dev/null || true
+        kill "$trainer_pid" 2>/dev/null || true
+        wait "$orchestrator_pid" 2>/dev/null || true
+        wait "$trainer_pid" 2>/dev/null || true
+        exit "$first_status"
+    fi
+
+    if kill -0 "$trainer_pid" 2>/dev/null; then
+        orchestrator_status=$first_status
+        echo "Orchestrator exited before trainer; stopping trainer" | tee -a "$OUTPUT_DIR/logs/trainer/node_${TRAINER_NODE_INDEX}.log"
+        touch "$stop_file"
+        pkill -TERM -P "$trainer_pid" 2>/dev/null || true
+        kill "$trainer_pid" 2>/dev/null || true
+        wait "$trainer_pid" || train_status=$?
+        if [ "$orchestrator_status" -eq 0 ]; then
+            exit 1
+        fi
+        exit "$orchestrator_status"
+    fi
+
+    train_status=$first_status
+    if [ "$train_status" -ne 0 ]; then
+        kill "$orchestrator_pid" 2>/dev/null || true
+    fi
+    wait "$orchestrator_pid" || orchestrator_status=$?
+    touch "$stop_file"
+
+    if [ "$train_status" -ne 0 ]; then
+        exit "$train_status"
+    fi
+    exit "$orchestrator_status"
+}
+
+if [ "$NODE_INDEX" -eq "$TRAINER_NODE_INDEX" ]; then
+    INFERENCE_SPEC_COUNT=0
+    for _spec in "${INFERENCE_SPECS[@]}"; do
+        INFERENCE_SPEC_COUNT=$((INFERENCE_SPEC_COUNT + 1))
+    done
+    if [ "$INFERENCE_SPEC_COUNT" -gt 0 ]; then
+        run_inference_servers &
+        inference_manager_pid=$!
+        run_trainer_and_orchestrator
+        wait "$inference_manager_pid"
+    else
+        run_trainer_and_orchestrator
+    fi
+else
+    run_inference_servers
+fi

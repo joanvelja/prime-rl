@@ -390,6 +390,16 @@ class InferenceConfig(BaseConfig):
         ),
     ] = False
 
+    enable_fp32_lm_head: Annotated[
+        bool,
+        Field(
+            description=(
+                "Run the lm_head projection in fp32 via the PrimeRL vLLM worker patch. "
+                "This is passed through vLLM's additional_config as fp32_lm_head."
+            ),
+        ),
+    ] = False
+
     vllm_extra: Annotated[
         dict[str, Any],
         Field(
@@ -535,6 +545,11 @@ class InferenceConfig(BaseConfig):
 
         # Set `logprobs_mode` to `processed_logprobs` by default
         rsetattr(namespace, "logprobs_mode", "processed_logprobs")
+
+        if self.enable_fp32_lm_head:
+            additional_config = getattr(namespace, "additional_config", None) or {}
+            additional_config["fp32_lm_head"] = True
+            rsetattr(namespace, "additional_config", additional_config)
 
         # Remove chat_template if not set (vLLM doesn't accept None)
         if namespace.chat_template is None:
