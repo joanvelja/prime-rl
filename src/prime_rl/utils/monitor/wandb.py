@@ -18,6 +18,24 @@ from prime_rl.utils.logger import get_logger
 from prime_rl.utils.monitor.base import Monitor, sample_items_for_logging
 
 
+def _ensure_wandb_storage_dirs(output_dir: Path | None) -> None:
+    if output_dir is None:
+        return
+
+    root = output_dir / "wandb-local"
+    defaults = {
+        "WANDB_DATA_DIR": root / "data",
+        "WANDB_CACHE_DIR": root / "cache",
+        "WANDB_CONFIG_DIR": root / "config",
+        "WANDB_ARTIFACT_DIR": root / "artifacts",
+    }
+    for key, path in defaults.items():
+        if os.environ.get(key):
+            continue
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ[key] = path.as_posix()
+
+
 class WandbMonitor(Monitor):
     """Logs to Weights and Biases."""
 
@@ -44,6 +62,7 @@ class WandbMonitor(Monitor):
 
         assert config is not None
         self.logger.info(f"Initializing {self.__class__.__name__} ({config})")
+        _ensure_wandb_storage_dirs(output_dir)
         self._maybe_overwrite_wandb_command()
 
         shared_mode = os.environ.get("WANDB_SHARED_MODE") == "1"
