@@ -27,6 +27,7 @@ class LossOutputs:
 
     loss: Float[Tensor, ""]
     metrics: dict[str, Tensor]
+    normalizer: Float[Tensor, ""] | None = None
 
 
 LossFn = Callable[..., LossOutputs]
@@ -104,7 +105,42 @@ def _safe_mean(values: Tensor, mask: Tensor) -> Tensor:
     return values[mask].sum() / denom
 
 
-def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossOutputs:
+def _kl_loss(log_importance_ratio: Tensor, loss_mask: Tensor, kl_level: str) -> tuple[Tensor, dict[str, Tensor]]:
+    if kl_level == "token":
+        return (loss_mask * log_importance_ratio**2).sum(), {}
+    if kl_level == "sequence":
+        sequence_log_importance_ratio = log_importance_ratio[loss_mask].sum()
+        sequence_kl = sequence_log_importance_ratio**2
+        return sequence_kl, {"sequence_kl": sequence_kl}
+    raise ValueError(f"Invalid kl_level: {kl_level}")
+
+
+def _clip_importance_ratio(raw_importance_ratio: Tensor, importance_ratio_clip: float | None) -> Tensor:
+    if importance_ratio_clip is None:
+        return raw_importance_ratio
+    return raw_importance_ratio.clamp(max=importance_ratio_clip)
+
+
+def _importance_ratio_metrics(
+    raw_importance_ratio: Tensor, importance_ratio: Tensor, loss_mask: Tensor
+) -> dict[str, Tensor]:
+    return {
+        "importance_ratio": _safe_mean(importance_ratio, loss_mask),
+        "importance_ratio_raw": _safe_mean(raw_importance_ratio, loss_mask),
+        "importance_ratio_clipped": _safe_mean(raw_importance_ratio > importance_ratio, loss_mask),
+    }
+
+
+def dppo_kl_loss_fn(
+    inputs: LossInputs,
+    dppo_mask_low: float = 0.2,
+    dppo_mask_high: float = 0.2,
+    adv_tau: float = 1.0,
+    teacher_tau: float = 0.0,
+    kl_tau: float = 1e-3,
+    kl_level: str = "token",
+    importance_ratio_clip: float | None = None,
+) -> LossOutputs:
     """
     DPPO+KL loss, combining:
     - DPPO-Binary TV Loss (https://arxiv.org/pdf/2602.04879)
@@ -125,8 +161,8 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     trainer_probs = torch.exp(trainer_logprobs)
     inference_probs = torch.exp(inference_logprobs)
     probs_diff = trainer_probs - inference_probs
-    dppo_invalid_mask_high = probs_diff > loss_config.dppo_mask_high
-    dppo_invalid_mask_low = probs_diff < -loss_config.dppo_mask_low
+    dppo_invalid_mask_high = probs_diff > dppo_mask_high
+    dppo_invalid_mask_low = probs_diff < -dppo_mask_low
     dppo_invalid_mask = torch.where(advantages > 0, dppo_invalid_mask_high, dppo_invalid_mask_low)
 
     is_masked = dppo_invalid_mask
@@ -135,19 +171,20 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
     keep_mask = loss_mask & ~is_masked
 
     log_importance_ratio = trainer_logprobs - inference_logprobs
-    importance_ratio = torch.exp(log_importance_ratio)
-    mismatch_kl = importance_ratio - log_importance_ratio - 1
+    raw_importance_ratio = torch.exp(log_importance_ratio)
+    importance_ratio = _clip_importance_ratio(raw_importance_ratio, importance_ratio_clip)
+    mismatch_kl = raw_importance_ratio - log_importance_ratio - 1
 
-    advantages = loss_config.adv_tau * advantages
+    advantages = adv_tau * advantages
     if teacher_logprobs is not None:
         teacher_kl = teacher_logprobs - trainer_logprobs
-        advantages = advantages + loss_config.teacher_tau * teacher_kl.detach()
+        advantages = advantages + teacher_tau * teacher_kl.detach()
     else:
         teacher_kl = None
 
     pg_loss = keep_mask * advantages * importance_ratio
-    kl_loss = loss_mask * log_importance_ratio**2
-    loss = (-pg_loss + loss_config.kl_tau * kl_loss).sum()
+    kl_loss, kl_metrics = _kl_loss(log_importance_ratio, loss_mask, kl_level)
+    loss = -pg_loss.sum() + kl_tau * kl_loss
 
     metrics = {
         "mismatch_kl": _safe_mean(mismatch_kl, loss_mask),  # all trainable tokens
@@ -156,11 +193,79 @@ def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossO
         "is_masked": _safe_mean(is_masked, loss_mask),
         "is_masked_low": _safe_mean(is_masked_low, loss_mask),
         "is_masked_high": _safe_mean(is_masked_high, loss_mask),
+        **_importance_ratio_metrics(raw_importance_ratio, importance_ratio, loss_mask),
+        **kl_metrics,
     }
     if teacher_kl is not None:
         metrics["teacher_kl"] = _safe_mean(teacher_kl, loss_mask)
 
     return LossOutputs(loss=loss, metrics=metrics)
+
+
+def default_loss_fn(inputs: LossInputs, loss_config: DefaultLossConfig) -> LossOutputs:
+    return dppo_kl_loss_fn(
+        inputs,
+        dppo_mask_low=loss_config.dppo_mask_low,
+        dppo_mask_high=loss_config.dppo_mask_high,
+        adv_tau=loss_config.adv_tau,
+        teacher_tau=loss_config.teacher_tau,
+        kl_tau=loss_config.kl_tau,
+        importance_ratio_clip=loss_config.importance_ratio_clip,
+    )
+
+
+def is_reinforce_loss_fn(
+    inputs: LossInputs,
+    adv_tau: float = 1.0,
+    kl_tau: float = 0.0,
+    kl_level: str = "token",
+    importance_ratio_clip: float | None = None,
+) -> LossOutputs:
+    trainer_logprobs = inputs.trainer_logprobs
+    inference_logprobs = inputs.inference_logprobs
+    advantages = adv_tau * inputs.advantages
+    loss_mask = inputs.loss_mask
+
+    log_importance_ratio = trainer_logprobs - inference_logprobs
+    raw_importance_ratio = torch.exp(log_importance_ratio).detach()
+    importance_ratio = _clip_importance_ratio(raw_importance_ratio, importance_ratio_clip)
+    mismatch_kl = raw_importance_ratio - log_importance_ratio - 1
+    kl_loss, kl_metrics = _kl_loss(log_importance_ratio, loss_mask, kl_level)
+
+    pg_loss = loss_mask * advantages * importance_ratio * trainer_logprobs
+    loss = -pg_loss.sum() + kl_tau * kl_loss
+    metrics = {
+        "mismatch_kl": _safe_mean(mismatch_kl, loss_mask),
+        **_importance_ratio_metrics(raw_importance_ratio, importance_ratio, loss_mask),
+        **kl_metrics,
+    }
+    return LossOutputs(loss=loss, metrics=metrics)
+
+
+def reinforce_loss_fn(
+    inputs: LossInputs,
+    adv_tau: float = 1.0,
+    kl_tau: float = 0.0,
+    kl_level: str = "token",
+) -> LossOutputs:
+    trainer_logprobs = inputs.trainer_logprobs
+    inference_logprobs = inputs.inference_logprobs
+    rewards = adv_tau * inputs.advantages
+    loss_mask = inputs.loss_mask
+
+    log_importance_ratio = trainer_logprobs - inference_logprobs
+    importance_ratio = torch.exp(log_importance_ratio)
+    mismatch_kl = importance_ratio - log_importance_ratio - 1
+    kl_loss, kl_metrics = _kl_loss(log_importance_ratio, loss_mask, kl_level)
+
+    pg_loss = loss_mask * rewards * trainer_logprobs
+    token_count = loss_mask.sum().clamp_min(1).to(dtype=trainer_logprobs.dtype)
+    loss = (-pg_loss.sum() + kl_tau * kl_loss) / token_count
+    metrics = {
+        "mismatch_kl": _safe_mean(mismatch_kl, loss_mask),
+        **kl_metrics,
+    }
+    return LossOutputs(loss=loss, metrics=metrics, normalizer=torch.ones((), device=loss.device, dtype=loss.dtype))
 
 
 def sft_loss_fn(inputs: LossInputs) -> LossOutputs:
@@ -224,6 +329,7 @@ def compute_loss(
     effective_loss_fn = sft_loss_fn if sft_loss else loss_fn
 
     total_loss = 0.0
+    normalizer: Tensor | None = None
     all_metrics: dict[str, list[Tensor]] = {}
 
     if teacher_logprobs is None:
@@ -243,13 +349,15 @@ def compute_loss(
         result = effective_loss_fn(inputs)
 
         total_loss = total_loss + result.loss
+        if result.normalizer is not None:
+            normalizer = result.normalizer if normalizer is None else normalizer + result.normalizer
 
         for k, v in result.metrics.items():
             if k not in all_metrics:
                 all_metrics[k] = []
             all_metrics[k].append(v)
 
-    scaled_loss = total_loss / loss_scale
+    scaled_loss = total_loss / (normalizer if normalizer is not None else loss_scale)
 
     aggregated: dict[str, Any] = {}
     for k, v in all_metrics.items():
