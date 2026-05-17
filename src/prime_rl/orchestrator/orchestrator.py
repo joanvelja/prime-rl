@@ -7,10 +7,12 @@ from pathlib import Path
 import tomli_w
 
 import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before transitive import
+from prime_rl.orchestrator.actor_proxy import MultiAgentActorProxy
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
+from prime_rl.orchestrator.member_bindings import is_trainable_member as is_bound_trainable_member
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
@@ -271,9 +273,7 @@ async def orchestrate(config: OrchestratorConfig):
 
     if is_ma:
         logger.info(
-            f"Multi-agent envs={sorted(ma_env_names)}. Routing through per-member fan-out "
-            f"(drop_judge={config.multi_agent.drop_judge}, "
-            f"filter_by_learner_seat={config.multi_agent.filter_by_learner_seat}); "
+            f"Multi-agent envs={sorted(ma_env_names)}. Runtime member bindings={config.multi_agent}; "
             f"advantage estimator={advantage_type}."
         )
         if is_vlm:
@@ -281,6 +281,15 @@ async def orchestrate(config: OrchestratorConfig):
                 "VLM + multi-agent training is not yet supported; image cache fan-out "
                 "across per-member rollouts is unimplemented."
             )
+
+    actor_proxy: MultiAgentActorProxy | None = None
+    if is_ma and config.multi_agent.uses_actor_proxy():
+        actor_proxy = MultiAgentActorProxy(
+            multi_agent=config.multi_agent,
+            default_model=rollout_model_name,
+            logger=logger,
+        )
+        await actor_proxy.start()
 
     eval_envs: EvalEnvs | None = None
     if config.eval:
@@ -321,6 +330,7 @@ async def orchestrate(config: OrchestratorConfig):
         tasks_per_minute=config.tasks_per_minute,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
+        actor_proxy=actor_proxy,
         config=config,
     )
     scheduler.model_name = rollout_model_name
@@ -328,6 +338,12 @@ async def orchestrate(config: OrchestratorConfig):
     if checkpoint_step is not None and config.model.lora is not None and enable_policy_updates:
         assert config.model.lora.name is not None
         scheduler.model_name = config.model.lora.name
+
+    async def get_eval_client_config() -> vf.ClientConfig:
+        client_config = await inference_pool.get_eval_client()
+        if actor_proxy is None:
+            return client_config
+        return actor_proxy.client_config_for(client_config, scheduler.model_name)
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")
@@ -473,7 +489,7 @@ async def orchestrate(config: OrchestratorConfig):
                 *[
                     eval_env.evaluate(
                         model_name=scheduler.model_name,
-                        get_client=inference_pool.get_eval_client,
+                        get_client=get_eval_client_config,
                         ckpt_step=ckpt_step,
                         step=progress.step,
                         cache_salt=str(ckpt_step),
@@ -520,8 +536,9 @@ async def orchestrate(config: OrchestratorConfig):
             if is_ma:
                 training_units, rollout_to_unit_idxs = fan_out_for_multi_agent(
                     train_rollouts,
-                    drop_judge=config.multi_agent.drop_judge,
-                    filter_by_learner_seat=config.multi_agent.filter_by_learner_seat,
+                    is_trainable_member=lambda rollout, member_id: is_bound_trainable_member(
+                        config.multi_agent, rollout, member_id
+                    ),
                 )
                 assert advantage_state is not None  # gated by MA validation above
                 advantages = compute_rae_advantages(training_units, advantage_state)
@@ -569,10 +586,11 @@ async def orchestrate(config: OrchestratorConfig):
                 f"filtered out all {num_rollouts} rollouts - retrying batch generation"
             )
 
-        trainable_ratio = n_trainable / num_rollouts
+        trainable_denominator = len(training_units) if is_ma else num_rollouts
+        trainable_ratio = n_trainable / max(trainable_denominator, 1)
         if trainable_ratio <= 0.1:
             logger.warning(
-                f"Only {n_trainable}/{num_rollouts} rollouts in the batch are trainable "
+                f"Only {n_trainable}/{trainable_denominator} training units in the batch are trainable "
                 f"({trainable_ratio:.1%}) - this can mean the tasks are too easy or too hard for the "
                 "model, consider reviewing the task difficulty of your environment(s)"
             )
@@ -936,7 +954,7 @@ async def orchestrate(config: OrchestratorConfig):
             *[
                 eval_env.evaluate(
                     model_name=scheduler.model_name,
-                    get_client=inference_pool.get_eval_client,
+                    get_client=get_eval_client_config,
                     ckpt_step=ckpt_step,
                     step=progress.step,
                     cache_salt=str(ckpt_step),
@@ -980,6 +998,8 @@ async def orchestrate(config: OrchestratorConfig):
         await inference_pool.stop()
         if teacher_inference_pool is not None:
             await teacher_inference_pool.stop()
+        if actor_proxy is not None:
+            await actor_proxy.stop()
         event_loop_lag_monitor_task.cancel()
         # Shutdown env processes (also registered as atexit handler for crash safety)
         train_envs.shutdown()

@@ -8,11 +8,13 @@ compute_advantages. Both coexist.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from verifiers import rollout_to_member_rollouts
 from verifiers.types import MemberRollout
+
+MemberTrainability = Callable[[Mapping, str], bool]
 
 RAEKey = tuple[str, int | str, str]
 """(task, example_id, member_id). ``task`` is the env name (MemberRollout['task']),
@@ -43,8 +45,7 @@ class RAEState:
 def fan_out_for_multi_agent(
     rollouts: list[Mapping],
     *,
-    drop_judge: bool = True,
-    filter_by_learner_seat: bool = False,
+    is_trainable_member: MemberTrainability | None = None,
 ) -> tuple[list[MemberRollout], list[list[int]]]:
     """Project episode-level rollouts to per-member training units.
 
@@ -53,38 +54,16 @@ def fan_out_for_multi_agent(
     ``training_units`` — the orchestrator uses it to fold per-unit token
     counts back to per-rollout metric rows (results_df is per-episode).
 
-    ``drop_judge`` filters out ``member_id == "judge"`` units. By the
-    ``zero_sum_reward`` construction the judge gets reward 0 for every
-    episode; including it in training only burns gradient compute against
-    a zero-signal advantage. Pass ``False`` only for diagnostic runs that
-    want judge transcripts in the training batch (e.g. SFT-on-judge).
-
-    ``filter_by_learner_seat`` keeps only the member matching
-    ``rollout.info['learner_seat']``. Used by external-opponent training
-    (the opposite seat and judge are frozen external endpoints whose
-    trajectories are dead weight on the training path). Raises when the
-    key is missing -- enabling the filter on a self-play env is a config
-    mismatch, not a silent no-op.
+    ``is_trainable_member`` is a runtime-owned predicate keyed by
+    ``(rollout, member_id)``. Verifiers provides protocol member ids; Prime-RL
+    decides which of those members map to trainable policy parameters.
     """
     training_units: list[MemberRollout] = []
     rollout_to_unit_idxs: list[list[int]] = []
     for rollout in rollouts:
         members = rollout_to_member_rollouts(rollout)
-        if drop_judge:
-            members = [m for m in members if m["member_id"] != "judge"]
-        if filter_by_learner_seat:
-            info = rollout.get("info") or {}
-            seat = info.get("learner_seat")
-            if seat is None:
-                raise ValueError(
-                    "fan_out_for_multi_agent: filter_by_learner_seat=True but "
-                    "rollout.info['learner_seat'] is missing "
-                    f"(example_id={rollout.get('example_id')!r}). The env-pack "
-                    "must stamp info.learner_seat per row (e.g. gpqa_debate "
-                    "with opponent_model set). Disable the filter for "
-                    "self-play envs."
-                )
-            members = [m for m in members if m["member_id"] == seat]
+        if is_trainable_member is not None:
+            members = [m for m in members if is_trainable_member(rollout, m["member_id"])]
         rollout_to_unit_idxs.append(list(range(len(training_units), len(training_units) + len(members))))
         training_units.extend(members)
     return training_units, rollout_to_unit_idxs

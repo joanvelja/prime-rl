@@ -802,40 +802,141 @@ AdvantageConfig: TypeAlias = Annotated[
 ]
 
 
+class MultiAgentMemberBindingConfig(BaseModel):
+    """Runtime binding for one logical multi-agent member."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Named deployment target for this member. None means the scheduler-selected "
+                "rollout client for the current request."
+            ),
+        ),
+    ] = None
+
+    model: Annotated[
+        str | None,
+        Field(description="Model or adapter alias for this member. None uses the target default model."),
+    ] = None
+
+    trainable: Annotated[
+        bool,
+        Field(
+            description="Whether this member's projected trajectory should become a trainer sample.",
+        ),
+    ] = True
+
+
+class MultiAgentTargetConfig(BaseModel):
+    """Named external deployment target for multi-agent member routing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client: Annotated[
+        ClientConfig,
+        Field(
+            default_factory=ClientConfig,
+            description="OpenAI-compatible client configuration for this target.",
+        ),
+    ]
+
+    model: Annotated[
+        str | None,
+        Field(description="Default model for this target. Member bindings may override it."),
+    ] = None
+
+
+class MultiAgentOneOfConfig(BaseModel):
+    """Choose one candidate member per rollout for a selected binding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            description="Candidate member ids. Exactly one receives the selected binding per rollout.",
+        ),
+    ]
+
+    seed: Annotated[
+        int,
+        Field(description="Seed for deterministic rollout-scoped candidate selection."),
+    ] = 0
+
+    selected: Annotated[
+        MultiAgentMemberBindingConfig,
+        Field(
+            default_factory=MultiAgentMemberBindingConfig,
+            description="Binding applied to the selected candidate member.",
+        ),
+    ]
+
+    unselected: Annotated[
+        MultiAgentMemberBindingConfig,
+        Field(
+            default_factory=lambda: MultiAgentMemberBindingConfig(trainable=False),
+            description="Binding applied to non-selected candidate members.",
+        ),
+    ]
+
+    @model_validator(mode="after")
+    def validate_unique_candidates(self):
+        if len(self.candidates) != len(set(self.candidates)):
+            raise ValueError(f"multi_agent.one_of.candidates contains duplicates: {self.candidates}")
+        return self
+
+
 class MultiAgentConfig(BaseModel):
-    """Multi-agent routing knobs — orthogonal to the advantage estimator.
+    """Runtime actor bindings — orthogonal to the advantage estimator.
 
-    These control how per-rollout episodes get fanned out into per-member
-    training units (stage 2 of the pipeline). The baseline / advantage
-    computation (stage 3) lives in ``AdvantageConfig`` and is independent.
-
-    Activates automatically when the env's rubric is a ``MultiAgentRubric``.
+    Verifiers owns protocol identity (``member_id``). Prime-RL owns deployment
+    bindings from ``member_id`` to endpoint/model/trainability.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    drop_judge: Annotated[
-        bool,
+    default_binding: Annotated[
+        MultiAgentMemberBindingConfig,
         Field(
-            description="Drop member_id == 'judge' units from the training batch. "
-            "The judge gets reward 0 by zero_sum_reward construction, so its "
-            "advantage is policy-neutral noise — training on those tokens only "
-            "burns gradient compute. Set to False only for diagnostic SFT-on-judge runs.",
+            default_factory=MultiAgentMemberBindingConfig,
+            description="Binding used for members without an explicit or policy-selected binding.",
         ),
-    ] = True
+    ]
 
-    filter_by_learner_seat: Annotated[
-        bool,
+    member_bindings: Annotated[
+        dict[str, MultiAgentMemberBindingConfig],
         Field(
-            description="Keep only the member matching rollout.info['learner_seat'] "
-            "in the training batch. Enables external-opponent training: the frozen "
-            "opponent's and judge's trajectories are projected out before RAE / the "
-            "trainer see them, avoiding wasted gradient compute on tokens whose "
-            "parameters don't update. Requires the env-pack to stamp info.learner_seat "
-            "per row (e.g. gpqa_debate with opponent_model set). Leave False for "
-            "self-play envs — enabling it raises at fan-out time when the key is absent.",
+            default_factory=dict,
+            description="Static per-member runtime bindings keyed by member_id.",
         ),
-    ] = False
+    ]
+
+    targets: Annotated[
+        dict[str, MultiAgentTargetConfig],
+        Field(
+            default_factory=dict,
+            description="Named external deployment targets for member bindings.",
+        ),
+    ]
+
+    one_of: Annotated[
+        MultiAgentOneOfConfig | None,
+        Field(description="Optional deterministic per-rollout one-of binding policy."),
+    ] = None
+
+    def uses_actor_proxy(self) -> bool:
+        bindings = [self.default_binding, *self.member_bindings.values()]
+        if self.one_of is not None:
+            bindings.extend([self.one_of.selected, self.one_of.unselected])
+        return bool(
+            self.targets
+            or self.one_of is not None
+            or any(binding.target is not None or binding.model is not None for binding in bindings)
+        )
 
 
 class GibberishFilterConfig(BaseModel):

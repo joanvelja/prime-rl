@@ -9,6 +9,7 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.orchestrator.actor_proxy import MultiAgentActorProxy
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
@@ -83,6 +84,7 @@ class Scheduler:
         tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
+        actor_proxy: MultiAgentActorProxy | None = None,
     ):
         self.logger = get_logger()
         if tasks_per_minute is not None:
@@ -101,6 +103,7 @@ class Scheduler:
         self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
         self.lora_name = lora_name
+        self.actor_proxy = actor_proxy
         self.model_name = self.config.model.name
         self.json_logging = config.log.json_logging
 
@@ -214,6 +217,11 @@ class Scheduler:
 
         env_name = group.example["env_name"]
         env = self.train_envs.get(env_name)
+        rollout_client_config = (
+            self.actor_proxy.client_config_for(client_config, self.model_name)
+            if self.actor_proxy is not None
+            else client_config
+        )
 
         cache_salt = str(self.ckpt_step)
         if env.requires_group_scoring:
@@ -221,7 +229,7 @@ class Scheduler:
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
                 env.run_group(
-                    client=client_config,
+                    client=rollout_client_config,
                     example=group.example,
                     model_name=self.model_name,
                     rollouts_per_example=rollout_count,
@@ -233,7 +241,7 @@ class Scheduler:
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
                 env.run_rollout(
-                    client=client_config,
+                    client=rollout_client_config,
                     example=group.example,
                     model_name=self.model_name,
                     cache_salt=cache_salt,
