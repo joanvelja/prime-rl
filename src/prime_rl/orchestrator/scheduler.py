@@ -9,7 +9,6 @@ import verifiers as vf
 from aiolimiter import AsyncLimiter
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
-from prime_rl.orchestrator.actor_proxy import MultiAgentActorProxy
 from prime_rl.orchestrator.buffer import Buffer
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.vf_utils import get_seq_len
@@ -58,6 +57,9 @@ class GroupState:
     # Highest round already counted as failed; used to dedupe failures from
     # multiple rollouts in the same round.
     last_failed_round: int = -1
+    # Dispatch ids are Prime-RL-owned ids used for train-one member selection
+    # before Verifiers creates trajectory_id.
+    next_dispatch_index: int = 0
 
 
 class Scheduler:
@@ -84,7 +86,6 @@ class Scheduler:
         tasks_per_minute: int | None,
         enable_policy_updates: bool = True,
         lora_name: str | None = None,
-        actor_proxy: MultiAgentActorProxy | None = None,
     ):
         self.logger = get_logger()
         if tasks_per_minute is not None:
@@ -103,7 +104,6 @@ class Scheduler:
         self.strict_async_level = strict_async_level
         self.enable_policy_updates = enable_policy_updates
         self.lora_name = lora_name
-        self.actor_proxy = actor_proxy
         self.model_name = self.config.model.name
         self.json_logging = config.log.json_logging
 
@@ -185,6 +185,29 @@ class Scheduler:
         inflight = Counter(self._client_identity(info.client_config) for info in self.inflight_requests.values())
         return min(clients, key=lambda c: inflight[self._client_identity(c)])
 
+    def _next_dispatch_ids(self, group: GroupState, group_id: int, count: int) -> list[str]:
+        start = group.next_dispatch_index
+        group.next_dispatch_index += count
+        return [f"{self.step}:{group_id}:{group.current_round}:{start + idx}" for idx in range(count)]
+
+    def _compile_generation(
+        self,
+        *,
+        env,
+        client_config: vf.ClientConfig,
+        cache_salt: str,
+        dispatch_id: str,
+    ) -> vf.MemberGenerationPlan | None:
+        if not self.config.multi_agent.enabled or not env.is_multi_agent:
+            return None
+        return env.compile_generation(
+            self.config.multi_agent,
+            client=client_config,
+            model_name=self.model_name,
+            cache_salt=cache_salt,
+            dispatch_id=dispatch_id,
+        )
+
     async def drop_group(self, group_id: int) -> int:
         """Drop a group and cancel any remaining in-flight rollouts for it. Returns the number of cancelled rollouts."""
         tasks_to_cancel = []
@@ -217,34 +240,50 @@ class Scheduler:
 
         env_name = group.example["env_name"]
         env = self.train_envs.get(env_name)
-        rollout_client_config = (
-            self.actor_proxy.client_config_for(client_config, self.model_name)
-            if self.actor_proxy is not None
-            else client_config
-        )
 
         cache_salt = str(self.ckpt_step)
         if env.requires_group_scoring:
             rollout_count = group.rollouts_to_schedule
+            dispatch_ids = self._next_dispatch_ids(group, group_id, rollout_count)
+            generation = [
+                self._compile_generation(
+                    env=env,
+                    client_config=client_config,
+                    cache_salt=cache_salt,
+                    dispatch_id=dispatch_id,
+                )
+                for dispatch_id in dispatch_ids
+            ]
             group.rollouts_to_schedule = 0
             task = asyncio.create_task(
                 env.run_group(
-                    client=rollout_client_config,
+                    client=client_config,
                     example=group.example,
                     model_name=self.model_name,
                     rollouts_per_example=rollout_count,
                     cache_salt=cache_salt,
+                    generation=generation if any(g is not None for g in generation) else None,
+                    dispatch_ids=dispatch_ids,
                 )
             )
         else:
             rollout_count = 1
+            dispatch_id = self._next_dispatch_ids(group, group_id, 1)[0]
+            generation = self._compile_generation(
+                env=env,
+                client_config=client_config,
+                cache_salt=cache_salt,
+                dispatch_id=dispatch_id,
+            )
             group.rollouts_to_schedule -= 1
             task = asyncio.create_task(
                 env.run_rollout(
-                    client=rollout_client_config,
+                    client=client_config,
                     example=group.example,
                     model_name=self.model_name,
                     cache_salt=cache_salt,
+                    generation=generation,
+                    dispatch_id=dispatch_id,
                 )
             )
         self.inflight_requests[task] = InflightRequest(

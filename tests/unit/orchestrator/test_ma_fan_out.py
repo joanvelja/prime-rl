@@ -5,17 +5,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import verifiers as vf
 from verifiers.types import MARScore, MemberScore, RolloutTiming, State, TrajectoryStep
 from verifiers.utils.save_utils import state_to_output
 
-from prime_rl.configs.orchestrator import (
+from prime_rl.configs.multi_agent import (
+    FixedMemberTargetConfig,
     MultiAgentConfig,
-    MultiAgentMemberBindingConfig,
-    MultiAgentOneOfConfig,
+    TrainOneConfig,
 )
-from prime_rl.orchestrator.member_bindings import (
+from prime_rl.orchestrator.member_generation import (
+    DISPATCH_ID_FIELD,
+    compile_member_generation_plan,
     is_trainable_member,
-    resolve_member_binding,
 )
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
@@ -153,18 +155,29 @@ def test_fan_out_trainability_predicate_keeps_only_matching_member():
     assert mapping == [[0]]
 
 
-def test_one_of_member_binding_selects_one_trainable_debater_and_excludes_judge():
+def test_train_one_selects_one_trainable_debater_and_excludes_fixed_judge():
     config = MultiAgentConfig(
-        one_of=MultiAgentOneOfConfig(
-            candidates=["debater_a", "debater_b"],
+        train_one=TrainOneConfig(
+            members=["debater_a", "debater_b"],
             seed=42,
-            unselected=MultiAgentMemberBindingConfig(target="opponent", trainable=False),
+            unselected="opponent",
         ),
-        member_bindings={
-            "judge": MultiAgentMemberBindingConfig(target="judge", trainable=False),
+        fixed={
+            "opponent": FixedMemberTargetConfig(
+                members=[],
+                model="gpt-4.1-mini",
+                base_url=["https://api.openai.com/v1"],
+                api_key_var="OPENAI_API_KEY",
+            ),
+            "judge": FixedMemberTargetConfig(
+                members=["judge"],
+                model="judge-model",
+                base_url=["http://judge:8000/v1"],
+            ),
         },
     )
     rollout = _build_rollout(example_id=1, trajectory_id="ep-1")
+    rollout[DISPATCH_ID_FIELD] = "dispatch-1"
 
     trainable_members = [
         member_id
@@ -174,9 +187,70 @@ def test_one_of_member_binding_selects_one_trainable_debater_and_excludes_judge(
 
     assert len(trainable_members) == 1
     assert trainable_members[0] in {"debater_a", "debater_b"}
-    frozen_member = ({"debater_a", "debater_b"} - set(trainable_members)).pop()
-    assert (
-        resolve_member_binding(config, member_id=frozen_member, rollout_id="ep-1").target
-        == "opponent"
-    )
     assert not is_trainable_member(config, rollout, "judge")
+
+
+def test_compile_member_generation_plan_routes_selected_fixed_and_judge_members():
+    config = MultiAgentConfig(
+        train_one=TrainOneConfig(
+            members=["debater_a", "debater_b"],
+            seed=0,
+            unselected="opponent",
+        ),
+        fixed={
+            "opponent": FixedMemberTargetConfig(
+                members=[],
+                model="gpt-4.1-mini",
+                base_url=["https://api.openai.com/v1"],
+                api_key_var="OPENAI_API_KEY",
+                request_mode="chat",
+                sampling={"temperature": 0.0},
+            ),
+            "judge": FixedMemberTargetConfig(
+                members=["judge"],
+                model="judge-model",
+                base_url=["http://judge-1:8000/v1", "http://judge-2:8000/v1"],
+                request_mode="chat",
+                sampling={"temperature": 0.0, "max_completion_tokens": 256},
+            ),
+        },
+    )
+    dispatch_id = "dispatch-compile"
+    plan = compile_member_generation_plan(
+        config,
+        member_ids=["debater_a", "debater_b", "judge"],
+        default_client=vf.ClientConfig(
+            client_type="renderer",
+            api_base_url="http://learner:8000/v1",
+            api_key_var="VLLM_API_KEY",
+        ),
+        default_model="learner-lora",
+        learner_sampling_args={"temperature": 1.0, "extra_body": {"cache_salt": "7"}},
+        fixed_sampling_args={"temperature": 1.0, "max_completion_tokens": 1024},
+        dispatch_id=dispatch_id,
+    )
+    assert plan is not None
+
+    trainable = [
+        member
+        for member in ("debater_a", "debater_b")
+        if is_trainable_member(config, {DISPATCH_ID_FIELD: dispatch_id}, member)
+    ]
+    assert len(trainable) == 1
+    selected = trainable[0]
+    frozen = ({"debater_a", "debater_b"} - {selected}).pop()
+
+    assert plan.members[selected].model == "learner-lora"
+    assert plan.members[selected].client.client_type == "renderer"
+    assert plan.members[selected].sampling_args["extra_body"] == {"cache_salt": "7"}
+    assert plan.members[frozen].model == "gpt-4.1-mini"
+    assert plan.members[frozen].client.client_type == "openai_chat_completions"
+    assert plan.members[frozen].sampling_args == {
+        "temperature": 0.0,
+        "max_completion_tokens": 1024,
+    }
+    assert plan.members["judge"].model == "judge-model"
+    assert plan.members["judge"].sampling_args == {
+        "temperature": 0.0,
+        "max_completion_tokens": 256,
+    }

@@ -7,12 +7,11 @@ from pathlib import Path
 import tomli_w
 
 import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before transitive import
-from prime_rl.orchestrator.actor_proxy import MultiAgentActorProxy
 from prime_rl.orchestrator.advantage import compute_advantages
 from prime_rl.orchestrator.eval_utils import compute_eval_ckpt_step
 from prime_rl.orchestrator.event_loop_lag import EventLoopLagMonitor
 from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
-from prime_rl.orchestrator.member_bindings import is_trainable_member as is_bound_trainable_member
+from prime_rl.orchestrator.member_generation import is_trainable_member as is_bound_trainable_member
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
@@ -42,7 +41,6 @@ import pandas as pd
 import verifiers as vf
 from renderers.base import create_renderer
 from transformers import AutoProcessor
-from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
 
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
@@ -246,7 +244,7 @@ async def orchestrate(config: OrchestratorConfig):
     )
     logger.success("Train environment(s) ready")
 
-    ma_env_names = {env.name for env in train_envs if isinstance(env.env.rubric, MultiAgentRubric)}
+    ma_env_names = train_envs.multi_agent_names
     non_ma_env_names = set(train_envs.names) - ma_env_names
     if ma_env_names and non_ma_env_names:
         raise NotImplementedError(
@@ -267,13 +265,13 @@ async def orchestrate(config: OrchestratorConfig):
         )
     if (not is_ma) and advantage_type == "ema_per_member":
         raise ValueError(
-            "advantage.type='ema_per_member' requires a MultiAgentRubric env. "
+            "advantage.type='ema_per_member' requires a multi-agent env. "
             "Use type='default' or type='custom' for single-agent training."
         )
 
     if is_ma:
         logger.info(
-            f"Multi-agent envs={sorted(ma_env_names)}. Runtime member bindings={config.multi_agent}; "
+            f"Multi-agent envs={sorted(ma_env_names)}. Runtime member generation={config.multi_agent}; "
             f"advantage estimator={advantage_type}."
         )
         if is_vlm:
@@ -281,15 +279,6 @@ async def orchestrate(config: OrchestratorConfig):
                 "VLM + multi-agent training is not yet supported; image cache fan-out "
                 "across per-member rollouts is unimplemented."
             )
-
-    actor_proxy: MultiAgentActorProxy | None = None
-    if is_ma and config.multi_agent.uses_actor_proxy():
-        actor_proxy = MultiAgentActorProxy(
-            multi_agent=config.multi_agent,
-            default_model=rollout_model_name,
-            logger=logger,
-        )
-        await actor_proxy.start()
 
     eval_envs: EvalEnvs | None = None
     if config.eval:
@@ -330,7 +319,6 @@ async def orchestrate(config: OrchestratorConfig):
         tasks_per_minute=config.tasks_per_minute,
         enable_policy_updates=enable_policy_updates,
         lora_name=config.model.lora.name if config.model.lora else None,
-        actor_proxy=actor_proxy,
         config=config,
     )
     scheduler.model_name = rollout_model_name
@@ -340,10 +328,7 @@ async def orchestrate(config: OrchestratorConfig):
         scheduler.model_name = config.model.lora.name
 
     async def get_eval_client_config() -> vf.ClientConfig:
-        client_config = await inference_pool.get_eval_client()
-        if actor_proxy is None:
-            return client_config
-        return actor_proxy.client_config_for(client_config, scheduler.model_name)
+        return await inference_pool.get_eval_client()
 
     # Check health of the inference pool
     logger.info("Waiting for inference pool to be ready")
@@ -493,6 +478,7 @@ async def orchestrate(config: OrchestratorConfig):
                         ckpt_step=ckpt_step,
                         step=progress.step,
                         cache_salt=str(ckpt_step),
+                        multi_agent=config.multi_agent if eval_env.is_multi_agent else None,
                     )
                     for eval_env in envs_to_eval
                 ]
@@ -958,6 +944,7 @@ async def orchestrate(config: OrchestratorConfig):
                     ckpt_step=ckpt_step,
                     step=progress.step,
                     cache_salt=str(ckpt_step),
+                    multi_agent=config.multi_agent if eval_env.is_multi_agent else None,
                 )
                 for eval_env in eval_envs
             ]
@@ -998,8 +985,6 @@ async def orchestrate(config: OrchestratorConfig):
         await inference_pool.stop()
         if teacher_inference_pool is not None:
             await teacher_inference_pool.stop()
-        if actor_proxy is not None:
-            await actor_proxy.stop()
         event_loop_lag_monitor_task.cancel()
         # Shutdown env processes (also registered as atexit handler for crash safety)
         train_envs.shutdown()
