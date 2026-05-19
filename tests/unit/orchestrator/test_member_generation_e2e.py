@@ -12,6 +12,10 @@ from typing import Any
 
 import pytest
 import verifiers as vf
+from verifiers.envs.multi_agent_env import MultiAgentEnv
+from verifiers.envs.multi_agent_kernel import StaticSchedule, TurnSlot
+from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
+from verifiers.types import MARScore, MemberScore, Messages, State
 
 from prime_rl.configs.multi_agent import (
     FixedMemberTargetConfig,
@@ -22,6 +26,32 @@ from prime_rl.configs.multi_agent import (
 from prime_rl.configs.orchestrator import TrainEnvConfig, TrainSamplingConfig
 from prime_rl.orchestrator.envs import Envs, EvalEnv, TrainEnv
 from prime_rl.orchestrator.member_generation import DISPATCH_ID_FIELD
+
+
+class _MembersOnlyRubric:
+    members = ["solo"]
+
+
+class _MembersOnlySingleAgentEnv:
+    is_multi_agent = False
+    members = ["solo"]
+    rubric = _MembersOnlyRubric()
+
+
+class _DetectionMultiAgentRubric(MultiAgentRubric):
+    async def build_marscore(self, state: State) -> MARScore:
+        return MARScore(
+            members=[MemberScore(member_id="debater", reward=1.0)],
+            episode_scalar=1.0,
+        )
+
+
+class _DetectionMultiAgentEnv(MultiAgentEnv):
+    async def build_prompt(self, state: State, member_id: str, slot: TurnSlot) -> Messages:
+        return state["prompt"]
+
+    async def render_completion(self, state: State) -> None:
+        state["completion"] = []
 
 
 class _EvalMonitor:
@@ -111,6 +141,37 @@ def _multi_agent_config(base_url: str = "http://fixed/v1") -> MultiAgentConfig:
             ),
         },
     )
+
+
+def test_multi_agent_detection_ignores_members_attrs_on_single_agent_env() -> None:
+    env = TrainEnv.__new__(TrainEnv)
+    env._env = _MembersOnlySingleAgentEnv()
+
+    assert env.is_multi_agent is False
+
+
+def test_multi_agent_detection_uses_env_marker_not_rubric_type() -> None:
+    env = TrainEnv.__new__(TrainEnv)
+    env._env = types.SimpleNamespace(
+        is_multi_agent=False,
+        members=["debater"],
+        rubric=_DetectionMultiAgentRubric(members=["debater"]),
+    )
+
+    assert env.is_multi_agent is False
+
+
+def test_multi_agent_detection_accepts_verifiers_multi_agent_env() -> None:
+    env = TrainEnv.__new__(TrainEnv)
+    env._env = _DetectionMultiAgentEnv(
+        schedule=StaticSchedule((TurnSlot(slot_id=0, agents=("debater",), phase="answer"),)),
+        members=["debater"],
+        dataset=lambda: None,
+        rubric=_DetectionMultiAgentRubric(members=["debater"]),
+    )
+
+    assert env._env.is_multi_agent is True
+    assert env.is_multi_agent is True
 
 
 def test_env_collection_multi_agent_names_uses_env_predicate() -> None:

@@ -11,7 +11,6 @@ from typing import Generic, TypeVar
 
 import pandas as pd
 import verifiers as vf
-from verifiers.rubrics.multi_agent_rubric import MultiAgentRubric
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
@@ -66,9 +65,7 @@ class Env:
 
     @property
     def is_multi_agent(self) -> bool:
-        if isinstance(self.env.rubric, MultiAgentRubric):
-            return True
-        return bool(getattr(self.env, "members", None) or getattr(self.env.rubric, "members", None))
+        return self.env.is_multi_agent
 
     async def start(
         self,
