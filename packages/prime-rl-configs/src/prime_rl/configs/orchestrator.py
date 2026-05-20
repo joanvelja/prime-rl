@@ -722,8 +722,9 @@ class BufferConfig(BaseConfig):
         bool,
         Field(
             description=(
-                "Whether to filter rollouts based on difficulty. If True, rollouts assigned to easy or hard "
-                "pools by easy_threshold/hard_threshold are not added to the training buffer."
+                "Whether to skip zero-std reward groups and rollouts assigned to easy or hard pools. "
+                "Skipped groups do not enter the training buffer, so batch progress is counted only on "
+                "groups with learning signal."
             ),
         ),
     ] = False
@@ -1062,8 +1063,6 @@ class OrchestratorConfig(BaseConfig):
 
     # Data buffer configuration
     buffer: BufferConfig = BufferConfig()
-
-    # Post-filter train batch refill configuration
 
     # The advantage configuration (stage 3 of the pipeline; see AdvantageConfig
     # docstring). For multi-agent envs, set type="ema_per_member" or "custom";
