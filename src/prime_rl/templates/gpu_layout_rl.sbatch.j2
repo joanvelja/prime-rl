@@ -37,8 +37,8 @@ if [ -z "$_cpu_tot" ] || [ -z "$_real_mem" ]; then
     echo "gpu_layout: failed to parse CPUTot/RealMemory for $_first_host" >&2
     exit 1
 fi
-GPU_LAYOUT_CPB=$((_cpu_tot - 16))
-GPU_LAYOUT_MEMB=$((_real_mem - 16384))
+GPU_LAYOUT_CPB=$((_cpu_tot - {{ gpu_layout_cpu_margin }}))
+GPU_LAYOUT_MEMB=$((_real_mem - {{ gpu_layout_mem_margin_mb }}))
 if [ "$GPU_LAYOUT_CPB" -lt 1 ] || [ "$GPU_LAYOUT_MEMB" -lt 1024 ]; then
     echo "gpu_layout: node $_first_host too small (CPUTot=$_cpu_tot RealMemory=$_real_mem)" >&2
     exit 1

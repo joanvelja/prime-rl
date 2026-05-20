@@ -241,7 +241,8 @@ class GpuLayoutDeploymentConfig(BaseDeploymentConfig):
         Field(
             description=(
                 "Optional Slurm hostnames to use for this layout. If unset, the launcher "
-                "uses the first len(nodes) hosts from SLURM_JOB_NODELIST."
+                "uses SLURM_JOB_NODELIST only when it exactly matches len(nodes); set hosts "
+                "explicitly for shared allocations with extra nodes."
             ),
         ),
     ] = None
@@ -950,10 +951,8 @@ class RLConfig(BaseConfig):
                 self.inference.api_server_count = 1
 
             if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
-                assert self.trainer.weight_broadcast.type == "nccl"
                 self.trainer.weight_broadcast.host = "0.0.0.0"
                 self.trainer.weight_broadcast.inference_world_size = self.deployment.total_infer_gpus
-                assert self.orchestrator.weight_broadcast.type == "nccl"
                 self.orchestrator.weight_broadcast.inference_world_size = self.deployment.total_infer_gpus
 
         elif self.deployment.type == "multi_node":  # multi-node
@@ -1024,10 +1023,8 @@ class RLConfig(BaseConfig):
                 api_server_count = self.inference.api_server_count if self.inference else 1
                 tp = self.inference.parallel.tp if self.inference else 1
                 total_infer_workers = self.deployment.total_infer_nodes * api_server_count * tp
-                assert self.trainer.weight_broadcast.type == "nccl"
                 self.trainer.weight_broadcast.host = "0.0.0.0"
                 self.trainer.weight_broadcast.inference_world_size = total_infer_workers
-                assert self.orchestrator.weight_broadcast.type == "nccl"
                 self.orchestrator.weight_broadcast.inference_world_size = total_infer_workers
 
         return self
@@ -1051,9 +1048,7 @@ class RLConfig(BaseConfig):
 
         total_infer_gpus = self.deployment.total_infer_nodes * self.deployment.gpus_per_node
         if self.weight_broadcast is not None and self.weight_broadcast.type == "nccl":
-            assert self.trainer.weight_broadcast.type == "nccl"
             self.trainer.weight_broadcast.inference_world_size = total_infer_gpus
-            assert self.orchestrator.weight_broadcast.type == "nccl"
             self.orchestrator.weight_broadcast.inference_world_size = total_infer_gpus
 
         return self

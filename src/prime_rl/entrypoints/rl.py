@@ -38,6 +38,8 @@ ORCHESTRATOR_TOML = "orchestrator.toml"
 INFERENCE_TOML = "inference.toml"
 TEACHER_INFERENCE_TOML = "teacher_inference.toml"
 GPU_LAYOUT_SCRIPT = "gpu_layout_rl.sh"
+_GPU_LAYOUT_CPU_MARGIN = 16
+_GPU_LAYOUT_MEM_MARGIN_MB = 16_384
 
 
 def get_physical_gpu_ids() -> list[int]:
@@ -111,6 +113,9 @@ def _gpu_layout_template_vars(
         "config_dir": config_dir,
         "output_dir": config.output_dir,
         "orchestrator_output_dir": config.orchestrator.output_dir,
+        "gpu_layout_script_name": GPU_LAYOUT_SCRIPT,
+        "gpu_layout_cpu_margin": _GPU_LAYOUT_CPU_MARGIN,
+        "gpu_layout_mem_margin_mb": _GPU_LAYOUT_MEM_MARGIN_MB,
         "num_nodes": deployment.num_nodes,
         "gpus_per_node": deployment.gpus_per_node,
         "inference_servers": inference_servers,
@@ -480,6 +485,7 @@ def write_slurm_script(config: RLConfig, config_dir: Path, script_path: Path) ->
     if config.deployment.type == "gpu_layout":
         assert config.slurm is not None
         assert config.slurm.template_path is not None
+        write_gpu_layout_script(config, config_dir, config.output_dir / GPU_LAYOUT_SCRIPT)
         nodelist = config.slurm.nodelist
         if nodelist is None and config.deployment.hosts is not None:
             nodelist = ",".join(config.deployment.hosts)
@@ -632,20 +638,6 @@ def rl_slurm(config: RLConfig):
     logger.success(f"{result.stdout.strip()}\n\n{log_message}")
 
 
-def _get_allocation_hosts() -> list[str]:
-    nodelist = os.environ.get("SLURM_JOB_NODELIST") or os.environ.get("SLURM_NODELIST")
-    if not nodelist:
-        raise RuntimeError("gpu_layout without [slurm] must run inside a Slurm allocation with SLURM_JOB_NODELIST set.")
-
-    result = subprocess.run(["scontrol", "show", "hostnames", nodelist], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to resolve Slurm hosts from {nodelist}: {result.stderr.strip()}")
-    hosts = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not hosts:
-        raise RuntimeError(f"Slurm nodelist {nodelist} resolved to no hosts.")
-    return hosts
-
-
 def _select_gpu_layout_hosts(deployment: GpuLayoutDeploymentConfig) -> list[str]:
     """Select hosts for gpu_layout: explicit hosts if configured, else from SLURM_JOB_NODELIST."""
     if deployment.hosts is not None:
@@ -660,25 +652,18 @@ def _select_gpu_layout_hosts(deployment: GpuLayoutDeploymentConfig) -> list[str]
         raise RuntimeError(f"Failed to resolve Slurm hosts from {nodelist}: {result.stderr.strip()}")
 
     hosts = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    # Safe selection for SHARED allocations: never silently grab the first N
-    # nodes (that collides with co-tenants). Prefer explicit deployment.hosts;
-    # otherwise honor an explicit offset; otherwise auto-select but WARN loudly.
-    offset = int(os.environ.get("PRIME_RL_GPU_LAYOUT_NODE_OFFSET", "0"))
-    if offset < 0 or offset + deployment.num_nodes > len(hosts):
+    if len(hosts) < deployment.num_nodes:
         raise RuntimeError(
-            f"gpu_layout needs {deployment.num_nodes} hosts at offset {offset}, but allocation "
-            f"exposes only {len(hosts)}: {hosts}. Set deployment.hosts explicitly or a valid "
-            f"PRIME_RL_GPU_LAYOUT_NODE_OFFSET."
+            f"gpu_layout needs {deployment.num_nodes} hosts, but allocation exposes only {len(hosts)}: {hosts}."
         )
-    selected = hosts[offset : offset + deployment.num_nodes]
+    if len(hosts) > deployment.num_nodes:
+        raise RuntimeError(
+            f"gpu_layout needs {deployment.num_nodes} hosts, but allocation exposes {len(hosts)}: {hosts}. "
+            "Set deployment.hosts explicitly to select the intended lane."
+        )
+    selected = hosts
     logger = get_logger()
-    if offset == 0 and len(hosts) > deployment.num_nodes:
-        logger.warning(
-            f"gpu_layout auto-selected the FIRST {deployment.num_nodes} of {len(hosts)} allocation "
-            f"nodes ({selected}). In a SHARED allocation this can collide with co-tenants — set "
-            f"deployment.hosts or PRIME_RL_GPU_LAYOUT_NODE_OFFSET to claim a specific lane."
-        )
-    logger.info(f"gpu_layout hosts (offset={offset}): {selected}")
+    logger.info(f"gpu_layout hosts: {selected}")
     return selected
 
 

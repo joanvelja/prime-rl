@@ -130,16 +130,14 @@ CHILD_PIDS=()
 cleanup() {
     # Each component is launched via `setsid` so it is a SESSION LEADER and
     # CHILD_PIDS[i] == its session id (SID). Reap each tracked component's whole
-    # session subtree (vLLM workers, torchrun children — they inherit the SID
-    # even if they re-pgroup) with `pkill -s "$sid"`. This is PRECISE: it cannot
-    # touch the launcher, the parent `rl_gpu_layout_allocation` python, or any
-    # co-tenant (all in different sessions) — no pattern-pkill, no pgroup-leader
-    # assumption (the bugs Joan + Codex caught). `|| true` required under `set -e`.
+    # session subtree (vLLM workers, torchrun children) with `pkill -s "$sid"`.
+    # This is PRECISE: it cannot touch the launcher, the parent
+    # `rl_gpu_layout_allocation` python, or any co-tenant (all in different
+    # sessions). `|| true` required under `set -e`.
     local sid
     for sid in "${CHILD_PIDS[@]:-}"; do
         [ -n "$sid" ] || continue
         pkill -KILL -s "$sid" 2>/dev/null || true
-        kill -KILL -- -"$sid" 2>/dev/null || true   # belt: leader's process group
     done
     wait 2>/dev/null || true
 }

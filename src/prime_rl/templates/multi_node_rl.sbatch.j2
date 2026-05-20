@@ -78,18 +78,6 @@ configure_prime_rl_runtime() {
     set +a
     source .venv/bin/activate
 
-    # Omni-MATH-2 uses a repo-local env plus a patched HF-task verifiers checkout.
-    # Keep this order: patched verifier utilities, shared verifier checkout, task env.
-    for path in \
-        "$PROJECT_DIR/environments/omni_math2_singleturn" \
-        "/lus/lfs1aip2/projects/a6r/joanv.a6r/work/verifiers" \
-        "/lus/lfs1aip2/projects/a6r/joanv.a6r/tmp/verifiers-hf-task-envs"
-    do
-        if [ -d "$path" ]; then
-            export PYTHONPATH="$path:${PYTHONPATH:-}"
-        fi
-    done
-
     # Isambard GH200: prefer aws-ofi-nccl over CXI and keep every knob overridable.
     # PRIME_RL_NCCL_DEBUG lets short smokes use INFO without forcing it globally.
     export NCCL_NET="${NCCL_NET:-AWS Libfabric}"
