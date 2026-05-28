@@ -31,7 +31,7 @@ Namespaces are one honking great idea -- let's do more of those!
 ## Running code
 
 - **Always use uv**: run code with `uv run` or `uv run <command>`, never raw `python`.
-- **Adding dependencies**: add to `pyproject.toml` and run `uv sync --all-extras` to install and lock them.
+- **Adding dependencies**: add to `pyproject.toml` and run `uv sync --extra all --extra envs --extra gpt-oss --extra modelexpress --group dev` to install and lock the PrimeRL runtime. Do not use `uv sync --all-extras`; it also selects workspace-member extras such as `verifiers[rl]`, which intentionally conflict with PrimeRL's torch/vLLM runtime.
 - **Git dependency pins**: when pinning git dependencies in `pyproject.toml`, always use a small (7-char) commit hash for the `rev` field.
 - **Never edit `.venv/`**: the local virtual env is read-only. Edits there are silently overwritten by the next `uv sync` and don't propagate to teammates or CI. Reading files under `.venv/` to understand library behavior is fine; writing is not. To fix a dependency issue, update `pyproject.toml` (pin a fork via 7-char commit hash if needed), vendor the code into `src/`, or patch upstream.
 

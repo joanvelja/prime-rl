@@ -4,6 +4,18 @@ Use `prime_rl.entrypoints.launch` as the single repo-local launch surface. The
 `prime-launch` console alias exists after syncing the environment, but
 `python -m` works with `uv run --no-sync`.
 
+Before launching from an allocation, bind the shell to this checkout:
+
+```bash
+cd /lus/lfs1aip2/projects/a6r/joanv.a6r/work/prime-rl-main
+source scripts/env/activate-prime-rl.sh
+```
+
+The helper loads the repo-local `.env`, clears any mismatched active venv, sets
+`PRIME_RL_ROOT`, and activates `.venv`. Model/cache paths such as `HF_HOME`,
+`HF_HUB_CACHE`, and `UV_CACHE_DIR` should live in the repo `.env`; launch
+scripts should not hard-code another checkout path.
+
 ## RLVR
 
 Dry-run:
