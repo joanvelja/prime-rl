@@ -21,6 +21,10 @@ if [[ -f "$repo_root/.env" ]]; then
 fi
 set +a
 
+# Slingshot/Cassini NCCL fabric (single source of truth; see scripts/env/isambard-fabric.sh)
+# shellcheck disable=SC1091
+source "$repo_root/scripts/env/isambard-fabric.sh"
+
 export PRIME_RL_ROOT="$repo_root"
 export PATH="$repo_root/.venv/bin:$PATH"
 

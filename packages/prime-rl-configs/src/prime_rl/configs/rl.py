@@ -247,6 +247,15 @@ class MultiNodeDeploymentConfig(BaseDeploymentConfig):
     nodes_per_fsdp_group: int | None = None
     """Training nodes per FSDP island. Auto-sets ``trainer.dp_replicate = num_train_nodes / nodes_per_fsdp_group``."""
 
+    hosts: list[str] | None = None
+    """Optional hostnames for this lane's node-slice when launching in-allocation. When unset, the launcher uses the whole Slurm allocation as one lane. Mirrors ``GpuLayoutDeploymentConfig.hosts``."""
+
+    port_base: int | None = None
+    """Base port for this lane; every service port is an offset from it (see lane-contract). Distinct per lane so disjoint lanes never collide. When unset, the placement falls back to 29500."""
+
+    lane_tag: str | None = None
+    """Unique tag namespacing this lane's caches, shm, rdzv-id, and output subdir. When unset, the placement falls back to ``$SLURM_JOB_ID``."""
+
     @property
     def total_infer_nodes(self) -> int:
         return self.num_infer_nodes * self.num_infer_replicas
@@ -314,8 +323,10 @@ class RLConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_deployment(self):
         if self.deployment.type == "multi_node":
-            if self.slurm is None:
-                raise ValueError("Must use SLURM for multi-node deployment.")
+            # No [slurm] block => run in-allocation on a node-slice (the default).
+            # Whether an allocation actually exists is a launch-time concern, enforced in
+            # rl_multinode_allocation; checking SLURM_JOB_ID here would reject valid
+            # configs (incl. --dry-run) from a login node or laptop.
             if self.deployment.num_infer_nodes > 0 and not self.inference:
                 raise ValueError("Must configure inference when using multi-node deployment with inference nodes.")
             if self.deployment.num_infer_nodes == 0 and self.inference:
