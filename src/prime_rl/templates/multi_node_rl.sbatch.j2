@@ -175,7 +175,6 @@ cd $PROJECT_DIR
 [ -f .env ] && source .env
 source "$PROJECT_DIR/scripts/env/isambard-fabric.sh"
 source .venv/bin/activate
-uv sync --all-extras
 
 {% if pre_run_command %}
 # Pre-run command
