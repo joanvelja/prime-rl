@@ -2,7 +2,7 @@ import warnings
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from prime_rl.configs.inference import InferenceConfig
 from prime_rl.configs.inference import WeightBroadcastConfig as InferenceWeightBroadcastConfig
@@ -127,6 +127,24 @@ class SharedWeightBroadcastConfig(BaseConfig):
     """Use kernel-format FP8 quantized NCCL transfer for weight updates. When disabled, uses default HF checkpoint-format transfer."""
 
 
+class LaneHostsMixin(BaseConfig):
+    """Shared ``hosts`` field for the lane-carving deployments (gpu_layout, multi_node).
+
+    Optional hostnames selecting this lane's node-slice; when unset, the launcher uses
+    the whole Slurm allocation as one lane."""
+
+    hosts: list[str] | None = None
+
+    @field_validator("hosts", mode="before")
+    @classmethod
+    def _split_hosts(cls, v):
+        # Accept comma-separated CLI strings (`--deployment.hosts nid0,nid1`); pydantic
+        # otherwise only parses JSON lists. Idempotent for real lists.
+        if isinstance(v, str):
+            return [h.strip() for h in v.split(",") if h.strip()]
+        return v
+
+
 class BaseDeploymentConfig(BaseConfig):
     gpus_per_node: int = 8
     """GPUs per node."""
@@ -162,7 +180,7 @@ class GpuLayoutNodeConfig(BaseConfig):
     """GPU IDs on this node that run trainer ranks."""
 
 
-class GpuLayoutDeploymentConfig(BaseDeploymentConfig):
+class GpuLayoutDeploymentConfig(LaneHostsMixin, BaseDeploymentConfig):
     type: Literal["gpu_layout"] = "gpu_layout"
 
     nodes: list[GpuLayoutNodeConfig] = Field(min_length=1)
@@ -170,9 +188,6 @@ class GpuLayoutDeploymentConfig(BaseDeploymentConfig):
 
     inference_port_start: int = Field(8000, ge=1, le=65535)
     """First port assigned to per-GPU inference servers."""
-
-    hosts: list[str] | None = None
-    """Optional hostnames to use for this layout instead of the full Slurm node list."""
 
     @property
     def num_nodes(self) -> int:
@@ -232,7 +247,7 @@ class GpuLayoutDeploymentConfig(BaseDeploymentConfig):
         return self
 
 
-class MultiNodeDeploymentConfig(BaseDeploymentConfig):
+class MultiNodeDeploymentConfig(LaneHostsMixin, BaseDeploymentConfig):
     type: Literal["multi_node"] = "multi_node"
 
     num_train_nodes: int
@@ -246,9 +261,6 @@ class MultiNodeDeploymentConfig(BaseDeploymentConfig):
 
     nodes_per_fsdp_group: int | None = None
     """Training nodes per FSDP island. Auto-sets ``trainer.dp_replicate = num_train_nodes / nodes_per_fsdp_group``."""
-
-    hosts: list[str] | None = None
-    """Optional hostnames for this lane's node-slice when launching in-allocation. When unset, the launcher uses the whole Slurm allocation as one lane. Mirrors ``GpuLayoutDeploymentConfig.hosts``."""
 
     port_base: int | None = None
     """Base port for this lane; every service port is an offset from it (see lane-contract). Distinct per lane so disjoint lanes never collide. When unset, the placement falls back to 29500."""

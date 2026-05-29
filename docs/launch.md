@@ -120,15 +120,15 @@ distinct `port_base` (spaced ≥100 apart) and `lane_tag`:
 ```bash
 # lane 0 — nodes nid001000,nid001001
 uv run rl @ <base>.toml @ configs/isambard/rl_2node_inalloc.toml \
-  --deployment.hosts=nid001000,nid001001 \
-  --deployment.port-base=29500 \
-  --deployment.lane-tag=${SLURM_JOB_ID}-lane0 &
+  --deployment.hosts nid001000,nid001001 \
+  --deployment.port-base 29500 \
+  --deployment.lane-tag ${SLURM_JOB_ID}-lane0 &
 
 # lane 1 — nodes nid001002,nid001003
 uv run rl @ <base>.toml @ configs/isambard/rl_2node_inalloc.toml \
-  --deployment.hosts=nid001002,nid001003 \
-  --deployment.port-base=29700 \
-  --deployment.lane-tag=${SLURM_JOB_ID}-lane1 &
+  --deployment.hosts nid001002,nid001003 \
+  --deployment.port-base 29700 \
+  --deployment.lane-tag ${SLURM_JOB_ID}-lane1 &
 
 wait   # both lanes run concurrently on disjoint slices
 ```
