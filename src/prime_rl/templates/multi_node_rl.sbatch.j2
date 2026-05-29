@@ -71,7 +71,7 @@ ln -sfn inference/node_0.log $OUTPUT_DIR/logs/inference.log
 # BOTH the in-alloc lane path (LANE_* exported by launcher) AND the legacy
 # full-allocation sbatch path (LANE_* unset → job-globals).
 LANE_HOSTS=( ${LANE_HOSTS:-$(scontrol show hostnames "$SLURM_JOB_NODELIST")} )
-LANE_NNODES=${#LANE_HOSTS[@]}
+LANE_NNODES=$(echo "${LANE_HOSTS[*]}" | wc -w)  # count via wc; the bash array-length syntax trips Jinja's comment parser
 PORT_BASE=${PORT_BASE:-29500}
 LANE_TAG=${LANE_TAG:-$SLURM_JOB_ID}
 export LANE_TAG
