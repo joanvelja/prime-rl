@@ -150,6 +150,17 @@ Key facts:
   `scripts/env/isambard-fabric.sh` (`module load brics/nccl`). It is libfabric,
   not InfiniBand: no `ibv_devinfo` / `NCCL_IB_HCA`.
 
+### Pitfalls
+
+These trip people (and agents) consistently — the [`in-alloc-launch`](../skills/in-alloc-launch/SKILL.md) skill carries the same list for agent retrieval.
+
+- **Run `rl` plainly — never under `srun`/`sbatch`.** Inside an allocation `rl` is itself the head-node orchestrator and fans out via its own internal `srun --exact`. Wrapping it in an outer `srun` nests step creation and deadlocks.
+- **In-allocation requires NO `[slurm]` block** in the config. A `[slurm]` block switches to the sbatch-submit path; use it only when you do not already hold nodes.
+- **Set `weight_broadcast.type = "nccl"` for real runs.** It moves weights GPU→GPU over Slingshot — roughly an order of magnitude faster than the `filesystem` default at multi-billion-parameter scale, which round-trips a checkpoint through Lustre. It relies on the fabric that `activate-prime-rl.sh` loads.
+- **Concurrent lanes must be fully disjoint:** distinct host slices, `port-base` ≥100 apart, distinct `lane-tag`. The `lane-tag` namespaces outputs, rollouts, caches, and the broadcast rendezvous; reuse or omit it and concurrent lanes overwrite each other's rollouts (`FileNotFoundError` on `rollouts/step_N`).
+- **`vllm-router` must resolve for aarch64 in `uv.lock`.** If multi_node inference dies with `vllm-router: command not found`, the lock is missing the `manylinux_2_28_aarch64` router wheel. After any `pyproject.toml` dependency change, run `uv lock` and commit the regenerated lock alongside the manifest.
+- **`/tmp` and `/dev/shm` are a shared, RAM-backed tmpfs that is not wiped between jobs.** A lane can hit `OSError [Errno 28] No space left on device` from other users' leftover caches on a node — an environment condition, not a launcher bug. Pick fresh nodes or clear space rather than debugging it as code.
+
 ## Data Generation / Filtering
 
 Run a baseline generation config, then build a perfectible subset from the
