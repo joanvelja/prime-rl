@@ -762,10 +762,18 @@ def rl_multinode_allocation(config: RLConfig):
     lane_tag = deployment.lane_tag if deployment.lane_tag is not None else slurm_job_id
 
     # Namespace the output dir per lane so concurrent lanes don't clobber each other's
-    # script / subconfigs / logs. Only when an explicit lane_tag distinguishes the lane;
-    # the bare-$SLURM_JOB_ID fallback (single lane = whole alloc) keeps the flat layout.
+    # script / subconfigs / logs / rollouts / checkpoints / weight broadcasts. Only when an
+    # explicit lane_tag distinguishes the lane; the bare-$SLURM_JOB_ID fallback (single lane
+    # = whole alloc) keeps the flat layout.
     if deployment.lane_tag is not None:
         config.output_dir = config.output_dir / lane_tag
+        # propagate_shared_fields set the sub-config output_dirs at construction (trainer =
+        # output_dir, orchestrator = output_dir / "run_default") BEFORE this suffix runs, so
+        # re-home them under the lane dir too — otherwise the trainer (rollouts/checkpoints/
+        # broadcasts via multi_run_manager) and orchestrator operate on the un-namespaced
+        # base and concurrent lanes race on it. Preserves trainer == orchestrator.parent.
+        config.trainer.output_dir = config.output_dir
+        config.orchestrator.output_dir = config.output_dir / config.orchestrator.output_dir.name
 
     config_dir = config.output_dir / "configs"
     write_subconfigs(config, config_dir)
