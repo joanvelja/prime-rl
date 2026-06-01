@@ -1,0 +1,115 @@
+# Stage A debate SMOKE (KEEP) — validate the pack-driven think protocol e2e.
+#
+# Topology (self-play): debater_a / debater_b both route to the LIVE policy
+# (Qwen3.5-35B-A3B + LoRA "debate-r32") and BOTH train. Judge is FROZEN + external
+# (OpenRouter / Qwen3.5-9B). Reward = judge verdict only — no ground truth in loop.
+#
+# Think protocol (verifiers @ 9d2d2f0 + renderers @ d932460):
+#   - VISIBILITY is the pack's (selfplay.yaml think: debaters private, judge off):
+#     DebateEnv.split_response_channels recovers raw_content=<think>..</think>arg,
+#     public_channel=arg. visibility_policy: private -> judge/opponent see arg only
+#     (no CoT leak); own turns see raw (KEEP).
+#   - GENERATION params live in the sampling config (below) + the renderer:
+#     [orchestrator.renderer] preserve_all_thinking=true is the KEEP switch — the
+#     Qwen35Renderer parses the inline <think> on each past assistant turn and
+#     RE-EMITS it (extension property / Tinker strip_thinking_from_history=False).
+#     thinking_token_budget hard-caps the live CoT so </think> always closes.
+#
+# Launch (no live alloc): submit a fresh allocation via launch-script-mnode --new;
+# rl runs in-alloc inside it (NO [slurm] block — the launcher owns submission).
+
+output_dir = "outputs/isambard/debate_smoke_keep"
+max_steps = 10
+seq_len = 16384
+
+[log]
+level = "info"
+
+[model]
+name = "Qwen/Qwen3.5-35B-A3B"
+
+[trainer.model.lora]
+rank = 32
+alpha = 64
+
+[weight_broadcast]
+type = "filesystem"   # NCCL broadcast does not support LoRA
+
+[deployment]
+type = "multi_node"
+gpus_per_node = 4         # Isambard AIP2: 4 GH200/node
+num_train_nodes = 1
+num_infer_nodes = 1       # 2-node lane (1 train + 1 infer)
+
+[trainer.model]
+impl = "custom"
+seq_len = 16384
+attn = "flash_attention_3"
+optim_cpu_offload = true    # LoRA optimizer to host (small, host-safe)
+fsdp_cpu_offload = false    # offloading 35B params to Grace caused a HOST oom_kill; keep params on GPU
+cp = 2                      # context-parallel: split the debate seq across 2 GPUs
+cp_style = "ulysses"        # REQUIRED for Qwen3.5 DeltaNet (ring CP asserts on linear-attn)
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.optim]
+lr = 1e-5
+
+[orchestrator]
+batch_size = 8       # small so a full step lands inside the wall
+group_size = 8
+dump_trajectory = true   # persist full debate transcripts for inspection
+
+# KEEP: preserve each past assistant turn's <think> on re-render (renderers
+# @ d932460, Qwen35Renderer). name="auto" resolves Qwen3.5-35B-A3B -> Qwen35Renderer
+# and auto-detects enable_thinking; preserve_all_thinking flips the historical-think
+# default from drop -> keep (the extension property the kernel's prefix reuse is for).
+[orchestrator.renderer]
+name = "auto"
+preserve_all_thinking = true
+
+[orchestrator.advantage]
+type = "ema_per_member"   # REQUIRED for multi-agent (fail-loud assert: MA <=> ema_per_member)
+
+[orchestrator.model.lora]
+name = "debate-r32"
+
+[orchestrator.train.sampling]
+max_completion_tokens = 8192                      # total: up to 4k thinking + ~4k argument
+extra_body = { thinking_token_budget = 4096 }     # hard-cap live CoT; vLLM forces </think> at 4k
+
+# Frozen judge — external OpenRouter (Stage A). reasoning.enabled=false is the ONLY
+# disable that works for 9b (sweep); toggle to true here to let the judge reason later.
+[orchestrator.multi_agent.fixed.judge_target]
+members = ["judge"]
+model = "qwen/qwen3.5-9b"
+base_url = ["https://openrouter.ai/api/v1"]
+api_key_var = "OPENROUTER_API_KEY"
+request_mode = "chat"
+sampling = { extra_body = { reasoning = { enabled = false }, provider = { order = ["DeepInfra", "Together", "Venice"], allow_fallbacks = false } } }
+
+[[orchestrator.train.env]]
+id = "gpqa-debate"
+name = "gpqa-debate-smoke"
+
+[orchestrator.train.env.args]
+prompts_ref = "selfplay"
+subset = "gpqa_diamond"
+truth_member = "debater_a"   # measurement designation only; reward is judge-only
+
+[orchestrator.buffer]
+easy_threshold = 1.0      # permissive: zero-sum debate avg_reward ~ 0 => nothing filtered
+hard_threshold = -1.0
+
+[inference]
+gpu_memory_utilization = 0.85
+enable_lora = true
+max_lora_rank = 32
+
+[inference.model]
+max_model_len = 16384
+
+[inference.parallel]
+tp = 4
+dp = 1
