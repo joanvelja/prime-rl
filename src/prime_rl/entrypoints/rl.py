@@ -604,27 +604,31 @@ def _select_gpu_layout_hosts(deployment: GpuLayoutDeploymentConfig) -> list[str]
     return hosts
 
 
-def _gpu_layout_step_resources(host: str) -> tuple[int, int]:
-    """Derive per-step CPU and memory requests from physical node resources minus a margin."""
+def _gpu_layout_step_cpus(host: str) -> int:
+    """Derive the per-step CPU request from the node's physical CPUs minus a margin.
+
+    Memory is deliberately NOT requested from this probe. The in-allocation lane
+    sruns pass ``--mem=0`` ("all of the job's node memory") instead of a fixed,
+    near-physical figure: a fixed request fails step creation on nodes whose
+    un-wiped ``/dev/shm`` (RAM-backed tmpfs) has dropped schedulable RAM below it,
+    whereas ``--mem=0`` takes whatever the job holds and stays concurrent-lane safe.
+    """
     result = subprocess.run(["scontrol", "show", "node", host, "-o"], capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to query node resources for {host}: {result.stderr.strip()}")
 
     cpu_tot: int | None = None
-    real_mem_mb: int | None = None
     for token in result.stdout.split():
         if token.startswith("CPUTot="):
             cpu_tot = int(token.split("=", 1)[1])
-        elif token.startswith("RealMemory="):
-            real_mem_mb = int(token.split("=", 1)[1])
-    if cpu_tot is None or real_mem_mb is None:
-        raise RuntimeError(f"Could not parse CPUTot/RealMemory from scontrol for {host}: {result.stdout.strip()}")
+            break
+    if cpu_tot is None:
+        raise RuntimeError(f"Could not parse CPUTot from scontrol for {host}: {result.stdout.strip()}")
 
     cpus_per_task = cpu_tot - _GPU_LAYOUT_CPU_MARGIN
-    mem_mb = real_mem_mb - _GPU_LAYOUT_MEM_MARGIN_MB
-    if cpus_per_task < 1 or mem_mb < 1024:
-        raise RuntimeError(f"Node {host} too small for gpu_layout: CPUTot={cpu_tot} RealMemory={real_mem_mb}MB")
-    return cpus_per_task, mem_mb
+    if cpus_per_task < 1:
+        raise RuntimeError(f"Node {host} too small for a lane step: CPUTot={cpu_tot}")
+    return cpus_per_task
 
 
 def rl_gpu_layout_allocation(config: RLConfig):
@@ -648,7 +652,7 @@ def rl_gpu_layout_allocation(config: RLConfig):
     if not slurm_job_id:
         raise RuntimeError("gpu_layout allocation launcher requires SLURM_JOB_ID/SLURM_JOBID for srun --jobid.")
 
-    cpus_per_task, mem_mb = _gpu_layout_step_resources(hosts[0])
+    cpus_per_task = _gpu_layout_step_cpus(hosts[0])
     srun_cmd = [
         "srun",
         f"--jobid={slurm_job_id}",
@@ -657,7 +661,7 @@ def rl_gpu_layout_allocation(config: RLConfig):
         f"--nodes={config.deployment.num_nodes}",
         "--ntasks-per-node=1",
         f"--cpus-per-task={cpus_per_task}",
-        f"--mem={mem_mb}M",
+        "--mem=0",
         f"--gres=gpu:{config.deployment.gpus_per_node}",
         "--kill-on-bad-exit=1",
         f"--nodelist={','.join(hosts)}",
@@ -782,16 +786,17 @@ def rl_multinode_allocation(config: RLConfig):
     script_path = config.output_dir / MULTI_NODE_SCRIPT
     write_multi_node_script(config, config_dir, script_path)
 
-    # Per-task resources for the template's internal WORK sruns: --exact otherwise
-    # clamps each task to 1 CPU and starves vLLM/torch. Derive from the node (whole
-    # node minus a margin) via the same scontrol probe gpu_layout uses.
-    cpus_per_task, mem_mb = _gpu_layout_step_resources(hosts[0])
+    # Per-task CPUs for the template's internal WORK sruns: --exact otherwise clamps
+    # each task to 1 CPU and starves vLLM/torch. Memory is requested as --mem=0 (all
+    # of the job's node memory) by the template, not a fixed near-physical figure that
+    # fails step creation when un-wiped /dev/shm has eaten the node's schedulable RAM.
+    cpus_per_task = _gpu_layout_step_cpus(hosts[0])
 
     log_dir = get_log_dir(config.output_dir)
     logger.success(
         f"multi_node lane (direct bash, no outer srun):\n\n  bash {script_path.as_posix()}\n\n"
         f"hosts={hosts} LANE_NNODES={lane_nnodes} PORT_BASE={port_base} LANE_TAG={lane_tag} "
-        f"LANE_CPUS_PER_TASK={cpus_per_task} LANE_MEM_MB={mem_mb}M"
+        f"LANE_CPUS_PER_TASK={cpus_per_task} LANE_MEM_MB=0"
         f"\n\n  tail -F {log_dir}/trainer.log"
         f"\n  tail -F {log_dir}/inference.log"
     )
@@ -808,7 +813,7 @@ def rl_multinode_allocation(config: RLConfig):
         "PORT_BASE": str(port_base),
         "LANE_TAG": str(lane_tag),
         "LANE_CPUS_PER_TASK": str(cpus_per_task),
-        "LANE_MEM_MB": f"{mem_mb}M",
+        "LANE_MEM_MB": "0",
     }
     result = subprocess.run(["bash", script_path.as_posix()], env=env)
     if result.returncode != 0:
