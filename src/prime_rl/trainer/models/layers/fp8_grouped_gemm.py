@@ -271,9 +271,7 @@ class _ScaledGroupedFP8Gemm(torch.autograd.Function):
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
         xq, sx = _quant_rowwise_fp8(x)
         wq, sw = _quant_grouped_weight_fp8(weight)
-        out = torch._scaled_grouped_mm(
-            xq, wq, sx, sw, offs=offs, out_dtype=torch.bfloat16, use_fast_accum=True
-        )
+        out = torch._scaled_grouped_mm(xq, wq, sx, sw, offs=offs, out_dtype=torch.bfloat16, use_fast_accum=True)
         ctx.save_for_backward(x, weight, offs)
         return out
 
