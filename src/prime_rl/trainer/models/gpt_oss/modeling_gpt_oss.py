@@ -60,13 +60,9 @@ class GptOssTopKRouter(nn.Module):
         logits = F.linear(x, self.weight, self.bias)  # (T, num_experts)
         top_logits, top_indices = torch.topk(logits, self.top_k, dim=-1)
         top_scores = F.softmax(top_logits, dim=-1, dtype=top_logits.dtype)
-        # Pass int64 indices (no .float()) so histc returns an int64 count, matching the shared
-        # TokenChoiceTopKRouter. A float count breaks generate_permute_indices' Triton range() bound.
-        num_tokens_per_expert = torch.histc(
+        num_tokens_per_expert = torch.bincount(
             top_indices.reshape(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            minlength=self.num_experts,
         )
         return top_scores, top_indices, num_tokens_per_expert
 

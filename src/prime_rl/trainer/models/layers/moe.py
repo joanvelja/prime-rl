@@ -370,17 +370,19 @@ def _run_gpt_oss_experts_grouped_mm_impl(
     assert x.dim() == 2
 
     if fp8:
-        from prime_rl.trainer.models.layers.fp8_grouped_gemm import grouped_scaled_fp8_gemm
+        from prime_rl.trainer.models.layers.fp8_grouped_gemm import grouped_fp8_gemm
 
-        gate_up = grouped_scaled_fp8_gemm(x.bfloat16(), gate_up_proj.bfloat16(), offsets)
+        def grouped_mm(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return grouped_fp8_gemm(input, weight, offsets)
     else:
-        gate_up = torch._grouped_mm(x.bfloat16(), gate_up_proj.bfloat16(), offs=offsets)
+
+        def grouped_mm(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            return torch._grouped_mm(input, weight, offs=offsets)
+
+    gate_up = grouped_mm(x.bfloat16(), gate_up_proj.bfloat16())
     gate_up = gate_up + _broadcast_expert_bias(gate_up_proj_bias, num_tokens_per_expert, gate_up.shape[0]).bfloat16()
     h = _gpt_oss_apply_gate(gate_up)
-    if fp8:
-        out = grouped_scaled_fp8_gemm(h, down_proj.bfloat16(), offsets)
-    else:
-        out = torch._grouped_mm(h, down_proj.bfloat16(), offs=offsets)
+    out = grouped_mm(h, down_proj.bfloat16())
     out = out + _broadcast_expert_bias(down_proj_bias, num_tokens_per_expert, out.shape[0]).bfloat16()
     return out.type_as(x)
 

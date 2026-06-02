@@ -221,7 +221,16 @@ def grouped_fp8_gemm(
     Returns:
         (M, N) output tensor in bfloat16.
     """
-    return _GroupedFP8Gemm.apply(x, weight, offs)
+    if deep_gemm is not None:
+        return _GroupedFP8Gemm.apply(x, weight, offs)
+
+    if not hasattr(torch, "_scaled_grouped_mm"):
+        raise RuntimeError("FP8 grouped GEMM requires either deep_gemm or torch._scaled_grouped_mm")
+    if x.device.type != "cuda":
+        raise RuntimeError("torch._scaled_grouped_mm FP8 grouped GEMM requires CUDA tensors")
+    if torch.cuda.get_device_capability(x.device)[0] < 9:
+        raise RuntimeError("torch._scaled_grouped_mm FP8 grouped GEMM requires Hopper/sm90 or newer")
+    return _ScaledGroupedFP8Gemm.apply(x, weight, offs)
 
 
 # ── torch-native FP8 grouped GEMM (no deep_gemm) ─────────────────────────────
@@ -289,18 +298,3 @@ class _ScaledGroupedFP8Gemm(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             grad_weight = _grouped_grad_weight_bf16(x, grad_out, offs, weight.shape)
         return grad_x, grad_weight, None
-
-
-def grouped_scaled_fp8_gemm(x: torch.Tensor, weight: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    """torch-native fp8 grouped GEMM (Hopper/sm90), drop-in for torch._grouped_mm.
-
-    Args:
-        x: (M, K) token activations in bfloat16.
-        weight: (G, K, N) expert weights in bfloat16.
-        offs: (G,) int32 cumulative token counts per expert.
-
-    Returns:
-        (M, N) bfloat16 output. Forward and grad_x run in fp8; grad_weight (full
-        fine-tuning only) falls back to bf16.
-    """
-    return _ScaledGroupedFP8Gemm.apply(x, weight, offs)
