@@ -786,6 +786,54 @@ class _Gemma4VLMPrimeRLMixin:
             out[re.sub(r"(\.layers\.\d+)\.experts\.", r"\1.moe.experts.", key)] = value
         return out
 
+    def _prime_rl_forward_backbone(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        pixel_values: torch.FloatTensor | None = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        input_features: torch.FloatTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        input_features_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        image_position_ids: torch.LongTensor | None = None,
+        video_position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        mm_token_type_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPast | Gemma4ModelOutputWithPast:
+        model_kwargs = dict(kwargs)
+        model_kwargs.pop("return_dict", None)
+        if pixel_values is None and pixel_values_videos is None and input_features is None:
+            return self.model.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                return_dict=True,
+                **model_kwargs,
+            )
+        return self.model(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            input_features_mask=input_features_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            image_position_ids=image_position_ids,
+            video_position_ids=video_position_ids,
+            return_dict=True,
+            **model_kwargs,
+        )
+
     def init_buffers_post_meta(self) -> None:
         _init_gemma4_nonpersistent_buffers(self)
 
@@ -824,37 +872,22 @@ class Gemma4ForConditionalGeneration(_Gemma4VLMPrimeRLMixin, HFGemma4ForConditio
         assert use_cache is None or use_cache is False, "use_cache is not supported for custom Gemma4"
         assert past_key_values is None, "past_key_values is not supported for custom Gemma4"
 
-        model_kwargs = dict(kwargs)
-        model_kwargs.pop("return_dict", None)
-        if pixel_values is None and pixel_values_videos is None and input_features is None:
-            outputs: BaseModelOutputWithPast | Gemma4ModelOutputWithPast = self.model.language_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                return_dict=True,
-                **model_kwargs,
-            )
-        else:
-            outputs = self.model(
-                input_ids=input_ids,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                input_features=input_features,
-                attention_mask=attention_mask,
-                input_features_mask=input_features_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                mm_token_type_ids=mm_token_type_ids,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                image_position_ids=image_position_ids,
-                video_position_ids=video_position_ids,
-                return_dict=True,
-                **model_kwargs,
-            )
+        outputs = self._prime_rl_forward_backbone(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            input_features=input_features,
+            attention_mask=attention_mask,
+            input_features_mask=input_features_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            image_position_ids=image_position_ids,
+            video_position_ids=video_position_ids,
+            **kwargs,
+        )
 
         hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
