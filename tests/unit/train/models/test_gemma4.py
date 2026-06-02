@@ -113,7 +113,7 @@ def test_gemma4_custom_impl_registered_for_text_and_vlm() -> None:
         Gemma4ForConditionalGeneration as PrimeRLGemma4ForConditionalGeneration,
     )
 
-    text_config = _tiny_text_config()
+    text_config = _tiny_text_config(hidden_size_per_layer_input=0)
     vlm_config = _tiny_vlm_config()
 
     assert supports_custom_impl(text_config)
@@ -130,7 +130,7 @@ def test_gemma4_text_forward_matches_hf_logits() -> None:
     )
 
     torch.manual_seed(0)
-    config = _tiny_text_config()
+    config = _tiny_text_config(hidden_size_per_layer_input=0)
     with default_dtype(torch.float32):
         hf_model = HFGemma4ForCausalLM._from_config(config)
         prime_model = PrimeRLGemma4ForCausalLM._from_config(config)

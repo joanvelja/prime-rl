@@ -82,9 +82,7 @@ def _rotary_embedding_config(config: Gemma4TextConfig, layer_type: str) -> Rotar
     )
 
 
-def _sliding_window_mask(
-    q_len: int, k_len: int, window: int, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
+def _sliding_window_mask(q_len: int, k_len: int, window: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     # The additive mask MUST share the query/key/value dtype: SDPA's fused GPU kernels produce
     # NaN when handed an fp32 `-inf` bias against bf16 q/k/v (the CPU math backend silently
     # upcasts and hides this). Build the sentinel in `dtype` so every backend agrees.
@@ -213,9 +211,7 @@ def _build_gemma_self_attn(config: Gemma4TextConfig, layer_idx: int) -> "Gemma4S
     is_sliding = config.layer_types[layer_idx] == "sliding_attention"
     head_dim = config.head_dim if is_sliding else (config.global_head_dim or config.head_dim)
     use_alternative_attention = bool(config.attention_k_eq_v) and not is_sliding
-    num_key_value_heads = (
-        config.num_global_key_value_heads if use_alternative_attention else config.num_key_value_heads
-    )
+    num_key_value_heads = config.num_global_key_value_heads if use_alternative_attention else config.num_key_value_heads
 
     attn_config = AttentionConfig(
         hidden_size=config.hidden_size,
@@ -259,7 +255,9 @@ class Gemma4DecoderLayer(GradientCheckpointingLayer):
         self.input_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
         self.post_attention_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
         self.pre_feedforward_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
-        self.post_feedforward_layernorm = RMSNorm(RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps))
+        self.post_feedforward_layernorm = RMSNorm(
+            RMSNormConfig(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
+        )
         # Persistent per-layer output scalar (loaded from checkpoint; ones at init).
         self.register_buffer("layer_scalar", torch.ones(1))
 
@@ -826,23 +824,37 @@ class Gemma4ForConditionalGeneration(_Gemma4VLMPrimeRLMixin, HFGemma4ForConditio
         assert use_cache is None or use_cache is False, "use_cache is not supported for custom Gemma4"
         assert past_key_values is None, "past_key_values is not supported for custom Gemma4"
 
-        outputs: Gemma4ModelOutputWithPast = self.model(
-            input_ids=input_ids,
-            pixel_values=pixel_values,
-            pixel_values_videos=pixel_values_videos,
-            input_features=input_features,
-            attention_mask=attention_mask,
-            input_features_mask=input_features_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            mm_token_type_ids=mm_token_type_ids,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            image_position_ids=image_position_ids,
-            video_position_ids=video_position_ids,
-            return_dict=True,
-            **kwargs,
-        )
+        model_kwargs = dict(kwargs)
+        model_kwargs.pop("return_dict", None)
+        if pixel_values is None and pixel_values_videos is None and input_features is None:
+            outputs: BaseModelOutputWithPast | Gemma4ModelOutputWithPast = self.model.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                return_dict=True,
+                **model_kwargs,
+            )
+        else:
+            outputs = self.model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                input_features=input_features,
+                attention_mask=attention_mask,
+                input_features_mask=input_features_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                mm_token_type_ids=mm_token_type_ids,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                image_position_ids=image_position_ids,
+                video_position_ids=video_position_ids,
+                return_dict=True,
+                **model_kwargs,
+            )
 
         hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
