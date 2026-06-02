@@ -157,6 +157,7 @@ def test_gemma4_text_forward_preserves_unpacked_batched_sdpa() -> None:
     config = _tiny_text_config(hidden_size_per_layer_input=0)
     with default_dtype(torch.float32):
         model = PrimeRLGemma4ForCausalLM._from_config(config)
+    inject_prime_lm_head(model, chunk_size=None)
 
     batched_input_ids = torch.randint(3, config.vocab_size - 1, (2, 7))
     with torch.no_grad():
