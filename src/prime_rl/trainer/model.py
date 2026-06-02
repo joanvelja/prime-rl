@@ -688,6 +688,10 @@ def setup_tokenizer(config: TokenizerConfig) -> PreTrainedTokenizer:
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(config.name, **tokenizer_kwargs)
+    # ``config=`` only resolves the tokenizer class at load time, but the tokenizer keeps it
+    # in init_kwargs; for gemma-4 that's a Gemma4Config object that breaks save_pretrained()'s
+    # JSON dump (i.e. disk checkpointing). Drop it from the serialized state.
+    tokenizer.init_kwargs.pop("config", None)
     if config.chat_template is not None:
         path = Path(config.chat_template)
         if path.is_file():
