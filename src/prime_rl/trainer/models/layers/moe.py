@@ -19,12 +19,13 @@ def _expert_parallel(func):
     """Variable-arity reimplementation of torchtitan's ``expert_parallel`` wrapper.
 
     Torchtitan's upstream wrapper hardcodes a 3-weight ``(w1, w2, w3, x, num_tokens)``
-    signature, so it rejects expert fns with different parameter layouts.
+    signature, so it rejects expert fns with different parameter layouts, including gpt-oss's
+    4-tensor ``(gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias)`` layout.
     We vendor the wrapper body verbatim but split the leading positionals as ``*weights``,
-    so 3-weight (GroupedExperts), 2-weight (GemmaGroupedExperts), and 2+dummy
-    (NonGatedGroupedExperts) fns all dispatch uniformly. Behaviour for the 3-weight
-    path is byte-identical to upstream: the wrapper only touches ``x`` and reads
-    ``weights[0].shape[0]``; weights pass through.
+    so 3-weight (GroupedExperts), 2-weight (GemmaGroupedExperts), 2+dummy
+    (NonGatedGroupedExperts), and gpt-oss 4-tensor fns all dispatch uniformly.
+    Behaviour for the 3-weight path is byte-identical to upstream: the wrapper only touches
+    ``x`` and reads ``weights[0].shape[0]``; weights pass through.
     """
     with warnings.catch_warnings():
         warnings.filterwarnings(
