@@ -207,6 +207,17 @@ def _check_unsupported(config: Gemma4TextConfig) -> None:
         raise NotImplementedError("gemma-4 per-layer-input is not supported in the prime-rl port")
 
 
+def _check_supported_config(config: Gemma4TextConfig) -> None:
+    _check_unsupported(config)
+    attn_impl = _prime_attn_impl(config)
+    if attn_impl != "sdpa":
+        global_head_dim = config.global_head_dim or config.head_dim
+        raise ValueError(
+            f"gemma-4 requires attn='sdpa': its head_dim={global_head_dim} global attention layers have no flash "
+            f"kernel; got attn={attn_impl!r}"
+        )
+
+
 def _build_gemma_self_attn(config: Gemma4TextConfig, layer_idx: int) -> "Gemma4SDPAAttention":
     is_sliding = config.layer_types[layer_idx] == "sliding_attention"
     head_dim = config.head_dim if is_sliding else (config.global_head_dim or config.head_dim)
@@ -225,12 +236,6 @@ def _build_gemma_self_attn(config: Gemma4TextConfig, layer_idx: int) -> "Gemma4S
         qk_norm_type="per_head",
         scaling=1.0,
     )
-    attn_impl = _prime_attn_impl(config)
-    if attn_impl != "sdpa":
-        raise ValueError(
-            f"gemma-4 requires attn='sdpa': its head_dim={head_dim} global attention layers have no flash kernel; "
-            f"got attn={attn_impl!r}"
-        )
     self_attn = Gemma4SDPAAttention(attn_config, use_alternative_attention=use_alternative_attention)
     self_attn.sliding_window = config.sliding_window if is_sliding else None
     return self_attn
@@ -239,7 +244,6 @@ def _build_gemma_self_attn(config: Gemma4TextConfig, layer_idx: int) -> "Gemma4S
 class Gemma4DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Gemma4TextConfig, layer_idx: int):
         super().__init__()
-        _check_unsupported(config)
 
         self.hidden_size = config.hidden_size
         self.self_attn = _build_gemma_self_attn(config, layer_idx)
@@ -325,7 +329,6 @@ class Gemma4MoEDecoderLayer(GradientCheckpointingLayer):
 
     def __init__(self, config: Gemma4TextConfig, layer_idx: int):
         super().__init__()
-        _check_unsupported(config)
 
         self.hidden_size = config.hidden_size
         self.self_attn = _build_gemma_self_attn(config, layer_idx)
@@ -565,6 +568,7 @@ class Gemma4PreTrainedModel(PreTrainedModelPrimeRL):
 class Gemma4Model(Gemma4PreTrainedModel):
     def __init__(self, config: Gemma4TextConfig):
         super().__init__(config)
+        _check_supported_config(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -600,10 +604,16 @@ class Gemma4Model(Gemma4PreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if position_ids is None:
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0)
+            position_ids = (
+                torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device)
+                .unsqueeze(0)
+                .expand(inputs_embeds.shape[0], -1)
+            )
 
-        # SDPA packed-sequence boundaries (also bounds the sliding window per sub-sequence).
-        if cu_seqlens is None or max_seqlen is None:
+        if (cu_seqlens is None) != (max_seqlen is None):
+            raise ValueError("cu_seqlens and max_seqlen must be provided together")
+
+        if cu_seqlens is None and inputs_embeds.shape[0] == 1:
             cu_seqlens, max_seqlen = infer_cu_seqlens_from_position_ids(position_ids)
 
         hidden_states = inputs_embeds
