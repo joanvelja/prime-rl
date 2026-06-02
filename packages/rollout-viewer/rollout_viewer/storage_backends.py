@@ -117,18 +117,14 @@ class HuggingFaceBackend(StorageBackend):
         self.revision = revision
         self.api = HfApi(token=token)
         # Ensure the (private) dataset repo exists before any operation.
-        self.api.create_repo(
-            repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True, token=token
-        )
+        self.api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True, token=token)
         self._pending: dict[str, bytes] = {}
         self._remote_files: set[str] | None = None
 
     def _remote_listing(self) -> set[str]:
         if self._remote_files is None:
             self._remote_files = set(
-                self.api.list_repo_files(
-                    repo_id=self.repo_id, repo_type="dataset", revision=self.revision
-                )
+                self.api.list_repo_files(repo_id=self.repo_id, repo_type="dataset", revision=self.revision)
             )
         return self._remote_files
 
@@ -185,9 +181,7 @@ class HuggingFaceBackend(StorageBackend):
                 remote_sizes[entry.path] = size
         for path, data in self._pending.items():
             remote_sizes[path] = len(data)
-        return StorageStat(
-            total_bytes=sum(remote_sizes.values()), object_count=len(remote_sizes)
-        )
+        return StorageStat(total_bytes=sum(remote_sizes.values()), object_count=len(remote_sizes))
 
     def flush(self, commit_message: str = "rollout-viewer sync") -> None:
         """Commit all buffered writes as ONE commit, then clear the buffer."""
@@ -195,10 +189,7 @@ class HuggingFaceBackend(StorageBackend):
             return
         from huggingface_hub import CommitOperationAdd
 
-        ops = [
-            CommitOperationAdd(path_in_repo=path, path_or_fileobj=data)
-            for path, data in self._pending.items()
-        ]
+        ops = [CommitOperationAdd(path_in_repo=path, path_or_fileobj=data) for path, data in self._pending.items()]
         self.api.create_commit(
             repo_id=self.repo_id,
             repo_type="dataset",

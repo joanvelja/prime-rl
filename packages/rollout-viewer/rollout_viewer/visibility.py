@@ -121,9 +121,7 @@ def prompt_delta(prev_prompt: list[Message], curr_prompt: list[Message]) -> list
     return delta
 
 
-def verify_episode(
-    ep: Episode, policy: VisibilityPolicy = DebateVisibilityPolicy()
-) -> list[VisibilityFinding]:
+def verify_episode(ep: Episode, policy: VisibilityPolicy = DebateVisibilityPolicy()) -> list[VisibilityFinding]:
     """Audit per-seat visibility for one episode against ``policy``.
 
     For every turn: detect LEAKAGE — content attributed (via the ``[seat]``
@@ -199,9 +197,7 @@ def verify_episode(
         prev_idx = last_turn_of.get(step.member_id)
         if prev_idx is not None:
             delta = prompt_delta(ep.steps[prev_idx].prompt, step.prompt)
-            structure_finding = _check_delta_structure(
-                step=step, delta=delta, allowed=allowed, seats=seats
-            )
+            structure_finding = _check_delta_structure(step=step, delta=delta, allowed=allowed, seats=seats)
             if structure_finding is not None:
                 findings.append(structure_finding)
 
@@ -220,9 +216,7 @@ def _check_delta_structure(
     (that case is already a leakage finding; here we flag a delta carrying an
     unexpected role, which would mean a seat-view was reshaped, not extended).
     """
-    unexpected = [
-        m for m in delta if m.role not in ("assistant", "user", "system")
-    ]
+    unexpected = [m for m in delta if m.role not in ("assistant", "user", "system")]
     # Newly-appearing system turns mid-episode are a structural anomaly: the
     # system prompt is fixed per seat and should never be injected after turn 0.
     new_system = [m for m in delta if m.role == "system"]

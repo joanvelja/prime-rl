@@ -166,11 +166,7 @@ def _index_row(ep: Episode, line: int) -> dict:
         winner = ep.mar.categorical.get("winner")
         # per-seat FINAL answer letters (keyed "final_answer/<seat>") → {seat: letter},
         # so the list can show the answer spread across a question's group of debates.
-        seat_answers = {
-            k.split("/", 1)[1]: v
-            for k, v in ep.mar.categorical.items()
-            if k.startswith("final_answer/")
-        }
+        seat_answers = {k.split("/", 1)[1]: v for k, v in ep.mar.categorical.items() if k.startswith("final_answer/")}
         answers = seat_answers or None
     return {
         "run_id": ep.run_id,
@@ -219,14 +215,10 @@ _ARROW_SCHEMA = pa.schema(
     ]
 )
 
-assert tuple(_ARROW_SCHEMA.names) == INDEX_COLUMNS, (
-    "index Arrow schema drifted from INDEX_COLUMNS"
-)
+assert tuple(_ARROW_SCHEMA.names) == INDEX_COLUMNS, "index Arrow schema drifted from INDEX_COLUMNS"
 
 
-def build_index_rows(
-    episodes: list[Episode], transcript_lines: list[int] | None = None
-) -> list[dict]:
+def build_index_rows(episodes: list[Episode], transcript_lines: list[int] | None = None) -> list[dict]:
     """Index rows in source order.
 
     ``transcript_line`` points at the episode's line in its step shard. By default
@@ -235,9 +227,7 @@ def build_index_rows(
     positionally — e.g. ``-1`` for an episode whose transcript was not retained.
     """
     if transcript_lines is not None and len(transcript_lines) != len(episodes):
-        raise ValueError(
-            f"transcript_lines length {len(transcript_lines)} != episodes {len(episodes)}"
-        )
+        raise ValueError(f"transcript_lines length {len(transcript_lines)} != episodes {len(episodes)}")
     line_by_shard: dict[str, int] = {}
     rows: list[dict] = []
     for i, ep in enumerate(episodes):
@@ -251,9 +241,7 @@ def build_index_rows(
     return rows
 
 
-def serialize_index(
-    episodes: list[Episode], transcript_lines: list[int] | None = None
-) -> bytes:
+def serialize_index(episodes: list[Episode], transcript_lines: list[int] | None = None) -> bytes:
     """Episodes → parquet+zstd bytes (exactly ``INDEX_COLUMNS``)."""
     rows = build_index_rows(episodes, transcript_lines)
     columns = {name: [r[name] for r in rows] for name in INDEX_COLUMNS}
@@ -276,9 +264,7 @@ def write_index(
     """
     for ep in episodes:
         if ep.run_id != run_id:
-            raise ValueError(
-                f"episode run_id={ep.run_id!r} does not match index run_id={run_id!r}"
-            )
+            raise ValueError(f"episode run_id={ep.run_id!r} does not match index run_id={run_id!r}")
     backend.write(index_path(run_id), serialize_index(episodes, transcript_lines))
     return index_path(run_id)
 
@@ -306,10 +292,7 @@ def write_transcript_shard(
     """Write ``transcripts/{run_id}/step-{step:05d}.jsonl.gz`` for one step."""
     for ep in episodes_of_step:
         if ep.run_id != run_id or ep.step != step:
-            raise ValueError(
-                f"episode ({ep.run_id!r}, step={ep.step}) does not match shard "
-                f"({run_id!r}, step={step})"
-            )
+            raise ValueError(f"episode ({ep.run_id!r}, step={ep.step}) does not match shard ({run_id!r}, step={step})")
     path = transcript_path(run_id, step)
     backend.write(path, serialize_transcript_shard(episodes_of_step))
     return path
@@ -317,9 +300,7 @@ def write_transcript_shard(
 
 def write_setup(setup: dict, backend: StorageBackend, run_id: str) -> str:
     """Write ``index/{run_id}/setup.json`` — the run's distilled config setup."""
-    backend.write(
-        setup_path(run_id), json.dumps(setup, indent=2).encode("utf-8")
-    )
+    backend.write(setup_path(run_id), json.dumps(setup, indent=2).encode("utf-8"))
     return setup_path(run_id)
 
 

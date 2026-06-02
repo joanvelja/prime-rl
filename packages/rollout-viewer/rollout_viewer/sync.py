@@ -88,8 +88,7 @@ def _build_reasoning_encoder(setup: dict | None) -> ReasoningEncoder | None:
         tok = Tokenizer.from_pretrained(model_name)
     except Exception as e:  # noqa: BLE001 — any load failure degrades to the estimate
         logger.warning(
-            "could not load tokenizer %r (%s: %s) — reasoning token counts will be "
-            "estimated client-side",
+            "could not load tokenizer %r (%s: %s) — reasoning token counts will be estimated client-side",
             model_name,
             type(e).__name__,
             e,
@@ -98,9 +97,7 @@ def _build_reasoning_encoder(setup: dict | None) -> ReasoningEncoder | None:
     return lambda s: len(tok.encode(s, add_special_tokens=False).ids)
 
 
-def _annotate_reasoning_tokens(
-    episodes: list[Episode], encode: ReasoningEncoder
-) -> None:
+def _annotate_reasoning_tokens(episodes: list[Episode], encode: ReasoningEncoder) -> None:
     """Set ``Message.reasoning_tokens`` on every message carrying reasoning text."""
     for ep in episodes:
         for st in ep.steps:
@@ -241,9 +238,7 @@ def sync_source(
 
     for step_dir in step_dirs:
         result = sync_step(step_dir, backend, run_id=run_id, rho=rho, encode=encode)
-        per_step.append(
-            {k: v for k, v in result.items() if k not in ("episodes", "mask")}
-        )
+        per_step.append({k: v for k, v in result.items() if k not in ("episodes", "mask")})
         # transcript_line: retained episodes get their 0-based shard offset (source
         # order); dropped episodes get NOT_RETAINED.
         line = 0
@@ -288,16 +283,10 @@ def main() -> None:
         prog="rollout-sync",
         description="Strip + gzip + parquet rollouts into a viewer store.",
     )
-    parser.add_argument(
-        "--source", required=True, type=Path, help="dir containing step_N/ subdirs"
-    )
+    parser.add_argument("--source", required=True, type=Path, help="dir containing step_N/ subdirs")
     parser.add_argument("--run-id", required=True, help="experiment run id (cross-run axis)")
-    parser.add_argument(
-        "--backend", required=True, choices=("local", "hf"), help="storage backend"
-    )
-    parser.add_argument(
-        "--dest", required=True, help="local store path (local) or HF dataset repo id (hf)"
-    )
+    parser.add_argument("--backend", required=True, choices=("local", "hf"), help="storage backend")
+    parser.add_argument("--dest", required=True, help="local store path (local) or HF dataset repo id (hf)")
     parser.add_argument(
         "--rho",
         type=float,

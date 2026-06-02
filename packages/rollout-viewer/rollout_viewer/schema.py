@@ -202,9 +202,7 @@ class Episode(BaseModel):
     task: dict[str, Any] = Field(default_factory=dict)  # question / answer / info
 
     @classmethod
-    def from_rollout_output(
-        cls, raw: dict[str, Any], *, run_id: str, step: int
-    ) -> "Episode":
+    def from_rollout_output(cls, raw: dict[str, Any], *, run_id: str, step: int) -> "Episode":
         """Normalize one raw verifiers ``RolloutOutput`` jsonl record.
 
         Source keys used (measured from a real prime-rl debate dump):
@@ -223,11 +221,7 @@ class Episode(BaseModel):
         for s in steps:
             if s.member_id is not None and s.member_id not in members:
                 members.append(s.member_id)
-        mar = (
-            MultiAgentScore.from_mar_score(raw["mar_score"])
-            if raw.get("mar_score") is not None
-            else None
-        )
+        mar = MultiAgentScore.from_mar_score(raw["mar_score"]) if raw.get("mar_score") is not None else None
         return cls(
             example_id=str(raw["example_id"]),
             rollout_id=_opt_str(raw.get("rollout_id")),
@@ -263,11 +257,32 @@ def detect_kind(steps: list[Step], mar: MultiAgentScore | None) -> EpisodeKind:
 # RESERVED_ROLLOUT_OUTPUT_KEYS plus viewer-internal fields).
 _RESERVED: frozenset[str] = frozenset(
     {
-        "example_id", "rollout_id", "trajectory_id", "task", "prompt", "completion",
-        "answer", "info", "reward", "advantage", "timing", "is_completed",
-        "is_truncated", "stop_condition", "metrics", "error", "trajectory",
-        "tool_defs", "token_usage", "mar_score", "sampling_args", "env_name",
-        "filters", "is_filtered", "multi_agent_dispatch_id", "agreement",
+        "example_id",
+        "rollout_id",
+        "trajectory_id",
+        "task",
+        "prompt",
+        "completion",
+        "answer",
+        "info",
+        "reward",
+        "advantage",
+        "timing",
+        "is_completed",
+        "is_truncated",
+        "stop_condition",
+        "metrics",
+        "error",
+        "trajectory",
+        "tool_defs",
+        "token_usage",
+        "mar_score",
+        "sampling_args",
+        "env_name",
+        "filters",
+        "is_filtered",
+        "multi_agent_dispatch_id",
+        "agreement",
     }
 )
 
@@ -304,9 +319,7 @@ def _token_counts(raw: dict[str, Any]) -> tuple[int | None, int | None]:
     if tokens is None:
         return 0, 0
     if not isinstance(tokens, dict):
-        raise TypeError(
-            f"tokens must be a mapping or null, got {type(tokens).__name__}: {tokens!r}"
-        )
+        raise TypeError(f"tokens must be a mapping or null, got {type(tokens).__name__}: {tokens!r}")
     return _id_len(tokens, "prompt_ids"), _id_len(tokens, "completion_ids")
 
 

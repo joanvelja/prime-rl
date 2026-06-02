@@ -92,10 +92,7 @@ def infer_run_schedule(episodes: list[Episode]) -> Schedule:
         top = max(seqs.items(), key=lambda kv: (kv[1], len(kv[0])))
         canonical = top[0]
 
-    slots = [
-        TurnSlot(index=i, actor=actor, phase=phase)
-        for i, (actor, phase) in enumerate(canonical)
-    ]
+    slots = [TurnSlot(index=i, actor=actor, phase=phase) for i, (actor, phase) in enumerate(canonical)]
     return Schedule(regime=regime, slots=slots, source="inferred")
 
 
@@ -114,9 +111,7 @@ def align(episode: Episode, schedule: Schedule) -> list[AlignedTurn]:
         slot = schedule.slots[i] if i < len(schedule.slots) else None
         step = episode.steps[i] if i < len(episode.steps) else None
         if slot is not None and step is not None:
-            status: AlignStatus = (
-                "matched" if step_actor(step) == slot.actor else "deviated"
-            )
+            status: AlignStatus = "matched" if step_actor(step) == slot.actor else "deviated"
         elif slot is not None:
             status = "truncated"
         else:

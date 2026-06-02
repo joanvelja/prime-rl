@@ -147,9 +147,7 @@ class IndexCache:
 # A diagnostics-rollup key is dotted ``<scope>.<quantity>.<field>`` (e.g.
 # ``episode.mismatch_kl.mean``). The quantity blocks carry sum/count so a rollup
 # field re-aggregates as Σsum/Σcount; quantities are pinned in contracts.md.
-_DIAG_QUANTITIES: frozenset[str] = frozenset(
-    {"importance_ratio", "mismatch_kl", "entropy"}
-)
+_DIAG_QUANTITIES: frozenset[str] = frozenset({"importance_ratio", "mismatch_kl", "entropy"})
 
 
 def _json_double_expr(col: str, path: str) -> str:
@@ -175,7 +173,7 @@ def _select_expr(sort: str) -> str:
         (_TOKENS_PREFIX, "tokens"),
     ):
         if sort.startswith(prefix):
-            return _json_double_expr(col, sort[len(prefix):])
+            return _json_double_expr(col, sort[len(prefix) :])
     raise HTTPException(status_code=400, detail=f"unsortable key: {sort!r}")
 
 
@@ -196,7 +194,7 @@ def _compare_exprs(metric: str) -> tuple[str, str]:
         never a NULL-inflated denominator.
     """
     if metric.startswith(_DIAG_PREFIX):
-        path = metric[len(_DIAG_PREFIX):]
+        path = metric[len(_DIAG_PREFIX) :]
         segs = path.split(".")
         # diag.<scope>.<quantity>.<field> → re-aggregate the ValueSummary.
         if len(segs) == 3 and segs[1] in _DIAG_QUANTITIES:
@@ -215,8 +213,10 @@ def _compare_exprs(metric: str) -> tuple[str, str]:
 
 def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | None = None) -> FastAPI:
     """Build the FastAPI app with a concrete ``backend`` injected."""
-    cdir = Path(cache_dir) if cache_dir is not None else Path(
-        os.environ.get("ROLLOUT_VIEWER_CACHE", ".rollout-viewer-cache")
+    cdir = (
+        Path(cache_dir)
+        if cache_dir is not None
+        else Path(os.environ.get("ROLLOUT_VIEWER_CACHE", ".rollout-viewer-cache"))
     )
 
     @asynccontextmanager
@@ -248,9 +248,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
         no shard line and are simply absent here (their index row still exists).
         """
         parquet = app.state.index.parquet_for(run_id)
-        cur = app.state.index.con.execute(
-            "SELECT DISTINCT step FROM read_parquet(?) ORDER BY step", [str(parquet)]
-        )
+        cur = app.state.index.con.execute("SELECT DISTINCT step FROM read_parquet(?) ORDER BY step", [str(parquet)])
         steps = [int(r[0]) for r in cur.fetchall()]
         episodes: list[Episode] = []
         for step in steps:
@@ -281,10 +279,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
 
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
-        return [
-            {"run_id": r.run_id, "steps": r.steps, "updated": r.updated}
-            for r in backend.list_runs()
-        ]
+        return [{"run_id": r.run_id, "steps": r.steps, "updated": r.updated} for r in backend.list_runs()]
 
     @app.get("/api/runs/{run_id}/episodes")
     def list_episodes(
@@ -356,9 +351,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
                 ),
             }
         if not backend.exists(shard):
-            raise HTTPException(
-                status_code=404, detail=f"no transcript shard: {shard}"
-            )
+            raise HTTPException(status_code=404, detail=f"no transcript shard: {shard}")
         blob = gzip.decompress(backend.read(shard))
         # One stripped Episode.model_dump() per line; return the FULL episode at
         # `line`. No truncation of messages/steps anywhere on this path.
@@ -396,10 +389,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
         return {
             "regime": schedule.regime,
             "source": schedule.source,
-            "slots": [
-                {"index": s.index, "actor": s.actor, "phase": s.phase}
-                for s in schedule.slots
-            ],
+            "slots": [{"index": s.index, "actor": s.actor, "phase": s.phase} for s in schedule.slots],
         }
 
     @app.get("/api/runs/{run_id}/schedule")
@@ -458,10 +448,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
             )
         return {
             "example_id": example_id,
-            "by_step": [
-                {"step": step, "episodes": by_step[step]}
-                for step in sorted(by_step)
-            ],
+            "by_step": [{"step": step, "episodes": by_step[step]} for step in sorted(by_step)],
         }
 
     @app.get("/api/compare")
@@ -480,23 +467,15 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
         series: dict[str, list[dict[str, float]]] = {}
         for run_id in run_ids:
             parquet = app.state.index.parquet_for(run_id)
-            sql = (
-                f"SELECT step, {value_sql} AS value, {n_sql} AS n "
-                "FROM read_parquet(?) GROUP BY step ORDER BY step"
-            )
+            sql = f"SELECT step, {value_sql} AS value, {n_sql} AS n FROM read_parquet(?) GROUP BY step ORDER BY step"
             try:
                 cur = app.state.index.con.execute(sql, [str(parquet)])
                 rows = cur.fetchall()
             except duckdb.Error as exc:
-                raise HTTPException(
-                    status_code=400, detail=f"compare query failed: {exc}"
-                ) from exc
+                raise HTTPException(status_code=400, detail=f"compare query failed: {exc}") from exc
             # n is NULL only when no episode in the step carried the quantity
             # (SUM over an empty set); report it as 0, an honest count, not a guess.
-            series[run_id] = [
-                {"step": int(s), "value": v, "n": int(n) if n is not None else 0}
-                for (s, v, n) in rows
-            ]
+            series[run_id] = [{"step": int(s), "value": v, "n": int(n) if n is not None else 0} for (s, v, n) in rows]
         return {"metric": metric, "series": series}
 
     @app.get("/api/stream")
@@ -516,13 +495,7 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
                     last = snap
                     yield {
                         "event": "update",
-                        "data": json.dumps(
-                            {
-                                "runs": {
-                                    rid: steps for rid, steps in snap.runs.items()
-                                }
-                            }
-                        ),
+                        "data": json.dumps({"runs": {rid: steps for rid, steps in snap.runs.items()}}),
                     }
                 await asyncio.sleep(poll)
 
@@ -536,15 +509,15 @@ def create_app(backend: StorageBackend, *, cache_dir: str | os.PathLike[str] | N
         # Chooser: flip between the two design directions and judge live.
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>rollout-viewer</title>"
-            "<body style=\"background:oklch(20% .012 235);color:oklch(86% .02 235);"
+            '<body style="background:oklch(20% .012 235);color:oklch(86% .02 235);'
             "font:15px 'Spline Sans Mono',ui-monospace,monospace;display:grid;"
-            "place-items:center;height:100vh;margin:0;gap:22px\">"
-            "<div style=\"letter-spacing:.04em;color:oklch(62% .02 235)\">rollout-viewer — pick a direction</div>"
-            "<div style=\"display:flex;gap:22px\">"
-            "<a href=\"/a/\" style=\"color:oklch(80% .13 188);border:1px solid oklch(34% .02 235);"
-            "padding:20px 30px;border-radius:8px;text-decoration:none\">A · instrument / oscilloscope</a>"
-            "<a href=\"/b/\" style=\"color:oklch(74% .07 245);border:1px solid oklch(34% .02 235);"
-            "padding:20px 30px;border-radius:8px;text-decoration:none\">B · wire-protocol analyzer</a>"
+            'place-items:center;height:100vh;margin:0;gap:22px">'
+            '<div style="letter-spacing:.04em;color:oklch(62% .02 235)">rollout-viewer — pick a direction</div>'
+            '<div style="display:flex;gap:22px">'
+            '<a href="/a/" style="color:oklch(80% .13 188);border:1px solid oklch(34% .02 235);'
+            'padding:20px 30px;border-radius:8px;text-decoration:none">A · instrument / oscilloscope</a>'
+            '<a href="/b/" style="color:oklch(74% .07 245);border:1px solid oklch(34% .02 235);'
+            'padding:20px 30px;border-radius:8px;text-decoration:none">B · wire-protocol analyzer</a>'
             "</div></body>"
         )
 
@@ -574,10 +547,7 @@ def main() -> None:
 
     store_root = os.environ.get("ROLLOUT_VIEWER_STORE")
     if not store_root:
-        raise SystemExit(
-            "ROLLOUT_VIEWER_STORE is required (path to the store root: "
-            "runs.json + index/ + transcripts/)"
-        )
+        raise SystemExit("ROLLOUT_VIEWER_STORE is required (path to the store root: runs.json + index/ + transcripts/)")
     backend = LocalFSBackend(store_root)
     app = create_app(backend)
     host = os.environ.get("ROLLOUT_VIEWER_HOST", "127.0.0.1")
