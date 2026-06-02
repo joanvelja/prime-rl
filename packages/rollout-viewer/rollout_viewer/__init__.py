@@ -14,8 +14,8 @@ Phase 0 surface (the contracts). Implementations land in later workstreams:
 from rollout_viewer.schema import (
     Episode,
     EpisodeKind,
-    Message,
     MemberOutcome,
+    Message,
     MultiAgentScore,
     Step,
     StepDiagnostics,
@@ -23,8 +23,8 @@ from rollout_viewer.schema import (
     detect_kind,
 )
 from rollout_viewer.storage import (
-    INDEX_COLUMNS,
     HARD_LIMIT_BYTES,
+    INDEX_COLUMNS,
     SOFT_LIMIT_BYTES,
     RunRef,
     StorageBackend,

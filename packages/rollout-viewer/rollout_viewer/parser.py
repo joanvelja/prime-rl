@@ -25,7 +25,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from rollout_viewer.schema import Episode, Step, StepDiagnostics
+from rollout_viewer.schema import Episode, StepDiagnostics
 
 ROLLOUTS_FILENAME = "train_rollouts.jsonl"
 DIAGNOSTICS_FILENAME = "train_diagnostics.jsonl"
@@ -55,12 +55,8 @@ def load_episodes(step_dir: str | Path, run_id: str, step: int) -> list[Episode]
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"{rollouts_path}:{lineno} is not valid JSON: {e}"
-                ) from e
-            episodes.append(
-                Episode.from_rollout_output(raw, run_id=run_id, step=step)
-            )
+                raise ValueError(f"{rollouts_path}:{lineno} is not valid JSON: {e}") from e
+            episodes.append(Episode.from_rollout_output(raw, run_id=run_id, step=step))
 
     join_diagnostics(episodes, step_dir / DIAGNOSTICS_FILENAME)
     return episodes
@@ -91,8 +87,7 @@ def join_diagnostics(episodes: list[Episode], diag_path: str | Path) -> None:
     by_key, dup = _load_sidecar(diag_path)
     if dup:
         raise ValueError(
-            f"{diag_path}: duplicate diagnostics key(s) "
-            f"{sorted(dup)} — the join key must be unique per row"
+            f"{diag_path}: duplicate diagnostics key(s) {sorted(dup)} — the join key must be unique per row"
         )
 
     consumed: set[DiagKey] = set()
@@ -145,15 +140,10 @@ def _load_sidecar(
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"{diag_path}:{lineno} is not valid JSON: {e}"
-                ) from e
+                raise ValueError(f"{diag_path}:{lineno} is not valid JSON: {e}") from e
             for required in ("trajectory_id", "member_id", "step_index", "status"):
                 if required not in row:
-                    raise KeyError(
-                        f"{diag_path}:{lineno} diagnostics row missing "
-                        f"required key {required!r}: {row!r}"
-                    )
+                    raise KeyError(f"{diag_path}:{lineno} diagnostics row missing required key {required!r}: {row!r}")
             step_index = row["step_index"]
             # The join key is exact: a float step_index (2.7 -> 2) would silently
             # truncate and misjoin. Require a real int (bool is not a step index).
