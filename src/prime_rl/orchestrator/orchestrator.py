@@ -243,22 +243,6 @@ async def orchestrate(config: OrchestratorConfig):
     if mm_token_type_ids_mapping == {}:
         mm_token_type_ids_mapping = None
 
-    # Capability flag for debate envs: does the chat template own the <think>
-    # tags? Single source of truth is the already-resolved renderer's
-    # ``enable_thinking`` (Qwen35Renderer materialises it in __init__). MITO
-    # (renderer is None) or non-Qwen renderers without the field fall back to
-    # False — the safe default where the pack injects the "Use <tag>..."
-    # sentence. Inject BEFORE TrainEnvs(...) constructs the env (which calls
-    # vf.load_environment at render time); set_kwargs() would be too late.
-    native_thinking = bool(getattr(getattr(renderer, "config", None), "enable_thinking", False))
-    logger.info(f"Derived native_thinking={native_thinking} from renderer for debate env(s)")
-    _debate_env_configs = list(config.train.env)
-    if config.eval is not None:
-        _debate_env_configs += list(config.eval.env)
-    for env in _debate_env_configs:
-        if env.stripped_id.startswith("gpqa-debate") or "prompts_ref" in env.args:
-            env.args.setdefault("native_thinking", native_thinking)
-
     # Set up teacher inference pool (configured for opd or sft). Always MITO for
     # simplicity - this also keeps external OAI-compatible teachers (PI inference,
     # OpenAI) working as drop-in endpoints.
