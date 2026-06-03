@@ -83,6 +83,33 @@ def test_fan_out_keeps_all_members_by_default():
     assert mapping == [[0, 1, 2]]
 
 
+def test_fan_out_drops_inconsistent_rollout_instead_of_crashing():
+    """Backstop for #16: one malformed rollout must not kill the whole step.
+
+    A rollout whose mar_score declares a member with no trajectory step and
+    which records NO error is exactly the shape the bridge rejects (see
+    verifiers test_bridge_rejects_non_errored_member_with_no_steps). Before the
+    fix this ValueError propagated out of fan_out_for_multi_agent and aborted
+    the entire training step; now the rollout is dropped with index alignment
+    preserved so the surviving episodes still train. The root cause
+    (prompt_too_long not recording state['error']) is fixed upstream in the
+    verifiers rubric — this guards every other path that can hand the fan-out
+    an inconsistent episode.
+    """
+    good = _build_rollout(example_id=1, trajectory_id="ep-good", include_judge=True)
+    bad = _build_rollout(example_id=2, trajectory_id="ep-bad", include_judge=False)
+    # Declare a 'judge' member in mar_score that has no trajectory step, and
+    # leave 'error' unset — the precise inconsistency the bridge guards against.
+    bad["mar_score"]["members"].append({"member_id": "judge", "reward": 0.0})
+    assert bad.get("error") is None
+
+    units, mapping = fan_out_for_multi_agent([good, bad])
+
+    assert len(mapping) == 2  # index alignment with the input rollouts preserved
+    assert mapping == [[0, 1, 2], []]  # good → 3 units; malformed → dropped
+    assert {u["member_id"] for u in units} == {"debater_a", "debater_b", "judge"}
+
+
 def test_fan_out_filters_with_trainability_predicate():
     rollouts = [_build_rollout(include_judge=True)]
     units, mapping = fan_out_for_multi_agent(

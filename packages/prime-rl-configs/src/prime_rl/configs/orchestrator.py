@@ -21,10 +21,16 @@ from prime_rl.configs.shared import (
 from prime_rl.configs.trainer import TokenizerConfig
 from prime_rl.utils.config import BaseConfig
 
+_INERT_OPTIM_LR_DEFAULT = 1e-4
+
 
 class OptimizerConfig(BaseConfig):
-    lr: float = Field(1e-4, ge=0)
-    """Learning rate for this run (per-run override for multi-run training)."""
+    lr: float = Field(_INERT_OPTIM_LR_DEFAULT, ge=0)
+    """Inert placeholder. The orchestrator has no optimizer — the training
+    learning rate lives under ``[trainer.optim]`` (``trainer.py``). Setting a
+    non-default value here is rejected loudly (see ``_reject_inert_optim_lr``)
+    rather than silently ignored, so ``lr`` can never diverge from the
+    trainer's without notice."""
 
 
 class LoRAConfig(BaseConfig):
@@ -58,6 +64,12 @@ class TrainSamplingConfig(BaseConfig):
     )
     """Maximum output tokens per turn. If None, generates until max context length or EOS."""
 
+    thinking_token_budget: int | None = Field(None, gt=0)
+    """Maximum reasoning (``<think>``) tokens before vLLM force-injects the reasoning-end
+    token (``</think>``) and switches to the answer. Routed through ``extra_body`` to vLLM's
+    ``SamplingParams.thinking_token_budget``; requires a reasoning parser, which
+    ``inference.model.reasoning_parser`` auto-resolves (auto→qwen3). None disables the cap."""
+
     min_tokens: int = Field(0, ge=0)
     """Minimum output tokens per sequence."""
 
@@ -84,6 +96,8 @@ class TrainSamplingConfig(BaseConfig):
 
         # vLLM extra_body params
         extra_body = dict(self.extra_body)
+        if self.thinking_token_budget is not None:
+            extra_body["thinking_token_budget"] = self.thinking_token_budget
         if self.min_tokens > 0:
             extra_body["min_tokens"] = self.min_tokens
         if self.repetition_penalty != 1.0:
@@ -92,6 +106,20 @@ class TrainSamplingConfig(BaseConfig):
             args["extra_body"] = extra_body
 
         return args
+
+    @model_validator(mode="after")
+    def _validate_thinking_budget(self):
+        if (
+            self.thinking_token_budget is not None
+            and self.max_completion_tokens is not None
+            and self.thinking_token_budget >= self.max_completion_tokens
+        ):
+            raise ValueError(
+                f"thinking_token_budget ({self.thinking_token_budget}) must be < "
+                f"max_completion_tokens ({self.max_completion_tokens}) so the forced "
+                "reasoning-end leaves room for the answer."
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -865,6 +893,20 @@ class OrchestratorConfig(BaseConfig):
                 f"orchestrator.pool_size={self.pool_size!r} is set but "
                 "orchestrator.renderer is None (MITO mode). Either configure a renderer "
                 "or remove pool_size."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_inert_optim_lr(self):
+        """The orchestrator has no optimizer and never reads ``optim.lr``; the
+        training learning rate is owned by ``[trainer.optim]``. Reject a
+        non-default ``[orchestrator.optim] lr`` loudly instead of silently
+        ignoring it, so the two can never diverge unnoticed."""
+        if self.optim.lr != _INERT_OPTIM_LR_DEFAULT:
+            raise ValueError(
+                f"orchestrator.optim.lr={self.optim.lr!r} is set but the orchestrator "
+                "does not consume it (it has no optimizer). Set the learning rate under "
+                "[trainer.optim] instead, and drop [orchestrator.optim]."
             )
         return self
 

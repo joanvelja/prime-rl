@@ -15,7 +15,17 @@ from torch import nn
 from prime_rl.configs.trainer import EPCommBackend
 
 
-def _expert_parallel(fn):
+def _expert_parallel(func):
+    """Variable-arity reimplementation of torchtitan's ``expert_parallel`` wrapper.
+
+    Torchtitan's upstream wrapper hardcodes a 3-weight ``(w1, w2, w3, x, num_tokens)``
+    signature, so it rejects gpt-oss expert fns which carry a 4-tensor parameter layout
+    (``gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, x, num_tokens`` = 6 args).
+    We vendor the wrapper body verbatim but split the leading positionals as ``*weights``,
+    so 3-weight (GroupedExperts), 2+dummy (NonGatedGroupedExperts), and gpt-oss 4-tensor
+    fns all dispatch uniformly. Behaviour for the 3-weight path is byte-identical to upstream:
+    the wrapper only touches ``x`` and reads ``weights[0].shape[0]``; weights pass through.
+    """
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -23,9 +33,50 @@ def _expert_parallel(fn):
             category=DeprecationWarning,
             module=r"torch\.jit\._script",
         )
-        from torchtitan.distributed.expert_parallel import expert_parallel
+        from torchtitan.distributed import expert_parallel as _ep
 
-    return expert_parallel(fn)
+    from torch.distributed.tensor import DTensor
+
+    def wrapper(*args: torch.Tensor) -> torch.Tensor:
+        *weights, x, num_tokens_per_expert = args
+
+        weights = [w.to_local() if isinstance(w, DTensor) else w for w in weights]
+
+        if num_tokens_per_expert is not None:
+            from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+
+            # Read the alignment global live: set_token_group_alignment_size_m mutates it.
+            align_size = _ep.TOKEN_GROUP_ALIGN_SIZE_M
+            experts_per_ep_rank = weights[0].shape[0]
+            num_ep_ranks = num_tokens_per_expert.shape[0] // experts_per_ep_rank
+
+            with torch.no_grad():
+                (
+                    permuted_indices,
+                    num_tokens_per_expert,
+                    _,  # offsets
+                ) = generate_permute_indices(
+                    num_tokens_per_expert,
+                    experts_per_ep_rank,
+                    num_ep_ranks,
+                    x.shape[0] + experts_per_ep_rank * align_size,
+                    align_size,
+                )
+
+            x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
+            input_shape = x.shape
+            x = x[permuted_indices, :]
+
+        out = func(*weights, x, num_tokens_per_expert)
+
+        if num_tokens_per_expert is not None:
+            out_unpermuted = out.new_empty(input_shape)
+            out_unpermuted[permuted_indices, :] = out
+            out = out_unpermuted[:-1]
+
+        return out
+
+    return wrapper
 
 
 @dataclass
@@ -312,14 +363,23 @@ def _run_gpt_oss_experts_grouped_mm_impl(
     down_proj_bias: torch.Tensor,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    fp8: bool = False,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     assert x.dim() == 2
 
-    gate_up = torch._grouped_mm(x.bfloat16(), gate_up_proj.bfloat16(), offs=offsets)
+    if fp8:
+        from prime_rl.trainer.models.layers.fp8_grouped_gemm import grouped_scaled_fp8_gemm
+
+        gate_up = grouped_scaled_fp8_gemm(x.bfloat16(), gate_up_proj.bfloat16(), offsets)
+    else:
+        gate_up = torch._grouped_mm(x.bfloat16(), gate_up_proj.bfloat16(), offs=offsets)
     gate_up = gate_up + _broadcast_expert_bias(gate_up_proj_bias, num_tokens_per_expert, gate_up.shape[0]).bfloat16()
     h = _gpt_oss_apply_gate(gate_up)
-    out = torch._grouped_mm(h, down_proj.bfloat16(), offs=offsets)
+    if fp8:
+        out = grouped_scaled_fp8_gemm(h, down_proj.bfloat16(), offsets)
+    else:
+        out = torch._grouped_mm(h, down_proj.bfloat16(), offs=offsets)
     out = out + _broadcast_expert_bias(down_proj_bias, num_tokens_per_expert, out.shape[0]).bfloat16()
     return out.type_as(x)
 
@@ -338,6 +398,20 @@ def _run_gpt_oss_experts_grouped_mm(
     )
 
 
+@_expert_parallel
+def _run_gpt_oss_experts_fp8_grouped_mm(
+    gate_up_proj: torch.Tensor,
+    gate_up_proj_bias: torch.Tensor,
+    down_proj: torch.Tensor,
+    down_proj_bias: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    return _run_gpt_oss_experts_grouped_mm_impl(
+        gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, x, num_tokens_per_expert, fp8=True
+    )
+
+
 class GptOssGroupedExperts(nn.Module):
     """GPT-OSS-style grouped experts.
 
@@ -353,6 +427,7 @@ class GptOssGroupedExperts(nn.Module):
         intermediate_size: int,
         num_experts: int,
         use_grouped_mm: bool,
+        fp8: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -363,6 +438,7 @@ class GptOssGroupedExperts(nn.Module):
         self.down_proj = nn.Parameter(torch.empty(num_experts, intermediate_size, hidden_size))
         self.down_proj_bias = nn.Parameter(torch.empty(num_experts, hidden_size))
         self.use_grouped_mm = use_grouped_mm
+        self.fp8 = fp8
         self.ep_comm_backend: EPCommBackend = "torch"
 
     def set_ep_comm_backend(self, backend: EPCommBackend) -> None:
@@ -375,7 +451,7 @@ class GptOssGroupedExperts(nn.Module):
         down_proj_bias = self.down_proj_bias.to_local()
         if self.use_grouped_mm:
             return _run_gpt_oss_experts_grouped_mm_impl(
-                gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, x, num_tokens_per_expert
+                gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, x, num_tokens_per_expert, fp8=self.fp8
             )
         return _run_gpt_oss_experts_for_loop_impl(
             gate_up_proj, gate_up_proj_bias, down_proj, down_proj_bias, x, num_tokens_per_expert
@@ -386,6 +462,15 @@ class GptOssGroupedExperts(nn.Module):
             return self._forward_deepep(x, num_tokens_per_expert)
 
         if self.use_grouped_mm:
+            if self.fp8:
+                return _run_gpt_oss_experts_fp8_grouped_mm(
+                    self.gate_up_proj,
+                    self.gate_up_proj_bias,
+                    self.down_proj,
+                    self.down_proj_bias,
+                    x,
+                    num_tokens_per_expert,
+                )
             return _run_gpt_oss_experts_grouped_mm(
                 self.gate_up_proj, self.gate_up_proj_bias, self.down_proj, self.down_proj_bias, x, num_tokens_per_expert
             )

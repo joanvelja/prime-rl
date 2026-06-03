@@ -10,6 +10,7 @@ from verifiers.types import MemberRollout
 
 from prime_rl.configs.multi_agent import MultiAgentConfig
 from prime_rl.orchestrator.member_generation import is_trainable_member as is_bound_trainable_member
+from prime_rl.utils.logger import get_logger
 
 MemberTrainability = Callable[[Mapping, str], bool]
 
@@ -37,7 +38,19 @@ def fan_out_for_multi_agent(
     training_units: list[MemberRollout] = []
     rollout_to_unit_idxs: list[list[int]] = []
     for rollout in rollouts:
-        members = rollout_to_member_rollouts(rollout)
+        try:
+            members = rollout_to_member_rollouts(rollout)
+        except (ValueError, KeyError) as exc:
+            # A single malformed episode (e.g. a member declared in MARScore
+            # with no trajectory step and no recorded error, or a missing
+            # canonical field) must not abort the whole training step. Drop it
+            # loudly and keep rollout_to_unit_idxs aligned with `rollouts`.
+            get_logger().warning(
+                f"Dropping malformed rollout from multi-agent fan-out "
+                f"(trajectory_id={rollout.get('trajectory_id')!r}, task={rollout.get('task')!r}): {exc}"
+            )
+            rollout_to_unit_idxs.append([])
+            continue
         if is_trainable_member is not None:
             members = [member for member in members if is_trainable_member(rollout, member["member_id"])]
         env_name = rollout.get("env_name")
