@@ -16,6 +16,7 @@ from prime_rl.configs.shared import ClientConfig
 from prime_rl.configs.trainer import DefaultLossConfig, TrainerConfig
 from prime_rl.configs.trainer import ModelConfig as TrainerModelConfig
 from prime_rl.utils.config import BaseConfig, cli
+from prime_rl.utils.validation import validate_shared_weight_broadcast
 
 # All config config classes
 CONFIG_CLASSES = [
@@ -374,6 +375,27 @@ def test_orchestrator_failed_train_rollout_dump_config():
     )
     assert config.dump_failed_train_rollouts is True
     assert config.dump_failed_train_trajectory is True
+
+
+def test_validate_shared_weight_broadcast_catches_inference_type_mismatch():
+    trainer = TrainerConfig()
+    orchestrator = OrchestratorConfig()
+    inference = InferenceConfig.model_validate({"weight_broadcast": {"type": "nccl"}})
+
+    with pytest.raises(ValueError, match="Weight broadcast types must match"):
+        validate_shared_weight_broadcast(trainer, orchestrator, inference)
+
+
+def test_validate_shared_weight_broadcast_catches_nccl_scalar_mismatch():
+    trainer = TrainerConfig.model_validate(
+        {"weight_broadcast": {"type": "nccl", "port": 29501, "inference_world_size": 8}}
+    )
+    orchestrator = OrchestratorConfig.model_validate(
+        {"weight_broadcast": {"type": "nccl", "port": 29502, "inference_world_size": 8}}
+    )
+
+    with pytest.raises(ValueError, match="port"):
+        validate_shared_weight_broadcast(trainer, orchestrator)
 
 
 def test_selective_activation_checkpointing_requires_custom_impl():
