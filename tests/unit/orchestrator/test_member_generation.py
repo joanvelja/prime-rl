@@ -12,6 +12,8 @@ from prime_rl.orchestrator.member_generation import (
     DISPATCH_ID_FIELD,
     compile_member_generation_plan,
     is_trainable_member,
+    uncovered_trainable_members,
+    validate_member_references,
 )
 
 
@@ -51,6 +53,7 @@ def test_compile_member_generation_plan_routes_train_one_and_fixed_members():
         learner_sampling_args={"temperature": 1.0, "extra_body": {"cache_salt": "7"}},
         fixed_sampling_args={"temperature": 1.0, "max_completion_tokens": 1024},
         dispatch_id=dispatch_id,
+        group_id="group-compile",
     )
 
     assert plan is not None
@@ -80,6 +83,41 @@ def test_compile_member_generation_plan_routes_train_one_and_fixed_members():
     }
 
 
+def test_fixed_member_client_is_pinned_per_group():
+    config = MultiAgentConfig(
+        fixed={
+            "judge": FixedMemberTargetConfig(
+                members=["judge"],
+                model="judge-model",
+                base_url=[f"http://judge-{i}/v1" for i in range(4)],
+                request_mode="chat",
+            )
+        }
+    )
+
+    def judge_url(dispatch_id: str, group_id: str) -> str:
+        plan = compile_member_generation_plan(
+            config,
+            member_ids=["judge"],
+            default_client=vf.ClientConfig(api_base_url="http://learner/v1"),
+            default_model="learner-model",
+            learner_sampling_args={},
+            fixed_sampling_args={},
+            dispatch_id=dispatch_id,
+            group_id=group_id,
+        )
+        assert plan is not None
+        return plan.members["judge"].client.api_base_url
+
+    # Same group: every dispatch (turn / rollout) hits the same server.
+    urls = {judge_url(f"group-0:{idx}", "group-0") for idx in range(8)}
+    assert len(urls) == 1
+
+    # Different groups: selection spreads across the pool.
+    urls_across_groups = {judge_url(f"group-{g}:0", f"group-{g}") for g in range(32)}
+    assert len(urls_across_groups) > 1
+
+
 def test_fixed_member_renderer_config_reaches_client_config():
     renderer = Qwen3RendererConfig()
     config = MultiAgentConfig(
@@ -104,6 +142,7 @@ def test_fixed_member_renderer_config_reaches_client_config():
         learner_sampling_args={},
         fixed_sampling_args={},
         dispatch_id="dispatch-renderer",
+        group_id="group-renderer",
     )
 
     assert plan is not None
@@ -142,6 +181,7 @@ def test_train_one_unselected_renderer_target_preserves_renderer_config():
         learner_sampling_args={},
         fixed_sampling_args={},
         dispatch_id=dispatch_id,
+        group_id="group-renderer-train-one",
     )
 
     assert plan is not None
@@ -170,7 +210,7 @@ def test_fixed_member_renderer_fields_require_renderer_mode():
         )
 
 
-def test_env_compile_generation_keeps_learner_extra_body_off_fixed_targets():
+def test_env_compile_generation_strips_learner_only_fields_from_fixed_targets():
     env = TrainEnv.__new__(TrainEnv)
     env.config = SimpleNamespace(resolved_name="ma", state_columns=[], max_retries=0)
     env._env = SimpleNamespace(
@@ -181,7 +221,13 @@ def test_env_compile_generation_keeps_learner_extra_body_off_fixed_targets():
     env.sampling_args = {
         "temperature": 1.0,
         "max_completion_tokens": 1024,
-        "extra_body": {"top_k": -1, "min_p": 0.0, "return_token_ids": True},
+        "logprobs": True,
+        "extra_body": {
+            "top_k": -1,
+            "min_p": 0.0,
+            "return_token_ids": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
     config = MultiAgentConfig(
         fixed={
@@ -200,18 +246,35 @@ def test_env_compile_generation_keeps_learner_extra_body_off_fixed_targets():
         model_name="learner-model",
         cache_salt="7",
         dispatch_id="dispatch-1",
+        group_id="group-1",
     )
 
     assert plan is not None
+    # The learner keeps every training-loop field.
+    assert plan.members["debater"].sampling_args["logprobs"] is True
     assert plan.members["debater"].sampling_args["extra_body"] == {
         "top_k": -1,
         "min_p": 0.0,
         "return_token_ids": True,
+        "chat_template_kwargs": {"enable_thinking": False},
         "cache_salt": "7",
     }
+    # The fixed target inherits portable defaults and user extras only —
+    # no logprobs, no return_token_ids/top_k/min_p/cache_salt — while its
+    # explicit sampling override (temperature) still wins.
     assert plan.members["judge"].sampling_args == {
         "temperature": 0.0,
         "max_completion_tokens": 1024,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    # The fixed target's extra_body is a copy — mutating it must not leak
+    # into the env's learner sampling args.
+    plan.members["judge"].sampling_args["extra_body"]["cache_salt"] = "9"
+    assert env.sampling_args["extra_body"] == {
+        "top_k": -1,
+        "min_p": 0.0,
+        "return_token_ids": True,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
 
@@ -244,3 +307,50 @@ def test_run_rollout_forwards_generation_and_records_dispatch_id():
         assert output[DISPATCH_ID_FIELD] == "dispatch-1"
 
     asyncio.run(run())
+
+
+def test_validate_member_references_rejects_typo_member_ids_listing_valid_ids():
+    config = MultiAgentConfig(
+        train_one=TrainOneConfig(members=["debater_a", "debater_c"], unselected="opponent"),
+        fixed={
+            "opponent": FixedMemberTargetConfig(model="opponent-model", base_url=["http://opponent/v1"]),
+            "judge": FixedMemberTargetConfig(members=["jugde"], model="judge-model", base_url=["http://judge/v1"]),
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"\['debater_c', 'jugde'\]") as exc_info:
+        validate_member_references(config, {"gpqa-debate": ["debater_a", "debater_b", "judge"]})
+
+    assert "gpqa-debate=['debater_a', 'debater_b', 'judge']" in str(exc_info.value)
+
+
+def test_validate_member_references_rejects_enabled_config_without_multi_agent_envs():
+    config = MultiAgentConfig(
+        fixed={"judge": FixedMemberTargetConfig(members=["judge"], model="judge-model", base_url=["http://judge/v1"])}
+    )
+
+    with pytest.raises(ValueError, match="no loaded environment"):
+        validate_member_references(config, {})
+
+
+def test_validate_member_references_accepts_known_members_and_disabled_config():
+    validate_member_references(MultiAgentConfig(), {})
+
+    config = MultiAgentConfig(
+        train_one=TrainOneConfig(members=["debater_a", "debater_b"], unselected="opponent"),
+        fixed={
+            "opponent": FixedMemberTargetConfig(model="opponent-model", base_url=["http://opponent/v1"]),
+            "judge": FixedMemberTargetConfig(members=["judge"], model="judge-model", base_url=["http://judge/v1"]),
+        },
+    )
+    validate_member_references(config, {"gpqa-debate": ["debater_a", "debater_b", "judge"]})
+
+
+def test_uncovered_trainable_members_flags_default_trainable_under_train_one():
+    config = MultiAgentConfig(
+        train_one=TrainOneConfig(members=["debater_a", "debater_b"], unselected="opponent"),
+        fixed={"opponent": FixedMemberTargetConfig(model="opponent-model", base_url=["http://opponent/v1"])},
+    )
+
+    assert uncovered_trainable_members(config, ["debater_a", "debater_b", "judge"]) == ["judge"]
+    assert uncovered_trainable_members(MultiAgentConfig(), ["debater_a", "judge"]) == []
