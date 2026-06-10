@@ -1,10 +1,12 @@
 import pytest
 from verifiers.types import MemberRollout
 
+from prime_rl.configs.orchestrator import DefaultAdvantageConfig, EMAPerMemberAdvantageConfig
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
     fan_out_for_multi_agent,
+    validate_advantage_mode,
 )
 
 ENV_NAME = "debate_v1"
@@ -61,7 +63,7 @@ def _make_episode_rollout(
 def test_cold_start_advantage_uses_post_update_baseline():
     state = RAEState(momentum=0.9)
 
-    advantages = compute_rae_advantages([_make_member_rollout(reward=1.0)], state)
+    advantages, _ = compute_rae_advantages([_make_member_rollout(reward=1.0)], state)
 
     assert advantages == [pytest.approx(0.9)]
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.1)
@@ -71,7 +73,7 @@ def test_second_batch_uses_persisted_baseline():
     state = RAEState(momentum=0.9)
 
     compute_rae_advantages([_make_member_rollout(reward=1.0)], state)
-    advantages = compute_rae_advantages([_make_member_rollout(reward=1.0)], state)
+    advantages, _ = compute_rae_advantages([_make_member_rollout(reward=1.0)], state)
 
     assert advantages == [pytest.approx(0.81)]
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.19)
@@ -99,7 +101,7 @@ def test_within_batch_order_compounds_per_trajectory():
         _make_member_rollout(reward=0.0, episode_id="ep-1"),
     ]
 
-    advantages = compute_rae_advantages(rollouts, state)
+    advantages, _ = compute_rae_advantages(rollouts, state)
 
     assert advantages == [pytest.approx(0.45), pytest.approx(-0.495)]
     assert state.baselines[(ENV_NAME, 1, "prover")] == pytest.approx(0.495)
@@ -128,9 +130,73 @@ def test_fan_out_respects_trainable_member_predicate():
     assert [unit["member_id"] for unit in units] == ["debater_a"]
 
 
+def test_rae_stats_track_cold_keys_drift_and_baselines():
+    state = RAEState(momentum=0.9)
+
+    _, stats = compute_rae_advantages(
+        [
+            _make_member_rollout(member_id="prover", reward=1.0),
+            _make_member_rollout(member_id="judge", reward=0.0),
+        ],
+        state,
+    )
+
+    assert stats.updates == 2
+    assert stats.cold_updates == 2
+    assert stats.baseline_keys_total == 2
+    # Cold updates: prover baseline 0.0 → 0.1, judge stays 0.0.
+    assert stats.baseline_abs_delta_sum == pytest.approx(0.1)
+    assert stats.baseline_sum_by_member == {"prover": pytest.approx(0.1), "judge": pytest.approx(0.0)}
+    assert stats.updates_by_member == {"prover": 1, "judge": 1}
+
+    _, stats = compute_rae_advantages([_make_member_rollout(member_id="prover", reward=1.0)], state)
+
+    assert stats.cold_updates == 0
+    # Warm update: prover baseline 0.1 → 0.19.
+    assert stats.baseline_abs_delta_sum == pytest.approx(0.09)
+    assert stats.baseline_keys_total == 2
+
+
+def test_rae_stats_merge_accumulates_and_keeps_freshest_key_count():
+    state = RAEState(momentum=0.9)
+    _, merged = compute_rae_advantages([_make_member_rollout(member_id="prover", reward=1.0)], state)
+    _, second = compute_rae_advantages(
+        [
+            _make_member_rollout(member_id="prover", reward=1.0),
+            _make_member_rollout(member_id="judge", reward=1.0),
+        ],
+        state,
+    )
+
+    merged.merge(second)
+
+    assert merged.updates == 3
+    assert merged.cold_updates == 2  # prover cold once, judge cold once
+    assert merged.updates_by_member == {"prover": 2, "judge": 1}
+    assert merged.baseline_keys_total == 2
+
+
 def test_rae_requires_string_identity_when_task_is_the_fallback():
     state = RAEState(momentum=0.5)
     rollout = _make_member_rollout(task={"question": "q"}, env_name=None)
 
     with pytest.raises(TypeError, match="string env_name"):
         compute_rae_advantages([rollout], state)
+
+
+def test_validate_advantage_mode_rejects_ema_on_single_agent_env():
+    with pytest.raises(ValueError, match="not a multi-agent env"):
+        validate_advantage_mode("math", is_multi_agent=False, advantage=EMAPerMemberAdvantageConfig())
+
+
+def test_validate_advantage_mode_rejects_non_ema_on_multi_agent_env():
+    with pytest.raises(ValueError, match="requires advantage.type='ema_per_member'"):
+        validate_advantage_mode("debate", is_multi_agent=True, advantage=DefaultAdvantageConfig())
+    with pytest.raises(ValueError, match="requires advantage.type='ema_per_member'"):
+        validate_advantage_mode("debate", is_multi_agent=True, advantage=None)
+
+
+def test_validate_advantage_mode_accepts_matched_pairings():
+    validate_advantage_mode("debate", is_multi_agent=True, advantage=EMAPerMemberAdvantageConfig())
+    validate_advantage_mode("math", is_multi_agent=False, advantage=DefaultAdvantageConfig())
+    validate_advantage_mode("math", is_multi_agent=False, advantage=None)

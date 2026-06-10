@@ -20,8 +20,8 @@ from typing import cast
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import AdvantageConfig, EMAPerMemberAdvantageConfig, OrchestratorConfig
-from prime_rl.orchestrator.advantage import assign_advantages, setup_advantage_fn
+from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.orchestrator.advantage import assign_advantages
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.filters import RolloutFilter, apply_filters
 from prime_rl.orchestrator.multi_agent_advantage import (
@@ -34,7 +34,7 @@ from prime_rl.orchestrator.trajectories import (
     interleave_rollout,
     offload_images_to_disk,
 )
-from prime_rl.orchestrator.types import TrainBatch, TrainBatchMetrics, TrainRollout
+from prime_rl.orchestrator.types import RAEStats, TrainBatch, TrainBatchMetrics, TrainRollout
 from prime_rl.transport import TrainingSample
 from prime_rl.utils.logger import get_logger
 
@@ -52,7 +52,6 @@ class TrainSink:
         mm_token_type_ids_mapping: dict[int, int] | None,
         batch_size: int | None,
         token_batch_size: int | None,
-        advantage_config: AdvantageConfig | None,
         rae_state: RAEState | None,
         pre_filters: list[RolloutFilter],
         post_filters: list[RolloutFilter],
@@ -64,16 +63,16 @@ class TrainSink:
         self.mm_token_type_ids_mapping = mm_token_type_ids_mapping
         self.batch_size = batch_size
         self.token_batch_size = token_batch_size
-        # Built once — custom advantage funcs do an ``import_object`` and
-        # we don't want to pay that per group. ``None`` = reward-only path
-        if isinstance(advantage_config, EMAPerMemberAdvantageConfig):
-            self.advantage_fn = None
-            self.rae_state = rae_state or RAEState(momentum=advantage_config.momentum)
-        else:
-            self.advantage_fn = setup_advantage_fn(advantage_config) if advantage_config is not None else None
-            self.rae_state = None
+        # Per-env advantage fns live on each ``TrainEnv``; the shared RAE state
+        # (multi-agent ``ema_per_member`` envs) is owned by the orchestrator so
+        # checkpoints can round-trip it.
+        self.rae_state = rae_state
         self.pre_filters = pre_filters
         self.post_filters = post_filters
+
+        # RAE observability accumulated across groups since the last ship;
+        # popped into ``TrainBatchMetrics`` by ``process_batch``
+        self.rae_step_stats: RAEStats | None = None
 
         # Keyed by the dispatcher's group UUID. ``(env_name, example_id)``
         # isn't unique — the same example can be re-sampled while an
@@ -218,7 +217,7 @@ class TrainSink:
                 )
                 return
         else:
-            assign_advantages(survivors, self.advantage_fn)
+            assign_advantages(survivors, self.train_envs.get(env_name).advantage_fn)
 
         # Propagate to the pre-tokenized samples so the orchestrator can
         # collect samples at ship time without re-walking rollouts. The env
@@ -278,7 +277,11 @@ class TrainSink:
             episode.raw["env_name"] = episode.env_name
             raw_episodes.append(episode.raw)
         member_raws, episode_to_member_idxs = fan_out_trainable_for_multi_agent(raw_episodes, self.config.multi_agent)
-        advantages = compute_rae_advantages(member_raws, self.rae_state)
+        advantages, rae_stats = compute_rae_advantages(member_raws, self.rae_state)
+        if self.rae_step_stats is None:
+            self.rae_step_stats = rae_stats
+        else:
+            self.rae_step_stats.merge(rae_stats)
 
         out: list[TrainRollout] = []
         for episode, member_idxs in zip(episodes, episode_to_member_idxs):
@@ -295,8 +298,12 @@ class TrainSink:
                     source_rollout_id=episode.rollout_id,
                     advantage=advantages[member_idx],
                 )
-                await self.process_rollout(member)
                 out.append(member)
+        # Tokenization is independent per member: ``process_rollout`` mutates
+        # only the member's own raw/samples and uses the shared
+        # tokenizer/renderer read-only, so members can overlap. ``out`` keeps
+        # the deterministic episode x member order regardless.
+        await asyncio.gather(*(self.process_rollout(member) for member in out))
         return out
 
     def _is_multi_agent_episode_rollout(self, rollout: TrainRollout) -> bool:
@@ -307,7 +314,11 @@ class TrainSink:
         raw.setdefault("env_name", episode.env_name)
         raw.setdefault("trajectory_id", f"{episode.rollout_id}:{raw.get('member_id', 'member')}")
         raw.setdefault("completion", None)
-        raw.setdefault("is_truncated", episode.raw.get("is_truncated", False))
+        # Member-level truncation: a member row is truncated iff one of its
+        # own trajectory steps hit a generation-length stop. Prompt-overflow
+        # truncation produces no trajectory step and stays episode-level,
+        # visible via the inherited stop_condition ("prompt_too_long").
+        raw["is_truncated"] = any(step["is_truncated"] for step in raw["trajectory"])
         raw.setdefault("stop_condition", episode.raw.get("stop_condition"))
         raw.setdefault("metrics", episode.raw.get("metrics", {}))
         raw.setdefault("timing", episode.raw.get("timing", {}))
@@ -391,7 +402,9 @@ class TrainSink:
             samples_shipped=len(samples),
             arrivals_by_env=dict(self.arrivals_by_env),
             errors_by_env=dict(self.errors_by_env),
+            rae_stats=self.rae_step_stats,
         )
+        self.rae_step_stats = None
         self.arrivals_by_env.clear()
         self.errors_by_env.clear()
         return TrainBatch(rollouts=cohort, samples=samples, metrics=metrics, episode_rollouts=episode_rollouts)
