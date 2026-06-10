@@ -63,7 +63,7 @@ class Env:
 
     @property
     def is_multi_agent(self) -> bool:
-        return bool(getattr(self.env, "is_multi_agent", False))
+        return isinstance(self.env, vf.MultiAgentEnv)
 
     async def start(
         self,
