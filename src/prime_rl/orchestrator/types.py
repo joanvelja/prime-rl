@@ -176,7 +176,15 @@ def rollouts_for_logging(batch: TrainBatch) -> list[TrainRollout]:
 @dataclass
 class EvalBatchMetrics:
     """Typed per-batch metrics from ``EvalSink.process_batch``. Final wandb
-    dict derived via ``to_wandb_dict`` at log time."""
+    dict derived via ``to_wandb_dict`` at log time.
+
+    ``mar_metrics`` / ``winner_counts`` form the multi-agent MARScore panel
+    (per-member rewards + metrics, judge-winner distribution); both empty for
+    single-agent envs. ``inert_scalar`` marks a multi-agent env whose episode
+    reward came back all-zero (symmetric zero-sum debate ⇒ episode reward is
+    structurally 0.0): ``avg@k`` / ``pass@k`` would be constant-zero panels
+    there, so ``to_wandb_dict`` omits those keys and the MARScore panel
+    carries the signal instead."""
 
     n_rollouts: int
     n_cancelled: int
@@ -193,6 +201,9 @@ class EvalBatchMetrics:
     num_turns_min: float = 0.0
     num_turns_max: float = 0.0
     pass_at_k: dict[str, float] = field(default_factory=dict)
+    mar_metrics: dict[str, float] = field(default_factory=dict)
+    winner_counts: dict[str, int] = field(default_factory=dict)
+    inert_scalar: bool = False
 
     def to_wandb_dict(self, *, env_name: str, step: int) -> dict[str, float]:
         prefix = f"eval/{env_name}"
@@ -202,7 +213,10 @@ class EvalBatchMetrics:
             f"{prefix}/errored_count": float(self.n_errored),
         }
         if self.n_examples > 0:
-            out[f"{prefix}/avg@{self.group_size}"] = self.reward_mean
+            if not self.inert_scalar:
+                out[f"{prefix}/avg@{self.group_size}"] = self.reward_mean
+                for k, v in self.pass_at_k.items():
+                    out[f"{prefix}/{k}"] = v
             out[f"{prefix}/completion_len/mean"] = self.completion_len_mean
             out[f"{prefix}/completion_len/max"] = self.completion_len_max
             out[f"{prefix}/completion_len/min"] = self.completion_len_min
@@ -211,8 +225,12 @@ class EvalBatchMetrics:
             out[f"{prefix}/num_turns/mean"] = self.num_turns_mean
             out[f"{prefix}/num_turns/min"] = self.num_turns_min
             out[f"{prefix}/num_turns/max"] = self.num_turns_max
-            for k, v in self.pass_at_k.items():
-                out[f"{prefix}/{k}"] = v
+            for k, v in self.mar_metrics.items():
+                out[f"{prefix}/mar/{k}"] = v
+            n_winners = sum(self.winner_counts.values())
+            for value, count in sorted(self.winner_counts.items()):
+                out[f"{prefix}/winner_count/{value}"] = float(count)
+                out[f"{prefix}/winner_share/{value}"] = count / n_winners
         return out
 
 
