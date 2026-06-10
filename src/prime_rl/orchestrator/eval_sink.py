@@ -173,12 +173,14 @@ class EvalSink:
             metrics.num_turns_min = float(min(num_turns))
             metrics.num_turns_max = float(max(num_turns))
 
-            # MARScore panel (multi-agent envs only; no-op otherwise). A
-            # multi-agent batch whose episode rewards are all zero is an
-            # inert scalar (symmetric zero-sum ⇒ episode reward ≡ 0.0);
-            # ``to_wandb_dict`` omits avg@k / pass@k for it.
+            # MARScore panel (multi-agent envs only; no-op otherwise).
+            # Inert-scalar is the env's structural declaration (symmetric
+            # zero-sum debate ⇒ episode scalar ≡ 0.0 by construction), NOT a
+            # runtime all-zero observation — a truth_member pack can honestly
+            # score 0.0 on a batch, and that zero must stay visible.
+            # ``to_wandb_dict`` omits avg@k / pass@k when inert.
             metrics.mar_metrics, metrics.winner_counts = aggregate_mar_panel([r.raw for r in valid])
-            metrics.inert_scalar = bool(metrics.mar_metrics) and all(r.reward == 0.0 for r in valid)
+            metrics.inert_scalar = self.eval_envs.get(env_name).has_inert_episode_scalar
 
             # pass@k: errored attempts don't count toward k tries
             by_example: dict[int | str, list[float]] = {}

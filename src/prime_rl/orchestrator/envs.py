@@ -12,6 +12,7 @@ from typing import Generic, TypeVar
 
 import pandas as pd
 import verifiers as vf
+from verifiers.protocols.debate.rubric import DebateRubric
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
@@ -27,6 +28,21 @@ from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
 
 REQUIRED_STATE_COLUMNS = ["trajectory"]
+
+
+def episode_scalar_is_inert(env: vf.Environment) -> bool:
+    """True iff the env's episode scalar is identically zero by construction.
+
+    The structural declaration lives on the debate rubric: with
+    ``truth_member=None`` (symmetric zero-sum), ``episode_scalar_from_winner``
+    returns 0.0 for every episode, so reward-derived panels (avg@k, pass@k)
+    are constant-zero by design. With ``truth_member`` set, the scalar is a
+    live binary signal (truth side won) — an all-zero batch there is a true
+    zero, not degeneracy. Non-debate rubrics carry no such declaration;
+    undeterminable defaults to live (never suppress what we cannot prove
+    inert — a flat-zero line is honest, a missing panel is not)."""
+    rubric = getattr(env, "rubric", None)
+    return isinstance(rubric, DebateRubric) and rubric.truth_member is None
 
 
 class Env:
@@ -64,6 +80,10 @@ class Env:
     @property
     def is_multi_agent(self) -> bool:
         return isinstance(self.env, vf.MultiAgentEnv)
+
+    @property
+    def has_inert_episode_scalar(self) -> bool:
+        return episode_scalar_is_inert(self.env)
 
     async def start(
         self,

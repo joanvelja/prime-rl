@@ -180,11 +180,13 @@ class EvalBatchMetrics:
 
     ``mar_metrics`` / ``winner_counts`` form the multi-agent MARScore panel
     (per-member rewards + metrics, judge-winner distribution); both empty for
-    single-agent envs. ``inert_scalar`` marks a multi-agent env whose episode
-    reward came back all-zero (symmetric zero-sum debate ⇒ episode reward is
-    structurally 0.0): ``avg@k`` / ``pass@k`` would be constant-zero panels
-    there, so ``to_wandb_dict`` omits those keys and the MARScore panel
-    carries the signal instead."""
+    single-agent envs. ``inert_scalar`` is the env's structural declaration
+    that its episode scalar is identically zero by construction (symmetric
+    zero-sum debate, ``truth_member=None`` — see ``episode_scalar_is_inert``):
+    ``avg@k`` / ``pass@k`` would be constant-zero panels there, so
+    ``to_wandb_dict`` omits those keys and the MARScore panel carries the
+    signal instead. Envs with a live scalar — including ``truth_member``
+    debate packs whose batch honestly scored 0.0 — keep them."""
 
     n_rollouts: int
     n_cancelled: int

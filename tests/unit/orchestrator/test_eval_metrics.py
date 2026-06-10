@@ -7,6 +7,10 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+from verifiers.protocols.debate.prompts import DebatePrompts
+from verifiers.protocols.debate.rubric import DebateRubric
+
+from prime_rl.orchestrator.envs import episode_scalar_is_inert
 from prime_rl.orchestrator.eval_sink import EvalSink, aggregate_mar_panel
 from prime_rl.orchestrator.types import EvalRollout
 
@@ -50,18 +54,19 @@ def _rollout(raw: dict[str, Any], *, env_name: str = "debate", example_id: int =
 
 
 class _StubEnvs:
-    def __init__(self, *, group_size: int, n_examples: int):
+    def __init__(self, *, group_size: int, n_examples: int, inert: bool = False):
         self._env = SimpleNamespace(
             config=SimpleNamespace(group_size=group_size),
             examples=list(range(n_examples)),
+            has_inert_episode_scalar=inert,
         )
 
     def get(self, env_name: str) -> SimpleNamespace:
         return self._env
 
 
-def _process(rollouts: list[EvalRollout], *, env_name: str = "debate", group_size: int = 2):
-    sink = EvalSink(eval_envs=_StubEnvs(group_size=group_size, n_examples=1))  # type: ignore[arg-type]
+def _process(rollouts: list[EvalRollout], *, env_name: str = "debate", group_size: int = 2, inert: bool = False):
+    sink = EvalSink(eval_envs=_StubEnvs(group_size=group_size, n_examples=1, inert=inert))  # type: ignore[arg-type]
     sink.pending_batches[(env_name, 0)] = rollouts
     return sink.process_batch((env_name, 0))
 
@@ -86,8 +91,12 @@ def test_aggregate_mar_panel_empty_for_single_agent_rollouts():
     assert aggregate_mar_panel([_raw(reward=1.0), _raw(reward=0.0)]) == ({}, {})
 
 
-def test_inert_scalar_env_omits_avg_and_pass_at_k():
-    batch = _process([_rollout(_raw(mar_score=_mar("debater_a"))), _rollout(_raw(mar_score=_mar("tie")))])
+def test_structurally_inert_env_omits_avg_and_pass_at_k():
+    # truth_member=None debate env: scalar ≡ 0.0 by construction.
+    batch = _process(
+        [_rollout(_raw(mar_score=_mar("debater_a"))), _rollout(_raw(mar_score=_mar("tie")))],
+        inert=True,
+    )
     assert batch.metrics.inert_scalar
     assert batch.metrics.winner_counts == {"debater_a": 1, "tie": 1}
     payload = batch.metrics.to_wandb_dict(env_name="debate", step=4)
@@ -100,7 +109,25 @@ def test_inert_scalar_env_omits_avg_and_pass_at_k():
     assert payload["eval/debate/num_turns/mean"] == 0.0
 
 
-def test_multi_agent_env_with_live_scalar_keeps_avg_at_k():
+def test_truth_member_env_all_zero_batch_keeps_avg_at_k():
+    # truth_member set ⇒ live binary scalar. A batch where the truth side
+    # lost every episode is a TRUE zero — it must stay visible, not flap
+    # into "no data" because the runtime observation happened to be all-zero.
+    batch = _process(
+        [
+            _rollout(_raw(reward=0.0, mar_score=_mar("debater_b", reward_a=-1.0, reward_b=1.0))),
+            _rollout(_raw(reward=0.0, mar_score=_mar("tie", reward_a=0.0, reward_b=0.0))),
+        ],
+        inert=False,
+    )
+    assert not batch.metrics.inert_scalar
+    payload = batch.metrics.to_wandb_dict(env_name="debate", step=4)
+    assert payload["eval/debate/avg@2"] == 0.0
+    assert any("pass@" in key for key in payload)
+    assert payload["eval/debate/mar/reward/debater_a"] == -0.5
+
+
+def test_truth_member_env_with_live_scalar_keeps_avg_at_k():
     batch = _process([_rollout(_raw(reward=1.0, mar_score=_mar("debater_a")))])
     assert not batch.metrics.inert_scalar
     payload = batch.metrics.to_wandb_dict(env_name="debate", step=4)
@@ -116,3 +143,35 @@ def test_scalar_env_keeps_avg_and_pass_at_k_even_when_all_zero():
     assert payload["eval/math/avg@2"] == 0.0
     assert any("pass@" in key for key in payload)
     assert not any("/mar/" in key or "winner" in key for key in payload)
+
+
+def _debate_rubric(truth_member: str | None) -> DebateRubric:
+    prompts = DebatePrompts(
+        system={},
+        user={},
+        question={},
+        fields={},
+        think_visibility={},
+        prefill={},
+        opponent_wrap=None,
+        judges={},
+        source_ref="test",
+    )
+    return DebateRubric(members=["debater_a", "debater_b", "judge"], prompts=prompts, truth_member=truth_member)
+
+
+def test_episode_scalar_is_inert_symmetric_debate_rubric():
+    env = SimpleNamespace(rubric=_debate_rubric(None))
+    assert episode_scalar_is_inert(env)  # type: ignore[arg-type]
+
+
+def test_episode_scalar_is_inert_false_for_truth_member_pack():
+    env = SimpleNamespace(rubric=_debate_rubric("debater_a"))
+    assert not episode_scalar_is_inert(env)  # type: ignore[arg-type]
+
+
+def test_episode_scalar_is_inert_false_when_undeterminable():
+    # Non-debate rubrics carry no structural declaration; fail toward NOT
+    # suppressing — a flat-zero line is honest, a missing panel is not.
+    assert not episode_scalar_is_inert(SimpleNamespace(rubric=object()))  # type: ignore[arg-type]
+    assert not episode_scalar_is_inert(SimpleNamespace())  # type: ignore[arg-type]

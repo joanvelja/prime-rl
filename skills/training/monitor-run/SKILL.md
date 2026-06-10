@@ -99,7 +99,7 @@ All metrics print to the console log (and W&B when configured).
 | `is_truncated/{all,env}/mean` | fraction truncated |
 | `empty_rollouts/{all,env}`, `errored_rollouts/{all,env}` | fraction empty/errored |
 | `metrics/{env}/{metric}` | env-specific (e.g. pass rate) |
-| `eval/{env}/{avg@k,pass@k}` | eval scores when configured (omitted for multi-agent envs with all-zero episode rewards — symmetric zero-sum makes them constant-zero) |
+| `eval/{env}/{avg@k,pass@k}` | eval scores when configured (omitted when the episode scalar is structurally inert — symmetric zero-sum debate with `truth_member` unset; `truth_member` packs keep them, even on all-zero batches) |
 | `debate/{metric}` | train-batch debate telemetry (TWC, tie rate, position bias, flip rate, …); debate envs only |
 | `eval/{env}/debate/{metric}` | same debate panel per eval epoch |
 | `eval/{env}/mar/{key}` | per-member MARScore means (rewards, parse errors, member/episode metrics) |
