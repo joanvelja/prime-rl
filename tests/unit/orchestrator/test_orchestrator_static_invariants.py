@@ -120,7 +120,14 @@ def test_train_rollout_persistence_honors_dump_trajectory():
 
 
 def test_eval_rollout_persistence_honors_dump_trajectory():
-    calls = _calls(_method("finalize_eval_batch"), "save_rollouts")
+    calls = [
+        node
+        for node in ast.walk(_method("finalize_eval_batch"))
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "asyncio.to_thread"
+        and node.args
+        and ast.unparse(node.args[0]) == "save_rollouts"
+    ]
     assert len(calls) == 1
     exclude_kw = _call_kw(calls[0], "exclude_keys")
     assert exclude_kw is not None
@@ -190,3 +197,12 @@ def test_failed_train_rollout_persistence_honors_config_and_dump_trajectory():
     exclude_kw = _call_kw(calls[0], "exclude_keys")
     assert exclude_kw is not None
     assert ast.unparse(exclude_kw.value) == "None if dump_trajectory else {'trajectory'}"
+
+
+def test_main_loop_checks_pipeline_health():
+    """The starvation watchdog only works if the main loop drives it: a dead
+    or wedged dispatcher task cannot run its own health check."""
+    calls = _calls(_method("main_loop"), "self.check_pipeline_health")
+    assert len(calls) == 1
+    calls = _calls(_method("check_pipeline_health"), "self.dispatcher.raise_if_starved")
+    assert len(calls) == 1

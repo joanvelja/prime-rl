@@ -182,6 +182,19 @@ class EvalSink:
             metrics.mar_metrics, metrics.winner_counts = aggregate_mar_panel([r.raw for r in valid])
             metrics.inert_scalar = self.eval_envs.get(env_name).has_inert_episode_scalar
 
+            # Env-emitted rollout metrics (e.g. debate diagnostics),
+            # forwarded key-agnostically: mean per numeric key over the
+            # rollouts carrying that key. Non-numeric values are not metrics
+            # and are skipped.
+            metric_sums: dict[str, float] = {}
+            metric_counts: dict[str, int] = {}
+            for r in valid:
+                for key, value in (r.raw.get("metrics") or {}).items():
+                    if isinstance(value, (bool, int, float)):
+                        metric_sums[key] = metric_sums.get(key, 0.0) + float(value)
+                        metric_counts[key] = metric_counts.get(key, 0) + 1
+            metrics.env_metrics = {key: metric_sums[key] / metric_counts[key] for key in metric_sums}
+
             # pass@k: errored attempts don't count toward k tries
             by_example: dict[int | str, list[float]] = {}
             for r in valid:
