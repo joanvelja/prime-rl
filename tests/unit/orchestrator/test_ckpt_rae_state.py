@@ -20,6 +20,10 @@ def test_rae_state_round_trips(tmp_path: Path) -> None:
             ("debate_v1", 1): 0.3,
             ("debate_v1", "ex-2"): -0.1,
         },
+        canonical_members={
+            ("debate_v1", 1): "debater_a",
+            ("debate_v1", "ex-2"): "debater_a",
+        },
         beta=0.85,
         n_eff=4.0,
     )
@@ -33,6 +37,7 @@ def test_rae_state_round_trips(tmp_path: Path) -> None:
     assert rae_reload.beta == 0.85
     assert rae_reload.n_eff == 4.0
     assert rae_reload.baselines == rae_state.baselines
+    assert rae_reload.canonical_members == rae_state.canonical_members
 
 
 def test_old_format_rae_state_fails_loud(tmp_path: Path) -> None:

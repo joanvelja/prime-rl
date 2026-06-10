@@ -27,6 +27,7 @@ from prime_rl.orchestrator.filters import RolloutFilter, apply_filters
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
+    extract_episode_pairs_for_multi_agent,
     fan_out_trainable_for_multi_agent,
 )
 from prime_rl.orchestrator.trajectories import (
@@ -284,7 +285,10 @@ class TrainSink:
             episode.raw["env_name"] = episode.env_name
             raw_episodes.append(episode.raw)
         member_raws, episode_to_member_idxs = fan_out_trainable_for_multi_agent(raw_episodes, self.config.multi_agent)
-        advantages = compute_rae_advantages(member_raws, self.rae_state)
+        # Pairs come from the UNFILTERED mar_score: frame derivation and
+        # zero-sum validation must not depend on which seats train_one kept
+        episode_pairs = extract_episode_pairs_for_multi_agent(raw_episodes, self.config.multi_agent)
+        advantages = compute_rae_advantages(member_raws, self.rae_state, episode_pairs=episode_pairs)
 
         out: list[TrainRollout] = []
         for episode, member_idxs in zip(episodes, episode_to_member_idxs):

@@ -23,6 +23,7 @@ from prime_rl.orchestrator.member_generation import (
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
+    extract_episode_pairs_for_multi_agent,
     fan_out_for_multi_agent,
 )
 
@@ -114,19 +115,34 @@ def test_fan_out_index_mapping_for_multiple_rollouts():
 
 
 def test_fan_out_pipeline_into_compute_rae_advantages():
-    """End-to-end: fan_out → compute_rae_advantages produces one
-    advantage per unit, and the unit/advantage zip behaves correctly
-    for the orchestrator's per-unit sample.advantage assignment."""
+    """End-to-end: fan_out + pair extraction → compute_rae_advantages
+    produces one advantage per unit, and the unit/advantage zip behaves
+    correctly for the orchestrator's per-unit sample.advantage assignment."""
     rollouts = [
         _build_rollout(example_id=1, trajectory_id="ep-1", members=[("debater_a", 1.0), ("debater_b", -1.0)]),
         _build_rollout(example_id=1, trajectory_id="ep-2", members=[("debater_a", -1.0), ("debater_b", 1.0)]),
     ]
+    config = MultiAgentConfig(
+        fixed={
+            "judge": FixedMemberTargetConfig(
+                members=["judge"],
+                model="judge-model",
+                base_url=["http://judge:8000/v1"],
+            ),
+        },
+    )
     units, _mapping = fan_out_for_multi_agent(
         rollouts,
         is_trainable_member=lambda _rollout, member_id: member_id != "judge",
     )
+    # Pairs come from the unfiltered mar_score; the fixed judge is excluded
+    episode_pairs = extract_episode_pairs_for_multi_agent(rollouts, config)
+    assert episode_pairs == {
+        "ep-1": {"debater_a": 1.0, "debater_b": -1.0},
+        "ep-2": {"debater_a": -1.0, "debater_b": 1.0},
+    }
     state = RAEState()
-    advantages = compute_rae_advantages(units, state)
+    advantages = compute_rae_advantages(units, state, episode_pairs=episode_pairs)
     assert len(advantages) == len(units) == 4
     # One group key ("debate_v1", 1), canonical member debater_a, cold b0 = 0,
     # G = 2 episodes, lam = 6/(6+1) = 6/7. Canonical rewards [1, -1]:
@@ -138,6 +154,7 @@ def test_fan_out_pipeline_into_compute_rae_advantages():
     assert advantages[3] == pytest.approx(1.1428571428571428)
     # Single fold at group close: b1 = 0.9*0 + 0.1*mean([1, -1]) = 0.0
     assert state.baselines == {("debate_v1", 1): pytest.approx(0.0)}
+    assert state.canonical_members == {("debate_v1", 1): "debater_a"}
 
 
 def test_fan_out_handles_empty_rollouts_list():

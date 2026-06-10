@@ -32,7 +32,15 @@ class CheckpointManager:
             torch.save({"progress": progress}, f)
         if rae_state is not None:
             with open(ckpt_path / "rae_state.pt", "wb") as f:
-                torch.save({"baselines": rae_state.baselines, "beta": rae_state.beta, "n_eff": rae_state.n_eff}, f)
+                torch.save(
+                    {
+                        "baselines": rae_state.baselines,
+                        "canonical_members": rae_state.canonical_members,
+                        "beta": rae_state.beta,
+                        "n_eff": rae_state.n_eff,
+                    },
+                    f,
+                )
         get_logger().debug(
             f"Orchestrator checkpoint saved to {ckpt_path} in {format_time(time.perf_counter() - start)}"
         )
@@ -62,12 +70,13 @@ class CheckpointManager:
                 )
             with open(rae_file, "rb") as f:
                 state = torch.load(f, weights_only=False)
-            if "beta" not in state or "n_eff" not in state:
+            missing = {"baselines", "canonical_members", "beta", "n_eff"} - state.keys()
+            if missing:
                 raise ValueError(
-                    f"RAE state at {rae_file} is in the retired sequential-EMA format "
-                    "(per-member triple keys + momentum). Rank-7 RAE keys baselines by "
-                    "(env_name, example_id) and stores beta/n_eff; old checkpoints are "
-                    "not migrated — start fresh."
+                    f"RAE state at {rae_file} is missing key(s) {sorted(missing)} — likely the "
+                    "retired sequential-EMA format (per-member triple keys + momentum). Rank-7 RAE "
+                    "stores (env_name, example_id) baselines plus canonical_members/beta/n_eff; "
+                    "old checkpoints are not migrated — start fresh."
                 )
             bad_keys = [key for key in state["baselines"] if not (isinstance(key, tuple) and len(key) == 2)]
             if bad_keys:
@@ -76,6 +85,7 @@ class CheckpointManager:
                     f"key(s), e.g. {bad_keys[0]!r}. Rank-7 RAE requires 2-tuple keys — start fresh."
                 )
             rae_state.baselines = state["baselines"]
+            rae_state.canonical_members = state["canonical_members"]
             rae_state.beta = state["beta"]
             rae_state.n_eff = state["n_eff"]
         get_logger().debug(f"Orchestrator checkpoint loaded in {format_time(time.perf_counter() - start)}")
