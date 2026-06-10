@@ -26,7 +26,10 @@ from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
 
-REQUIRED_STATE_COLUMNS = ["trajectory"]
+# task_prompt: the clean task text debate rubrics score against (verifiers
+# question_from_state prefers it over the rendered first user message). Safe
+# for envs without it: state_to_output emits None for absent state columns.
+REQUIRED_STATE_COLUMNS = ["trajectory", "task_prompt"]
 
 
 class Env:
