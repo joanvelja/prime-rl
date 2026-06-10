@@ -20,8 +20,8 @@ from typing import cast
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import AdvantageConfig, EMAPerMemberAdvantageConfig, OrchestratorConfig
-from prime_rl.orchestrator.advantage import assign_advantages, setup_advantage_fn
+from prime_rl.configs.orchestrator import OrchestratorConfig
+from prime_rl.orchestrator.advantage import assign_advantages
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.filters import RolloutFilter, apply_filters
 from prime_rl.orchestrator.multi_agent_advantage import (
@@ -52,7 +52,6 @@ class TrainSink:
         mm_token_type_ids_mapping: dict[int, int] | None,
         batch_size: int | None,
         token_batch_size: int | None,
-        advantage_config: AdvantageConfig | None,
         rae_state: RAEState | None,
         pre_filters: list[RolloutFilter],
         post_filters: list[RolloutFilter],
@@ -64,14 +63,10 @@ class TrainSink:
         self.mm_token_type_ids_mapping = mm_token_type_ids_mapping
         self.batch_size = batch_size
         self.token_batch_size = token_batch_size
-        # Built once — custom advantage funcs do an ``import_object`` and
-        # we don't want to pay that per group. ``None`` = reward-only path
-        if isinstance(advantage_config, EMAPerMemberAdvantageConfig):
-            self.advantage_fn = None
-            self.rae_state = rae_state or RAEState(momentum=advantage_config.momentum)
-        else:
-            self.advantage_fn = setup_advantage_fn(advantage_config) if advantage_config is not None else None
-            self.rae_state = None
+        # Per-env advantage fns live on each ``TrainEnv``; the shared RAE state
+        # (multi-agent ``ema_per_member`` envs) is owned by the orchestrator so
+        # checkpoints can round-trip it.
+        self.rae_state = rae_state
         self.pre_filters = pre_filters
         self.post_filters = post_filters
 
@@ -222,7 +217,7 @@ class TrainSink:
                 )
                 return
         else:
-            assign_advantages(survivors, self.advantage_fn)
+            assign_advantages(survivors, self.train_envs.get(env_name).advantage_fn)
 
         # Propagate to the pre-tokenized samples so the orchestrator can
         # collect samples at ship time without re-walking rollouts. The env
@@ -303,8 +298,12 @@ class TrainSink:
                     source_rollout_id=episode.rollout_id,
                     advantage=advantages[member_idx],
                 )
-                await self.process_rollout(member)
                 out.append(member)
+        # Tokenization is independent per member: ``process_rollout`` mutates
+        # only the member's own raw/samples and uses the shared
+        # tokenizer/renderer read-only, so members can overlap. ``out`` keeps
+        # the deterministic episode x member order regardless.
+        await asyncio.gather(*(self.process_rollout(member) for member in out))
         return out
 
     def _is_multi_agent_episode_rollout(self, rollout: TrainRollout) -> bool:
