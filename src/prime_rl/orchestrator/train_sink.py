@@ -20,7 +20,7 @@ from typing import cast
 
 import verifiers as vf
 
-from prime_rl.configs.orchestrator import AdvantageConfig, EMAPerMemberAdvantageConfig, OrchestratorConfig
+from prime_rl.configs.orchestrator import AdvantageConfig, OrchestratorConfig, RAEAdvantageConfig
 from prime_rl.orchestrator.advantage import assign_advantages, setup_advantage_fn
 from prime_rl.orchestrator.envs import TrainEnvs
 from prime_rl.orchestrator.filters import RolloutFilter, apply_filters
@@ -66,9 +66,15 @@ class TrainSink:
         self.token_batch_size = token_batch_size
         # Built once — custom advantage funcs do an ``import_object`` and
         # we don't want to pay that per group. ``None`` = reward-only path
-        if isinstance(advantage_config, EMAPerMemberAdvantageConfig):
+        if isinstance(advantage_config, RAEAdvantageConfig):
             self.advantage_fn = None
-            self.rae_state = rae_state or RAEState(momentum=advantage_config.momentum)
+            if rae_state is None:
+                raise ValueError(
+                    "advantage.type='rae' requires the orchestrator-owned RAEState "
+                    "(it is checkpointed across resumes); constructing a fresh state "
+                    "inside the sink would silently diverge from the checkpoint"
+                )
+            self.rae_state = rae_state
         else:
             self.advantage_fn = setup_advantage_fn(advantage_config) if advantage_config is not None else None
             self.rae_state = None
@@ -271,7 +277,7 @@ class TrainSink:
 
     async def project_multi_agent_group(self, episodes: list[TrainRollout]) -> list[TrainRollout]:
         if self.rae_state is None:
-            raise RuntimeError("Multi-agent training requires advantage.type='ema_per_member'.")
+            raise RuntimeError("Multi-agent training requires advantage.type='rae'.")
 
         raw_episodes: list[vf.RolloutOutput] = []
         for episode in episodes:

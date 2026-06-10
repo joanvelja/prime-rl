@@ -498,15 +498,21 @@ class CustomAdvantageConfig(BaseConfig):
     """Kwargs forwarded to the advantage function."""
 
 
-class EMAPerMemberAdvantageConfig(BaseConfig):
-    type: Literal["ema_per_member"] = "ema_per_member"
+class RAEAdvantageConfig(BaseConfig):
+    """Rank-7 RAE for zero-sum multi-agent groups: shrunk leave-one-out +
+    historical prior, order-invariant, with the antithetic merge."""
 
-    momentum: float = Field(0.9, ge=0.0, le=1.0)
-    """EMA decay rate for per-(env, example, member) baseline updates."""
+    type: Literal["rae"] = "rae"
+
+    n_eff: float = Field(6.0, ge=0.0)
+    """Staleness-priced pseudo-count for the historical prior — does sample-size and drift-discount duty simultaneously; do not tune upward without revisiting that. ``0`` reduces to pure RLOO."""
+
+    beta: float = Field(0.9, gt=0.0, lt=1.0)
+    """Explicit group-level baseline memory, applied once per group-close fold — deliberately NOT the per-sample momentum of a sequential EMA."""
 
 
 AdvantageConfig: TypeAlias = Annotated[
-    DefaultAdvantageConfig | EMAPerMemberAdvantageConfig | CustomAdvantageConfig,
+    DefaultAdvantageConfig | RAEAdvantageConfig | CustomAdvantageConfig,
     Field(discriminator="type"),
 ]
 
