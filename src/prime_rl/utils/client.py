@@ -28,6 +28,31 @@ def client_identity(client: vf.ClientConfig) -> ClientIdentity:
     return (client.api_base_url, client.extra_headers.get("X-data-parallel-rank"))
 
 
+def train_typed_client(
+    client: vf.ClientConfig,
+    *,
+    train_client_type: str,
+    renderer_config: RendererConfig | None,
+    renderer_model_name: str | None,
+    pool_size: int | None,
+) -> vf.ClientConfig:
+    """Twin of ``client`` carrying the pool's train-path client type.
+
+    Same server, headers, and timeouts; only the client type (and, for the
+    renderer type, the renderer fields — mirroring ``setup_clients``) change.
+    Identity when ``client`` already speaks the train client type."""
+    if client.client_type == train_client_type:
+        return client
+    update: dict = {"client_type": train_client_type}
+    if train_client_type == "renderer":
+        update.update(
+            renderer_config=renderer_config,
+            renderer_model_name=renderer_model_name,
+            renderer_pool_size=pool_size,
+        )
+    return client.model_copy(update=update)
+
+
 @runtime_checkable
 class InferencePool(Protocol):
     """Protocol for inference pools (static or elastic)."""
@@ -58,6 +83,13 @@ class InferencePool(Protocol):
 
     async def get_eval_client(self) -> vf.ClientConfig:
         """Get next eval client in round-robin fashion."""
+        ...
+
+    def as_train_client(self, client: vf.ClientConfig) -> vf.ClientConfig:
+        """Re-type ``client`` to the pool's train-path client type (same
+        server, headers, and timeouts). Used at eval so trained members
+        generate through the same client semantics as training (e.g. the
+        renderer client's think-channel splitting)."""
         ...
 
     async def select_train_client(self, load: Mapping[ClientIdentity, int]) -> vf.ClientConfig:
@@ -99,6 +131,10 @@ class StaticInferencePool:
         pool_size: int | None = None,
     ):
         renderer_model_name = model_name if train_client_type == "renderer" else None
+        self._train_client_type = train_client_type
+        self._renderer_config = renderer_config
+        self._renderer_model_name = renderer_model_name
+        self._pool_size = pool_size
         self._train_clients = setup_clients(
             client_config,
             client_type=train_client_type,
@@ -130,6 +166,15 @@ class StaticInferencePool:
 
     async def get_eval_client(self) -> vf.ClientConfig:
         return next(self._eval_cycle)
+
+    def as_train_client(self, client: vf.ClientConfig) -> vf.ClientConfig:
+        return train_typed_client(
+            client,
+            train_client_type=self._train_client_type,
+            renderer_config=self._renderer_config,
+            renderer_model_name=self._renderer_model_name,
+            pool_size=self._pool_size,
+        )
 
     async def select_train_client(self, load: Mapping[ClientIdentity, int]) -> vf.ClientConfig:
         while not self.train_clients:
@@ -183,6 +228,58 @@ async def setup_inference_pool(
     )
 
 
+class ClientConnectionPolicy(Protocol):
+    """Connection/retry policy shared by every config that backs a verifiers client.
+
+    Satisfied by ``prime_rl.configs.shared.ClientConfig`` (inference pool) and
+    ``prime_rl.configs.multi_agent.FixedMemberTargetConfig`` (fixed members).
+    """
+
+    @property
+    def api_key_var(self) -> str: ...
+    @property
+    def timeout(self) -> float: ...
+    @property
+    def connect_timeout(self) -> float: ...
+    @property
+    def max_connections(self) -> int: ...
+    @property
+    def max_keepalive_connections(self) -> int: ...
+    @property
+    def max_retries(self) -> int: ...
+
+
+def build_client(
+    policy: ClientConnectionPolicy,
+    *,
+    api_base_url: str,
+    client_type: str = "openai_chat_completions",
+    client_idx: int = 0,
+    extra_headers: dict[str, str] | None = None,
+    extra_headers_from_state: dict[str, str] | None = None,
+    renderer_config: RendererConfig | None = None,
+    renderer_model_name: str | None = None,
+    renderer_pool_size: int | None = None,
+) -> vf.ClientConfig:
+    """Build one verifiers client config. Single owner of connection/retry policy wiring."""
+    return vf.ClientConfig(
+        client_idx=client_idx,
+        client_type=client_type,
+        api_base_url=api_base_url,
+        api_key_var=policy.api_key_var,
+        timeout=policy.timeout,
+        connect_timeout=policy.connect_timeout,
+        max_connections=policy.max_connections,
+        max_keepalive_connections=policy.max_keepalive_connections,
+        max_retries=policy.max_retries,
+        extra_headers=extra_headers or {},
+        extra_headers_from_state=extra_headers_from_state or {},
+        renderer_config=renderer_config,
+        renderer_model_name=renderer_model_name,
+        renderer_pool_size=renderer_pool_size,
+    )
+
+
 def setup_clients(
     client_config: ClientConfig,
     client_type: str = "openai_chat_completions",
@@ -210,16 +307,11 @@ def setup_clients(
             if client_config.dp_rank_count > 1:
                 headers["X-data-parallel-rank"] = str(dp_rank)
             clients.append(
-                vf.ClientConfig(
-                    client_idx=client_idx,
-                    client_type=client_type,
+                build_client(
+                    client_config,
                     api_base_url=base_url,
-                    api_key_var=client_config.api_key_var,
-                    timeout=client_config.timeout,
-                    connect_timeout=client_config.connect_timeout,
-                    max_connections=8192,
-                    max_keepalive_connections=8192,
-                    max_retries=10,
+                    client_type=client_type,
+                    client_idx=client_idx,
                     extra_headers=headers,
                     extra_headers_from_state=client_config.extra_headers_from_state,
                     **renderer_extra,

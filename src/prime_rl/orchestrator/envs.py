@@ -12,21 +12,55 @@ from typing import Generic, TypeVar
 
 import pandas as pd
 import verifiers as vf
+from verifiers.protocols.debate import DebateEnv
+from verifiers.protocols.debate.rubric import DebateRubric
 from verifiers.serve import ZMQEnvClient, ZMQEnvServer
 from verifiers.utils.serve_utils import get_free_port
 
 from prime_rl.configs.multi_agent import MultiAgentConfig
-from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, TrainEnvConfig
+from prime_rl.configs.orchestrator import EnvConfig, EvalEnvConfig, RAEAdvantageConfig, TrainEnvConfig
+from prime_rl.orchestrator.advantage import AdvantageFn, setup_advantage_fn
 from prime_rl.orchestrator.eval_utils import compute_pass_at_k
 from prime_rl.orchestrator.member_generation import (
     DISPATCH_ID_FIELD,
     compile_member_generation_plan,
+    fixed_member_targets,
 )
 from prime_rl.utils.logger import ProgressTracker, get_logger
 from prime_rl.utils.monitor import get_monitor
 from prime_rl.utils.utils import capitalize
 
-REQUIRED_STATE_COLUMNS = ["trajectory"]
+# task_prompt: the clean task text debate rubrics score against (verifiers
+# question_from_state prefers it over the rendered first user message). Safe
+# for envs without it: state_to_output emits None for absent state columns.
+REQUIRED_STATE_COLUMNS = ["trajectory", "task_prompt"]
+
+# Request fields the orchestrator injects into learner sampling args for its own
+# training loop. Fixed (non-learner) members are never trained, so these fields
+# are at best wasted and at worst rejected (400) by external API endpoints:
+# - "logprobs": inference logprobs feed the trainer's importance ratios.
+# - "return_token_ids": completion token ids feed trainer token alignment.
+# - "top_k" / "min_p": full-distribution sampling sentinels (-1 / 0.0) injected
+#   by resolve_env_config so learner logprobs match the trainer's softmax;
+#   vLLM-only params. Per-target values belong in the fixed target's sampling.
+# - "cache_salt": per-dispatch KV-cache isolation for the learner.
+LEARNER_ONLY_SAMPLING_FIELDS = frozenset({"logprobs"})
+LEARNER_ONLY_EXTRA_BODY_FIELDS = frozenset({"cache_salt", "return_token_ids", "top_k", "min_p"})
+
+
+def episode_scalar_is_inert(env: vf.Environment) -> bool:
+    """True iff the env's episode scalar is identically zero by construction.
+
+    The structural declaration lives on the debate rubric: with
+    ``truth_member=None`` (symmetric zero-sum), ``episode_scalar_from_winner``
+    returns 0.0 for every episode, so reward-derived panels (avg@k, pass@k)
+    are constant-zero by design. With ``truth_member`` set, the scalar is a
+    live binary signal (truth side won) — an all-zero batch there is a true
+    zero, not degeneracy. Non-debate rubrics carry no such declaration;
+    undeterminable defaults to live (never suppress what we cannot prove
+    inert — a flat-zero line is honest, a missing panel is not)."""
+    rubric = getattr(env, "rubric", None)
+    return isinstance(rubric, DebateRubric) and rubric.truth_member is None
 
 
 class Env:
@@ -63,7 +97,11 @@ class Env:
 
     @property
     def is_multi_agent(self) -> bool:
-        return bool(getattr(self.env, "is_multi_agent", False))
+        return isinstance(self.env, vf.MultiAgentEnv)
+
+    @property
+    def has_inert_episode_scalar(self) -> bool:
+        return episode_scalar_is_inert(self.env)
 
     async def start(
         self,
@@ -122,8 +160,17 @@ class Env:
         return sampling_args
 
     def _fixed_member_sampling_args(self) -> dict:
-        sampling_args = {**self.sampling_args}
-        sampling_args.pop("extra_body", None)
+        """Sampling args for fixed (non-learner) member targets: inherit the
+        learner's portable sampling defaults but strip learner-only request
+        fields (see LEARNER_ONLY_*_FIELDS), and copy the nested ``extra_body``
+        so downstream mutation cannot alias the learner's extra_body. A fixed
+        target's own explicit ``sampling`` config still overrides."""
+        sampling_args = {k: v for k, v in self.sampling_args.items() if k not in LEARNER_ONLY_SAMPLING_FIELDS}
+        extra_body = sampling_args.pop("extra_body", None)
+        if extra_body is not None:
+            extra_body = {k: v for k, v in extra_body.items() if k not in LEARNER_ONLY_EXTRA_BODY_FIELDS}
+            if extra_body:
+                sampling_args["extra_body"] = extra_body
         return sampling_args
 
     def multi_agent_members(self) -> list[str]:
@@ -142,6 +189,7 @@ class Env:
         model_name: str,
         cache_salt: str | None,
         dispatch_id: str,
+        group_id: str,
     ) -> vf.MemberGenerationPlan | None:
         if not config.enabled:
             return None
@@ -153,6 +201,7 @@ class Env:
             learner_sampling_args=self._sampling_args_with_salt(cache_salt),
             fixed_sampling_args=self._fixed_member_sampling_args(),
             dispatch_id=dispatch_id,
+            group_id=group_id,
         )
 
     @property
@@ -229,6 +278,14 @@ class TrainEnv(Env):
     def __init__(self, config: TrainEnvConfig):
         super().__init__(config)
         self.sampling_args = config.sampling.to_sampling_args()
+        # Built once — custom advantage funcs do an ``import_object`` we don't
+        # want to pay per group. ``None`` = reward-only path. ``rae``
+        # has no group-level fn: the train sink computes RAE advantages instead.
+        self.advantage_fn: AdvantageFn | None = (
+            setup_advantage_fn(config.advantage)
+            if config.advantage is not None and not isinstance(config.advantage, RAEAdvantageConfig)
+            else None
+        )
 
     def get_dataset(self, seed: int | None = None):
         return self.env.get_dataset(seed=seed)
@@ -292,9 +349,8 @@ class EvalEnv(Env):
                 """Run group_size rollouts as a scored group for one example."""
                 client = await acquire_client(group_size)
                 try:
-                    dispatch_ids = [
-                        f"eval:{step}:{self.name}:{example['example_id']}:{idx}" for idx in range(group_size)
-                    ]
+                    group_key = f"eval:{step}:{self.name}:{example['example_id']}"
+                    dispatch_ids = [f"{group_key}:{idx}" for idx in range(group_size)]
                     generation = (
                         [
                             self.compile_generation(
@@ -303,6 +359,7 @@ class EvalEnv(Env):
                                 model_name=model_name,
                                 cache_salt=cache_salt,
                                 dispatch_id=dispatch_id,
+                                group_id=group_key,
                             )
                             for dispatch_id in dispatch_ids
                         ]
@@ -337,7 +394,8 @@ class EvalEnv(Env):
                 example, rollout_idx = job
                 client = await acquire_client(1)
                 try:
-                    dispatch_id = f"eval:{step}:{self.name}:{example['example_id']}:{rollout_idx}"
+                    group_key = f"eval:{step}:{self.name}:{example['example_id']}"
+                    dispatch_id = f"{group_key}:{rollout_idx}"
                     generation = (
                         self.compile_generation(
                             active_multi_agent,
@@ -345,6 +403,7 @@ class EvalEnv(Env):
                             model_name=model_name,
                             cache_salt=cache_salt,
                             dispatch_id=dispatch_id,
+                            group_id=group_key,
                         )
                         if active_multi_agent is not None
                         else None
@@ -574,3 +633,41 @@ class EvalEnvs(Envs[EvalEnv]):
         for config in configs:
             env = EvalEnv(config)
             self._envs[env.name] = env
+
+
+def validate_eval_think_split_routing(
+    eval_envs: EvalEnvs,
+    *,
+    multi_agent: MultiAgentConfig,
+    renderer_configured: bool,
+) -> None:
+    """Fail at startup when a think-splitting eval protocol would route its
+    trained members through a bare chat-completions client.
+
+    Debate envs split each member's CoT into ``reasoning_content``
+    client-side — only the renderer client does that. At eval the dispatcher
+    re-types the pinned chat client to the student pool's train client type
+    (``InferencePool.as_train_client``), which yields a renderer client only
+    when ``orchestrator.renderer`` is configured. Without it, trained members
+    generate through bare chat completions: a balanced ``<think>`` block in
+    the content fails the debate air-gap check (every eval rollout errors),
+    an unbalanced one leaks private CoT to the opponent and judge — either
+    way eval measures a different protocol than training."""
+    if renderer_configured:
+        return
+    fixed_members = fixed_member_targets(multi_agent)
+    for env in eval_envs:
+        if not isinstance(env.env, DebateEnv):
+            continue
+        learners = [m for m in env.multi_agent_members() if m not in fixed_members]
+        if not learners:
+            continue
+        raise ValueError(
+            f"Eval env {env.name!r} runs a debate protocol that splits think-channels "
+            f"client-side, but its trained members {learners} would generate through a "
+            f"bare chat-completions client at eval because orchestrator.renderer is not "
+            f"configured. Either configure [orchestrator.renderer] (TITO; e.g. "
+            f"name='auto', preserve_all_thinking=true) so eval matches the training "
+            f"distribution, or pin these members to [orchestrator.multi_agent.fixed.*] "
+            f"targets with request_mode='renderer'."
+        )

@@ -36,8 +36,10 @@ from verifiers import rollout_to_member_rollouts
 from verifiers.types import MARScore, MemberRollout
 
 from prime_rl.configs.multi_agent import MultiAgentConfig
+from prime_rl.configs.orchestrator import AdvantageConfig, RAEAdvantageConfig
 from prime_rl.orchestrator.member_generation import fixed_member_targets
 from prime_rl.orchestrator.member_generation import is_trainable_member as is_bound_trainable_member
+from prime_rl.orchestrator.types import RAEStats
 
 MemberTrainability = Callable[[Mapping, str], bool]
 
@@ -199,7 +201,7 @@ def compute_rae_advantages(
     state: RAEState,
     *,
     episode_pairs: EpisodePairs,
-) -> list[float]:
+) -> tuple[list[float], RAEStats]:
     """Compute rank-7 RAE advantages and fold each group's baseline once.
 
     ``member_rollouts`` are the (possibly trainability-filtered) rows that
@@ -208,6 +210,15 @@ def compute_rae_advantages(
     derivation and antisymmetry validation never depend on which seats
     survived filtering. Advantages are returned in input order; fold
     records for this call land on ``state.last_folds``.
+
+    The returned ``RAEStats`` snapshot maps rank-7 quantities onto the
+    sink's observability contract: ``updates`` counts member rows,
+    ``cold_updates`` counts groups that hit a cold key,
+    ``baseline_abs_delta_sum`` accumulates the per-group fold delta
+    ``|b' - b|``, and the per-member baseline sums report the post-fold
+    baseline in each member's SIGN FRAME (canonical baseline for the
+    canonical member, negated for the other) so per-member means stay
+    meaningful under the antithetic state.
     """
     episode_rows_by_key: dict[RAEKey, dict[str, list[int]]] = {}
     for idx, member_rollout in enumerate(member_rollouts):
@@ -215,6 +226,7 @@ def compute_rae_advantages(
         episode_rows_by_key.setdefault(key, {}).setdefault(member_rollout["episode_id"], []).append(idx)
 
     advantages: list[float] = [0.0] * len(member_rollouts)
+    stats = RAEStats()
     state.last_folds = []
     for key, episode_rows in episode_rows_by_key.items():
         pairs = {episode_id: _validated_pair(key, episode_id, episode_pairs) for episode_id in episode_rows}
@@ -233,6 +245,8 @@ def compute_rae_advantages(
         cold = key not in state.baselines
         lam = 1.0 if group_size == 1 else state.n_eff / (state.n_eff + group_size - 1)
         total = sum(rewards.values())
+        group_mean = total / group_size
+        folded = state.beta * baseline + (1.0 - state.beta) * group_mean
         for episode_id, rows in episode_rows.items():
             pair = pairs[episode_id]
             row_ids = [member_rollouts[i]["member_id"] for i in rows]
@@ -249,9 +263,16 @@ def compute_rae_advantages(
                         f"is not in the episode's zero-sum pair {sorted(pair)}"
                     )
                 advantages[i] = advantage if member_id == canonical else -advantage
+                framed_baseline = folded if member_id == canonical else -folded
+                stats.updates += 1
+                stats.baseline_sum_by_member[member_id] = (
+                    stats.baseline_sum_by_member.get(member_id, 0.0) + framed_baseline
+                )
+                stats.updates_by_member[member_id] = stats.updates_by_member.get(member_id, 0) + 1
 
-        group_mean = total / group_size
-        folded = state.beta * baseline + (1.0 - state.beta) * group_mean
+        if cold:
+            stats.cold_updates += 1
+        stats.baseline_abs_delta_sum += abs(folded - baseline)
         state.canonical_members[key] = canonical
         state.baselines[key] = folded
         state.last_folds.append(
@@ -265,4 +286,26 @@ def compute_rae_advantages(
                 cold=cold,
             )
         )
-    return advantages
+    stats.baseline_keys_total = len(state.baselines)
+    return advantages, stats
+
+
+def validate_advantage_mode(env_name: str, *, is_multi_agent: bool, advantage: AdvantageConfig | None) -> None:
+    """Enforce the env ⟺ advantage pairing at startup, once ``is_multi_agent``
+    is known (config-time validation cannot see the loaded env): multi-agent
+    envs need RAE (``rae``); a single-agent env resolving to it would
+    silently degrade to raw-reward REINFORCE (no baseline)."""
+    is_rae = isinstance(advantage, RAEAdvantageConfig)
+    if is_multi_agent and not is_rae:
+        resolved = "None" if advantage is None else advantage.type
+        raise ValueError(
+            f"Train env {env_name!r} is multi-agent but resolves advantage={resolved!r}. "
+            "Multi-agent training requires advantage.type='rae' — set it in "
+            "[orchestrator.advantage] or as this env's per-env advantage override."
+        )
+    if is_rae and not is_multi_agent:
+        raise ValueError(
+            f"Train env {env_name!r} resolves advantage.type='rae' but is not a multi-agent env. "
+            "Its groups would train with no baseline (raw-reward REINFORCE). Give this env a per-env "
+            'advantage override in its [[orchestrator.train.env]] block, e.g. advantage = { type = "default" }.'
+        )

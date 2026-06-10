@@ -12,6 +12,7 @@ from prime_rl.configs.inference import InferenceConfig
 from prime_rl.configs.orchestrator import OrchestratorConfig
 from prime_rl.configs.rl import RLConfig
 from prime_rl.configs.sft import SFTConfig
+from prime_rl.configs.shared import ClientConfig
 from prime_rl.configs.trainer import DefaultLossConfig, TrainerConfig
 from prime_rl.configs.trainer import ModelConfig as TrainerModelConfig
 from prime_rl.utils.config import BaseConfig, cli
@@ -45,8 +46,15 @@ def is_eval_config(path: Path) -> bool:
 
 
 def is_baseline_config(path: Path) -> bool:
-    """Baseline harness TOMLs have a separate dataclass config loader."""
-    return path.parts[:2] == ("configs", "baselines")
+    """Baseline harness TOMLs have a separate dataclass config loader.
+
+    Detected by the loader's required top-level ``env_id`` key (no entrypoint
+    config has one); they live under ``configs/baselines/`` and in run packs
+    like ``configs/calibration/``.
+    """
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    return "env_id" in data
 
 
 def is_composed_config_layer(path: Path) -> bool:
@@ -801,3 +809,75 @@ def test_explicit_inference_parser_wins_over_auto():
     )
     assert config.inference is not None
     assert config.inference.model.tool_call_parser == "hermes"
+
+
+def test_client_config_connection_policy_defaults():
+    client = ClientConfig()
+    assert client.max_retries == 10
+    assert client.max_connections == 8192
+    assert client.max_keepalive_connections == 8192
+    assert client.ttft_budget_s == 400.0
+    assert client.tpot_budget_s == 0.15
+
+
+def test_orchestrator_rejects_client_timeout_below_generation_bound():
+    """crash3 shape: timeout=1200s vs structural e2e of 400 + 12600 * 0.15 = 2290s."""
+    with pytest.raises(ValidationError, match=r"student\.client\.timeout=1200s") as exc_info:
+        OrchestratorConfig.model_validate(
+            {
+                "client": {"timeout": 1200},
+                "train": {"sampling": {"max_completion_tokens": 12600}},
+            }
+        )
+    message = str(exc_info.value)
+    assert "ttft_budget_s (400.0s)" in message
+    assert "tpot_budget_s (0.15s/tok)" in message
+    assert "= 2290s" in message
+
+
+def test_orchestrator_accepts_client_timeout_covering_generation_bound():
+    config = OrchestratorConfig.model_validate(
+        {
+            "client": {"timeout": 3600},
+            "train": {"sampling": {"max_completion_tokens": 12600}},
+        }
+    )
+    assert config.student.client.timeout == 3600
+
+
+def test_orchestrator_per_env_advantage_inherits_global_unless_overridden():
+    config = OrchestratorConfig.model_validate(
+        {
+            "model": {"name": "Qwen/Qwen3-0.6B"},
+            "advantage": {"type": "rae", "beta": 0.8},
+            "train": {
+                "env": [
+                    {"id": "two-player-env"},
+                    {"id": "reverse-text", "advantage": {"type": "default"}},
+                ],
+            },
+        }
+    )
+
+    inherited = config.train.env[0].advantage
+    overridden = config.train.env[1].advantage
+    assert inherited is not None
+    assert inherited.type == "rae"
+    assert inherited.beta == 0.8
+    assert overridden is not None
+    assert overridden.type == "default"
+
+
+def test_orchestrator_per_env_ema_momentum_mismatch_raises():
+    with pytest.raises(ValidationError, match="Conflicting rae"):
+        OrchestratorConfig.model_validate(
+            {
+                "model": {"name": "Qwen/Qwen3-0.6B"},
+                "train": {
+                    "env": [
+                        {"id": "two-player-a", "advantage": {"type": "rae", "beta": 0.9}},
+                        {"id": "two-player-b", "advantage": {"type": "rae", "beta": 0.5}},
+                    ],
+                },
+            }
+        )

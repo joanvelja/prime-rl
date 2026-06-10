@@ -142,7 +142,7 @@ def test_fan_out_pipeline_into_compute_rae_advantages():
         "ep-2": {"debater_a": -1.0, "debater_b": 1.0},
     }
     state = RAEState()
-    advantages = compute_rae_advantages(units, state, episode_pairs=episode_pairs)
+    advantages, _ = compute_rae_advantages(units, state, episode_pairs=episode_pairs)
     assert len(advantages) == len(units) == 4
     # One group key ("debate_v1", 1), canonical member debater_a, cold b0 = 0,
     # G = 2 episodes, lam = 6/(6+1) = 6/7. Canonical rewards [1, -1]:
@@ -246,6 +246,7 @@ def test_compile_member_generation_plan_routes_selected_fixed_and_judge_members(
         learner_sampling_args={"temperature": 1.0, "extra_body": {"cache_salt": "7"}},
         fixed_sampling_args={"temperature": 1.0, "max_completion_tokens": 1024},
         dispatch_id=dispatch_id,
+        group_id="group-compile",
     )
     assert plan is not None
 

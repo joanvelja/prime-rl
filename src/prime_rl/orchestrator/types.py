@@ -124,6 +124,38 @@ class EvalRollout(FinishedRollout):
 
 
 @dataclass
+class RAEStats:
+    """Instrumentation snapshot of the multi-agent advantage path (RAE).
+
+    Derived strictly from the estimator's inputs/outputs (rewards in,
+    baseline values out) so the estimator implementation can be swapped
+    without touching this. ``baseline_abs_delta_sum`` accumulates per-update
+    baseline movement ``|after - before|``, using the estimator's effective
+    prior (0.0) as the before-value for cold keys. A "cold" update is a
+    baseline key never seen before. Window semantics match the sink's other
+    counters: everything since the last ship, regardless of which batch the
+    affected rows land in."""
+
+    updates: int = 0
+    cold_updates: int = 0
+    baseline_abs_delta_sum: float = 0.0
+    baseline_sum_by_member: dict[str, float] = field(default_factory=dict)
+    updates_by_member: dict[str, int] = field(default_factory=dict)
+    baseline_keys_total: int = 0
+
+    def merge(self, other: RAEStats) -> None:
+        self.updates += other.updates
+        self.cold_updates += other.cold_updates
+        self.baseline_abs_delta_sum += other.baseline_abs_delta_sum
+        for member_id, baseline_sum in other.baseline_sum_by_member.items():
+            self.baseline_sum_by_member[member_id] = self.baseline_sum_by_member.get(member_id, 0.0) + baseline_sum
+        for member_id, count in other.updates_by_member.items():
+            self.updates_by_member[member_id] = self.updates_by_member.get(member_id, 0) + count
+        # The baseline table only grows; the freshest snapshot is the largest.
+        self.baseline_keys_total = max(self.baseline_keys_total, other.baseline_keys_total)
+
+
+@dataclass
 class TrainBatchMetrics:
     """Per-batch aggregates from ``TrainSink.process_batch``; consumed by
     ``MetricsBuilder.build``. ``arrivals_by_env`` / ``errors_by_env`` count
@@ -138,6 +170,7 @@ class TrainBatchMetrics:
     samples_shipped: int
     arrivals_by_env: dict[str, int] = field(default_factory=dict)
     errors_by_env: dict[str, int] = field(default_factory=dict)
+    rae_stats: RAEStats | None = None
 
 
 @dataclass
@@ -176,7 +209,17 @@ def rollouts_for_logging(batch: TrainBatch) -> list[TrainRollout]:
 @dataclass
 class EvalBatchMetrics:
     """Typed per-batch metrics from ``EvalSink.process_batch``. Final wandb
-    dict derived via ``to_wandb_dict`` at log time."""
+    dict derived via ``to_wandb_dict`` at log time.
+
+    ``mar_metrics`` / ``winner_counts`` form the multi-agent MARScore panel
+    (per-member rewards + metrics, judge-winner distribution); both empty for
+    single-agent envs. ``inert_scalar`` is the env's structural declaration
+    that its episode scalar is identically zero by construction (symmetric
+    zero-sum debate, ``truth_member=None`` — see ``episode_scalar_is_inert``):
+    ``avg@k`` / ``pass@k`` would be constant-zero panels there, so
+    ``to_wandb_dict`` omits those keys and the MARScore panel carries the
+    signal instead. Envs with a live scalar — including ``truth_member``
+    debate packs whose batch honestly scored 0.0 — keep them."""
 
     n_rollouts: int
     n_cancelled: int
@@ -193,6 +236,12 @@ class EvalBatchMetrics:
     num_turns_min: float = 0.0
     num_turns_max: float = 0.0
     pass_at_k: dict[str, float] = field(default_factory=dict)
+    mar_metrics: dict[str, float] = field(default_factory=dict)
+    winner_counts: dict[str, int] = field(default_factory=dict)
+    inert_scalar: bool = False
+    # Key-agnostic means of numeric env-emitted rollout metrics
+    # (``raw["metrics"]``), e.g. debate diagnostics.
+    env_metrics: dict[str, float] = field(default_factory=dict)
 
     def to_wandb_dict(self, *, env_name: str, step: int) -> dict[str, float]:
         prefix = f"eval/{env_name}"
@@ -202,7 +251,10 @@ class EvalBatchMetrics:
             f"{prefix}/errored_count": float(self.n_errored),
         }
         if self.n_examples > 0:
-            out[f"{prefix}/avg@{self.group_size}"] = self.reward_mean
+            if not self.inert_scalar:
+                out[f"{prefix}/avg@{self.group_size}"] = self.reward_mean
+                for k, v in self.pass_at_k.items():
+                    out[f"{prefix}/{k}"] = v
             out[f"{prefix}/completion_len/mean"] = self.completion_len_mean
             out[f"{prefix}/completion_len/max"] = self.completion_len_max
             out[f"{prefix}/completion_len/min"] = self.completion_len_min
@@ -211,8 +263,14 @@ class EvalBatchMetrics:
             out[f"{prefix}/num_turns/mean"] = self.num_turns_mean
             out[f"{prefix}/num_turns/min"] = self.num_turns_min
             out[f"{prefix}/num_turns/max"] = self.num_turns_max
-            for k, v in self.pass_at_k.items():
-                out[f"{prefix}/{k}"] = v
+            for k, v in self.mar_metrics.items():
+                out[f"{prefix}/mar/{k}"] = v
+            n_winners = sum(self.winner_counts.values())
+            for value, count in sorted(self.winner_counts.items()):
+                out[f"{prefix}/winner_count/{value}"] = float(count)
+                out[f"{prefix}/winner_share/{value}"] = count / n_winners
+            for key, value in self.env_metrics.items():
+                out[f"{prefix}/metrics/{key}"] = value
         return out
 
 

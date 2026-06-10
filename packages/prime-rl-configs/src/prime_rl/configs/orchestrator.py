@@ -214,6 +214,62 @@ class EvalSamplingConfig(BaseConfig):
         return data
 
 
+class TokensLengthPenaltyConfig(BaseConfig):
+    type: Literal["tokens"] = "tokens"
+
+    completion_weight: float = Field(1.0, ge=0, allow_inf_nan=False)
+    """Weight on model completion tokens. Finite and non-negative."""
+
+    tool_response_weight: float = Field(1.0, ge=0, allow_inf_nan=False)
+    """Weight on tool-response tokens (read from the rollout's ``*_total_tool_response_tokens`` harness metric; 0 if absent). Finite and non-negative."""
+
+
+class TurnsLengthPenaltyConfig(BaseConfig):
+    type: Literal["turns"] = "turns"
+
+
+LengthPenaltyConfig: TypeAlias = Annotated[
+    TokensLengthPenaltyConfig | TurnsLengthPenaltyConfig,
+    Field(discriminator="type"),
+]
+
+
+class DefaultAdvantageConfig(BaseConfig):
+    type: Literal["default"] = "default"
+
+    length_penalty: LengthPenaltyConfig | None = None
+    """Correctness-gated length penalty. ``tokens`` shapes by weighted token cost; ``turns`` shapes by trajectory turn count; None disables shaping. In mixed groups, lower-cost correct rollouts get amplified advantage (up to 2x), higher-cost correct rollouts are unchanged, incorrect untouched. In all-correct groups, below-average-cost rollouts get advantage in [0, 1], others get 0."""
+
+
+class CustomAdvantageConfig(BaseConfig):
+    type: Literal["custom"] = "custom"
+
+    import_path: str
+    """Import path to the advantage function (e.g. ``my_module.my_advantage``)."""
+
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    """Kwargs forwarded to the advantage function."""
+
+
+class RAEAdvantageConfig(BaseConfig):
+    """Rank-7 RAE for zero-sum multi-agent groups: shrunk leave-one-out +
+    historical prior, order-invariant, with the antithetic merge."""
+
+    type: Literal["rae"] = "rae"
+
+    n_eff: float = Field(6.0, ge=0.0)
+    """Staleness-priced pseudo-count for the historical prior — does sample-size and drift-discount duty simultaneously; do not tune upward without revisiting that. ``0`` reduces to pure RLOO."""
+
+    beta: float = Field(0.9, gt=0.0, lt=1.0)
+    """Explicit group-level baseline memory, applied once per group-close fold — deliberately NOT the per-sample momentum of a sequential EMA."""
+
+
+AdvantageConfig: TypeAlias = Annotated[
+    DefaultAdvantageConfig | RAEAdvantageConfig | CustomAdvantageConfig,
+    Field(discriminator="type"),
+]
+
+
 class EnvConfig(BaseConfig):
     id: str = "reverse-text"
     """Registered verifiers environment ID (e.g. ``math-env``, ``primeintellect/math-env``). May include an ``@version`` suffix for installation."""
@@ -284,6 +340,11 @@ class TrainEnvConfig(EnvConfig):
     group_size: int = Field(1, ge=1, validation_alias=AliasChoices("group_size", "rollouts_per_example"))
     """Rollouts generated per example for GRPO group-relative advantages.
     Inherits from ``orchestrator.group_size`` when unset."""
+
+    advantage: AdvantageConfig | None = None
+    """Advantage strategy for this env's GRPO groups. Inherits from the top-level
+    ``orchestrator.advantage`` when unset; set a different ``default``/``custom``
+    config to give this env its own advantage computation."""
 
 
 class EvalEnvConfig(EnvConfig):
@@ -459,62 +520,6 @@ class CheckpointConfig(BaseConfig):
 
     skip_progress: bool = False
     """Skip loading the progress from checkpoint."""
-
-
-class TokensLengthPenaltyConfig(BaseConfig):
-    type: Literal["tokens"] = "tokens"
-
-    completion_weight: float = Field(1.0, ge=0, allow_inf_nan=False)
-    """Weight on model completion tokens. Finite and non-negative."""
-
-    tool_response_weight: float = Field(1.0, ge=0, allow_inf_nan=False)
-    """Weight on tool-response tokens (read from the rollout's ``*_total_tool_response_tokens`` harness metric; 0 if absent). Finite and non-negative."""
-
-
-class TurnsLengthPenaltyConfig(BaseConfig):
-    type: Literal["turns"] = "turns"
-
-
-LengthPenaltyConfig: TypeAlias = Annotated[
-    TokensLengthPenaltyConfig | TurnsLengthPenaltyConfig,
-    Field(discriminator="type"),
-]
-
-
-class DefaultAdvantageConfig(BaseConfig):
-    type: Literal["default"] = "default"
-
-    length_penalty: LengthPenaltyConfig | None = None
-    """Correctness-gated length penalty. ``tokens`` shapes by weighted token cost; ``turns`` shapes by trajectory turn count; None disables shaping. In mixed groups, lower-cost correct rollouts get amplified advantage (up to 2x), higher-cost correct rollouts are unchanged, incorrect untouched. In all-correct groups, below-average-cost rollouts get advantage in [0, 1], others get 0."""
-
-
-class CustomAdvantageConfig(BaseConfig):
-    type: Literal["custom"] = "custom"
-
-    import_path: str
-    """Import path to the advantage function (e.g. ``my_module.my_advantage``)."""
-
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-    """Kwargs forwarded to the advantage function."""
-
-
-class RAEAdvantageConfig(BaseConfig):
-    """Rank-7 RAE for zero-sum multi-agent groups: shrunk leave-one-out +
-    historical prior, order-invariant, with the antithetic merge."""
-
-    type: Literal["rae"] = "rae"
-
-    n_eff: float = Field(6.0, ge=0.0)
-    """Staleness-priced pseudo-count for the historical prior — does sample-size and drift-discount duty simultaneously; do not tune upward without revisiting that. ``0`` reduces to pure RLOO."""
-
-    beta: float = Field(0.9, gt=0.0, lt=1.0)
-    """Explicit group-level baseline memory, applied once per group-close fold — deliberately NOT the per-sample momentum of a sequential EMA."""
-
-
-AdvantageConfig: TypeAlias = Annotated[
-    DefaultAdvantageConfig | RAEAdvantageConfig | CustomAdvantageConfig,
-    Field(discriminator="type"),
-]
 
 
 # Flags rare tokens generated at high entropy (Section 5.2, https://arxiv.org/abs/2510.02387).
@@ -983,6 +988,62 @@ class OrchestratorConfig(BaseConfig):
         )
 
     @model_validator(mode="after")
+    def validate_client_timeout_covers_generation(self):
+        """Reject request timeouts below the structural end-to-end latency of one
+        non-streaming generation request: ``ttft_budget_s + max_tokens * tpot_budget_s``.
+
+        Below this bound, saturation turns into a timeout storm: every request
+        times out, re-enters the queue for up to ``max_retries`` more full-timeout
+        attempts, and the batch never completes (crash3: 49x APITimeoutError at
+        896 concurrent seqs — TTFT 316s + 12,600 tokens x 0.102 s/tok ~ 1600s
+        against a 1200s timeout).
+        """
+        train_max_tokens = max(
+            (
+                env.sampling.max_completion_tokens
+                for env in self.train.env
+                if env.sampling.max_completion_tokens is not None
+            ),
+            default=None,
+        )
+        eval_max_tokens = None
+        if self.eval is not None:
+            eval_max_tokens = max(
+                (
+                    env.sampling.max_completion_tokens
+                    for env in self.eval.env
+                    if env.sampling.max_completion_tokens is not None
+                ),
+                default=None,
+            )
+
+        # Train rollouts are generated by the teacher in sft mode, by the student
+        # otherwise; evals always run against the student client.
+        checks: list[tuple[str, ClientConfig, int]] = []
+        if train_max_tokens is not None:
+            if self.training_mode == "sft" and self.teacher is not None:
+                checks.append(("teacher", self.teacher.client, train_max_tokens))
+            else:
+                checks.append(("student", self.student.client, train_max_tokens))
+        if eval_max_tokens is not None:
+            checks.append(("student", self.student.client, eval_max_tokens))
+
+        for role, client, max_tokens in checks:
+            bound = client.ttft_budget_s + max_tokens * client.tpot_budget_s
+            if client.timeout < bound:
+                raise ValueError(
+                    f"{role}.client.timeout={client.timeout}s cannot cover one non-streaming "
+                    f"generation request: ttft_budget_s ({client.ttft_budget_s}s) + "
+                    f"max_completion_tokens ({max_tokens}) x tpot_budget_s ({client.tpot_budget_s}s/tok) "
+                    f"= {bound:.0f}s. Requests that exceed the timeout re-enter the server queue for up "
+                    f"to {role}.client.max_retries={client.max_retries} more full-timeout attempts, "
+                    f"amplifying into a timeout storm at saturation. Raise {role}.client.timeout to at "
+                    f"least {math.ceil(bound)}s, lower max_completion_tokens, or tighten the "
+                    f"{role}.client.ttft_budget_s / tpot_budget_s admission budgets."
+                )
+        return self
+
+    @model_validator(mode="after")
     def resolve_batching(self):
         # Propagate the top-level ``group_size`` into each train env that didn't set its own
         # before any capacity checks that depend on actual per-env group sizes.
@@ -1030,12 +1091,34 @@ class OrchestratorConfig(BaseConfig):
         if self.max_inflight_rollouts is not None and self.max_inflight_rollouts < max_group_size:
             raise ValueError("max_inflight_rollouts must be at least the largest train env group_size")
 
+        # Propagate the top-level ``advantage`` into each train env that didn't set its own.
+        for env_cfg in self.train.env:
+            if "advantage" not in env_cfg.model_fields_set:
+                env_cfg.advantage = self.advantage
+
         # Resolve train env num_workers from max_inflight_rollouts
         for env_cfg in self.train.env:
             if env_cfg.num_workers == "auto":
                 assert self.max_inflight_rollouts is not None
                 env_cfg.num_workers = max(1, math.ceil(self.max_inflight_rollouts / 256))
 
+        return self
+
+    @model_validator(mode="after")
+    def validate_rae_advantage_params(self):
+        """All envs resolving to ``rae`` share a single ``RAEState`` (one
+        ``beta``/``n_eff`` per run); reject silently-diverging per-env params.
+        Runs after ``resolve_batching`` so per-env ``advantage`` is resolved."""
+        params = {
+            (env_cfg.advantage.beta, env_cfg.advantage.n_eff)
+            for env_cfg in self.train.env
+            if isinstance(env_cfg.advantage, RAEAdvantageConfig)
+        }
+        if len(params) > 1:
+            raise ValueError(
+                f"Conflicting rae (beta, n_eff) across train envs: {sorted(params)}. "
+                "All rae envs share one RAE state, so they must use the same beta and n_eff."
+            )
         return self
 
     @model_validator(mode="after")

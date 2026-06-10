@@ -12,11 +12,13 @@ import pytest
 from verifiers.types import MemberRollout
 
 from prime_rl.configs.multi_agent import MultiAgentConfig
+from prime_rl.configs.orchestrator import DefaultAdvantageConfig, RAEAdvantageConfig
 from prime_rl.orchestrator.multi_agent_advantage import (
     RAEState,
     compute_rae_advantages,
     extract_episode_pairs_for_multi_agent,
     fan_out_for_multi_agent,
+    validate_advantage_mode,
 )
 
 ENV_NAME = "debate_v1"
@@ -78,7 +80,7 @@ def test_permutation_equivariance():
 
     def run(ordered_rows: list[MemberRollout]) -> tuple[dict[tuple[str, str], float], dict, list]:
         state = RAEState(baselines={KEY: 0.25})
-        advantages = compute_rae_advantages(ordered_rows, state, episode_pairs=episode_pairs)
+        advantages, _ = compute_rae_advantages(ordered_rows, state, episode_pairs=episode_pairs)
         by_identity = {(r["episode_id"], r["member_id"]): a for r, a in zip(ordered_rows, advantages)}
         return by_identity, dict(state.baselines), state.last_folds
 
@@ -99,7 +101,7 @@ def test_antithetic_invariant():
     rows = _group(canonical_rewards)
     state = RAEState(baselines={KEY: 0.25})
 
-    advantages = compute_rae_advantages(rows, state, episode_pairs=_pairs(canonical_rewards))
+    advantages, _ = compute_rae_advantages(rows, state, episode_pairs=_pairs(canonical_rewards))
 
     # Per pair: A_b is the exact negation of A_a
     for i in range(0, len(rows), 2):
@@ -110,7 +112,7 @@ def test_antithetic_invariant():
 def test_g1_reduces_to_pure_prior():
     state = RAEState(baselines={KEY: 0.4})
 
-    advantages = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
+    advantages, _ = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
 
     # G=1: lam pinned to 1, LOO term has zero weight. A = r - b = 1.0 - 0.4 = 0.6
     assert advantages == [pytest.approx(0.6), pytest.approx(-0.6)]
@@ -119,7 +121,7 @@ def test_g1_reduces_to_pure_prior():
 def test_g1_with_neff_zero_still_uses_prior():
     state = RAEState(baselines={KEY: 0.4}, n_eff=0.0)
 
-    advantages = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
+    advantages, _ = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
 
     # lam = 1 at G=1 regardless of n_eff (0/0 would otherwise be NaN)
     assert advantages == [pytest.approx(0.6), pytest.approx(-0.6)]
@@ -128,7 +130,7 @@ def test_g1_with_neff_zero_still_uses_prior():
 def test_neff_zero_reduces_to_rloo():
     state = RAEState(baselines={KEY: 0.7}, n_eff=0.0)
 
-    advantages = compute_rae_advantages(_group([1.0, -1.0, 1.0]), state, episode_pairs=_pairs([1.0, -1.0, 1.0]))
+    advantages, _ = compute_rae_advantages(_group([1.0, -1.0, 1.0]), state, episode_pairs=_pairs([1.0, -1.0, 1.0]))
 
     # lam = 0: A_i = r_i - mean(r_{-i}); the 0.7 prior carries zero weight.
     #   A_0 = 1 - (-1+1)/2 = 1.0;  A_1 = -1 - (1+1)/2 = -2.0;  A_2 = 1 - (1-1)/2 = 1.0
@@ -138,7 +140,7 @@ def test_neff_zero_reduces_to_rloo():
 def test_fold_semantics_and_mid_group_isolation():
     state = RAEState(baselines={KEY: 0.5})
 
-    advantages = compute_rae_advantages(_group([1.0, 1.0]), state, episode_pairs=_pairs([1.0, 1.0]))
+    advantages, _ = compute_rae_advantages(_group([1.0, 1.0]), state, episode_pairs=_pairs([1.0, 1.0]))
 
     # Both episodes subtract the same pre-group b0 = 0.5 — identical advantages
     # prove the fold is not consulted mid-group. lam = 6/(6+1) = 6/7:
@@ -157,7 +159,7 @@ def test_fold_semantics_and_mid_group_isolation():
 def test_cold_key_baseline_is_zero():
     state = RAEState()
 
-    advantages = compute_rae_advantages(_group([1.0, -1.0]), state, episode_pairs=_pairs([1.0, -1.0]))
+    advantages, _ = compute_rae_advantages(_group([1.0, -1.0]), state, episode_pairs=_pairs([1.0, -1.0]))
 
     # Cold key: b0 = 0. lam = 6/7:
     #   A_0 = 1 - (0 + 1/7 * (-1)) = 8/7 = 1.1428571428571428
@@ -224,7 +226,7 @@ def test_quarantined_single_member_episode_uses_sign():
     rows = _pair_rows("ep-0", 1.0) + [_member(member_id="debater_b", reward=1.0, episode_id="ep-1")]
     episode_pairs = {"ep-0": {"debater_a": 1.0, "debater_b": -1.0}, "ep-1": {"debater_b": 1.0}}
 
-    advantages = compute_rae_advantages(rows, state, episode_pairs=episode_pairs)
+    advantages, _ = compute_rae_advantages(rows, state, episode_pairs=episode_pairs)
 
     # Canonical rewards [1, -1], cold b0 = 0, lam = 6/7:
     #   A_canonical(ep-1) = -1 - 1/7 = -8/7; the present debater_b row gets +8/7
@@ -239,7 +241,7 @@ def test_singleton_pair_group_inherits_persisted_frame():
     state = RAEState(baselines={KEY: 0.5}, canonical_members={KEY: "debater_a"})
     rows = [_member(member_id="debater_b", reward=1.0, episode_id="ep-0")]
 
-    advantages = compute_rae_advantages(rows, state, episode_pairs={"ep-0": {"debater_b": 1.0}})
+    advantages, _ = compute_rae_advantages(rows, state, episode_pairs={"ep-0": {"debater_b": 1.0}})
 
     # Canonical reward = -1. G=1: A_canonical = -1 - 0.5 = -1.5; the b row gets +1.5
     assert advantages == [pytest.approx(1.5)]
@@ -264,7 +266,7 @@ def test_single_seat_group_only_debater_b_keeps_canonical_frame():
         _member(member_id="debater_b", reward=1.0, episode_id="ep-1"),
     ]
 
-    advantages = compute_rae_advantages(rows, state, episode_pairs=_pairs([1.0, -1.0]))
+    advantages, _ = compute_rae_advantages(rows, state, episode_pairs=_pairs([1.0, -1.0]))
 
     # Canonical rewards (a-frame) [1, -1], b0 = 0.5, lam = 6/7:
     #   A_canonical(ep-0) = 1 - (6/7*0.5 + 1/7*(-1)) = 1 - 2/7 = 5/7 -> b row gets -5/7
@@ -286,7 +288,7 @@ def test_cross_step_frame_stability_under_seat_collapse():
         _member(member_id="debater_b", reward=-1.0, episode_id="ep-0"),
         _member(member_id="debater_b", reward=-1.0, episode_id="ep-1"),
     ]
-    step1 = compute_rae_advantages(step1_rows, state, episode_pairs=_pairs([1.0, 1.0]))
+    step1, _ = compute_rae_advantages(step1_rows, state, episode_pairs=_pairs([1.0, 1.0]))
     # Cold b0 = 0, canonical rewards [1, 1], lam = 6/7:
     #   A_canonical = 1 - (0 + 1/7*1) = 6/7 -> b rows get -6/7 = -0.8571428571428571
     assert step1 == [pytest.approx(-0.8571428571428571), pytest.approx(-0.8571428571428571)]
@@ -299,7 +301,7 @@ def test_cross_step_frame_stability_under_seat_collapse():
         _member(member_id="debater_a", reward=1.0, episode_id="ep-0"),
         _member(member_id="debater_a", reward=1.0, episode_id="ep-1"),
     ]
-    step2 = compute_rae_advantages(step2_rows, state, episode_pairs=_pairs([1.0, 1.0]))
+    step2, _ = compute_rae_advantages(step2_rows, state, episode_pairs=_pairs([1.0, 1.0]))
     # b0 = 0.1 consumed in the SAME a-frame:
     #   A = 1 - (6/7*0.1 + 1/7*1) = 1 - 1.6/7 = 27/35 = 0.7714285714285714
     assert step2 == [pytest.approx(0.7714285714285714), pytest.approx(0.7714285714285714)]
@@ -316,7 +318,7 @@ def test_single_seat_group_trains_on_canonical_rewards():
         _member(member_id="debater_a", reward=-1.0, episode_id="ep-1"),
     ]
 
-    advantages = compute_rae_advantages(rows, state, episode_pairs=_pairs([1.0, -1.0]))
+    advantages, _ = compute_rae_advantages(rows, state, episode_pairs=_pairs([1.0, -1.0]))
 
     # lam = 6/7:
     #   A_0 = 1 - (6/7*0.5 + 1/7*(-1)) = 1 - 2/7 = 5/7 = 0.7142857142857143
@@ -407,9 +409,63 @@ def test_fan_out_respects_trainable_member_predicate():
     assert [unit["member_id"] for unit in units] == ["debater_a"]
 
 
+def test_rae_stats_track_cold_keys_drift_and_baselines():
+    state = RAEState()
+
+    # Cold key, one episode (G=1 => lambda=1, pure prior): A = +/-1.0,
+    # fold b: 0 -> 0.9*0 + 0.1*1.0 = 0.1. Framed baselines: +0.1 / -0.1.
+    _, stats = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
+
+    assert stats.updates == 2
+    assert stats.cold_updates == 1
+    assert stats.baseline_keys_total == 1
+    assert stats.baseline_abs_delta_sum == pytest.approx(0.1)
+    assert stats.baseline_sum_by_member == {"debater_a": pytest.approx(0.1), "debater_b": pytest.approx(-0.1)}
+    assert stats.updates_by_member == {"debater_a": 1, "debater_b": 1}
+
+    # Warm key: fold 0.1 -> 0.9*0.1 + 0.1*1.0 = 0.19, delta 0.09.
+    _, stats = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
+
+    assert stats.cold_updates == 0
+    assert stats.baseline_abs_delta_sum == pytest.approx(0.09)
+    assert stats.baseline_keys_total == 1
+
+
+def test_rae_stats_merge_accumulates_and_keeps_freshest_key_count():
+    state = RAEState()
+    _, merged = compute_rae_advantages(_pair_rows("ep-0", 1.0), state, episode_pairs=_pairs([1.0]))
+    second_rows = _pair_rows("ep-0", 1.0, example_id=1) + _pair_rows("ep-1", 1.0, example_id=2)
+    _, second = compute_rae_advantages(second_rows, state, episode_pairs=_pairs([1.0, 1.0]))
+
+    merged.merge(second)
+
+    assert merged.updates == 6
+    assert merged.cold_updates == 2  # key (env, 1) cold once, key (env, 2) cold once
+    assert merged.updates_by_member == {"debater_a": 3, "debater_b": 3}
+    assert merged.baseline_keys_total == 2
+
+
 def test_rae_requires_string_identity_when_task_is_the_fallback():
     state = RAEState()
     rollout = _member(task={"question": "q"}, env_name=None)
 
     with pytest.raises(TypeError, match="string env_name"):
         compute_rae_advantages([rollout], state, episode_pairs=_pairs([1.0]))
+
+
+def test_validate_advantage_mode_rejects_rae_on_single_agent_env():
+    with pytest.raises(ValueError, match="not a multi-agent env"):
+        validate_advantage_mode("math", is_multi_agent=False, advantage=RAEAdvantageConfig())
+
+
+def test_validate_advantage_mode_rejects_non_rae_on_multi_agent_env():
+    with pytest.raises(ValueError, match="requires advantage.type='rae'"):
+        validate_advantage_mode("debate", is_multi_agent=True, advantage=DefaultAdvantageConfig())
+    with pytest.raises(ValueError, match="requires advantage.type='rae'"):
+        validate_advantage_mode("debate", is_multi_agent=True, advantage=None)
+
+
+def test_validate_advantage_mode_accepts_matched_pairings():
+    validate_advantage_mode("debate", is_multi_agent=True, advantage=RAEAdvantageConfig())
+    validate_advantage_mode("math", is_multi_agent=False, advantage=DefaultAdvantageConfig())
+    validate_advantage_mode("math", is_multi_agent=False, advantage=None)
