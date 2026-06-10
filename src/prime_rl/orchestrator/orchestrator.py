@@ -173,6 +173,7 @@ class Orchestrator:
         # True after the final train step ships — pipeline winds down without
         # scheduling new train rollouts
         self.draining = False
+        self.logged_drain_linger = False
         # Previous ``TrainBatch`` arrival timestamp; reset every ship so
         # ``step_time`` in the success log is real sink-to-sink cycle time
         self.last_batch_at = None
@@ -497,6 +498,21 @@ class Orchestrator:
         ``None``) from ``add()``; we just dispatch on the result."""
         while not self.stopped.is_set():
             if self.draining and self.dispatcher.is_idle:
+                if self._trainer_broadcast_pending():
+                    # The trainer broadcasts every version up to max_steps - 2 and blocks in
+                    # _wait_for_nccl_ready until the watcher arms the receive. With off-policy
+                    # slack the dispatcher can ship the final batches before those versions
+                    # arrive — exiting now would strand the trainer forever. Stay alive until
+                    # the watcher has adopted the last expected version.
+                    if not self.logged_drain_linger:
+                        self.logged_drain_linger = True
+                        assert self.config.max_steps is not None
+                        get_logger().info(
+                            f"Drained, but trainer broadcasts are still expected "
+                            f"(v{self.policy.version} < v{self.config.max_steps - 2}) — waiting before exit"
+                        )
+                    await asyncio.sleep(0.5)
+                    continue
                 get_logger().info("Pipeline drained, exiting main loop")
                 self.stopped.set()
                 break
@@ -537,6 +553,14 @@ class Orchestrator:
             step_path / "train_failed_rollouts.jsonl",
             exclude_keys=None if dump_trajectory else {"trajectory"},
         )
+
+    def _trainer_broadcast_pending(self) -> bool:
+        """Whether the trainer still has NCCL broadcasts only the watcher can receive."""
+        if self.config.weight_broadcast.type != "nccl":
+            return False
+        if self.config.max_steps is None:
+            return False
+        return self.policy.version < self.config.max_steps - 2
 
     async def finalize_train_batch(self, batch: TrainBatch) -> None:
         """Ship one ``TrainBatch`` out to the trainer and handle the I/O
