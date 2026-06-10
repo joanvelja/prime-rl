@@ -172,7 +172,7 @@ def test_fixed_member_renderer_fields_require_renderer_mode():
         )
 
 
-def test_env_compile_generation_strips_only_cache_salt_from_fixed_targets():
+def test_env_compile_generation_strips_learner_only_fields_from_fixed_targets():
     env = TrainEnv.__new__(TrainEnv)
     env.config = SimpleNamespace(resolved_name="ma", state_columns=[], max_retries=0)
     env._env = SimpleNamespace(
@@ -183,7 +183,13 @@ def test_env_compile_generation_strips_only_cache_salt_from_fixed_targets():
     env.sampling_args = {
         "temperature": 1.0,
         "max_completion_tokens": 1024,
-        "extra_body": {"top_k": -1, "min_p": 0.0, "return_token_ids": True},
+        "logprobs": True,
+        "extra_body": {
+            "top_k": -1,
+            "min_p": 0.0,
+            "return_token_ids": True,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
     }
     config = MultiAgentConfig(
         fixed={
@@ -205,22 +211,32 @@ def test_env_compile_generation_strips_only_cache_salt_from_fixed_targets():
     )
 
     assert plan is not None
+    # The learner keeps every training-loop field.
+    assert plan.members["debater"].sampling_args["logprobs"] is True
     assert plan.members["debater"].sampling_args["extra_body"] == {
         "top_k": -1,
         "min_p": 0.0,
         "return_token_ids": True,
+        "chat_template_kwargs": {"enable_thinking": False},
         "cache_salt": "7",
     }
+    # The fixed target inherits portable defaults and user extras only —
+    # no logprobs, no return_token_ids/top_k/min_p/cache_salt — while its
+    # explicit sampling override (temperature) still wins.
     assert plan.members["judge"].sampling_args == {
         "temperature": 0.0,
         "max_completion_tokens": 1024,
-        "extra_body": {"top_k": -1, "min_p": 0.0, "return_token_ids": True},
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
-    # The learner-only cache_salt never reaches fixed targets, and the fixed
-    # target's extra_body is a copy — mutating it must not leak into the
-    # env's learner sampling args.
+    # The fixed target's extra_body is a copy — mutating it must not leak
+    # into the env's learner sampling args.
     plan.members["judge"].sampling_args["extra_body"]["cache_salt"] = "9"
-    assert env.sampling_args["extra_body"] == {"top_k": -1, "min_p": 0.0, "return_token_ids": True}
+    assert env.sampling_args["extra_body"] == {
+        "top_k": -1,
+        "min_p": 0.0,
+        "return_token_ids": True,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
 
 
 def test_run_rollout_forwards_generation_and_records_dispatch_id():

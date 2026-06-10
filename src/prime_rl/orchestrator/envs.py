@@ -29,6 +29,18 @@ from prime_rl.utils.utils import capitalize
 
 REQUIRED_STATE_COLUMNS = ["trajectory"]
 
+# Request fields the orchestrator injects into learner sampling args for its own
+# training loop. Fixed (non-learner) members are never trained, so these fields
+# are at best wasted and at worst rejected (400) by external API endpoints:
+# - "logprobs": inference logprobs feed the trainer's importance ratios.
+# - "return_token_ids": completion token ids feed trainer token alignment.
+# - "top_k" / "min_p": full-distribution sampling sentinels (-1 / 0.0) injected
+#   by resolve_env_config so learner logprobs match the trainer's softmax;
+#   vLLM-only params. Per-target values belong in the fixed target's sampling.
+# - "cache_salt": per-dispatch KV-cache isolation for the learner.
+LEARNER_ONLY_SAMPLING_FIELDS = frozenset({"logprobs"})
+LEARNER_ONLY_EXTRA_BODY_FIELDS = frozenset({"cache_salt", "return_token_ids", "top_k", "min_p"})
+
 
 class Env:
     """Wraps a vf.Environment - only exposes features used in PRIME-RL."""
@@ -123,13 +135,17 @@ class Env:
         return sampling_args
 
     def _fixed_member_sampling_args(self) -> dict:
-        """Sampling args for fixed (non-learner) member targets: keep
-        ``extra_body`` but strip cache-affecting fields, and copy the nested
-        dict so downstream mutation cannot alias the learner's extra_body."""
-        sampling_args = {**self.sampling_args}
-        extra_body = sampling_args.get("extra_body")
+        """Sampling args for fixed (non-learner) member targets: inherit the
+        learner's portable sampling defaults but strip learner-only request
+        fields (see LEARNER_ONLY_*_FIELDS), and copy the nested ``extra_body``
+        so downstream mutation cannot alias the learner's extra_body. A fixed
+        target's own explicit ``sampling`` config still overrides."""
+        sampling_args = {k: v for k, v in self.sampling_args.items() if k not in LEARNER_ONLY_SAMPLING_FIELDS}
+        extra_body = sampling_args.pop("extra_body", None)
         if extra_body is not None:
-            sampling_args["extra_body"] = {k: v for k, v in extra_body.items() if k != "cache_salt"}
+            extra_body = {k: v for k, v in extra_body.items() if k not in LEARNER_ONLY_EXTRA_BODY_FIELDS}
+            if extra_body:
+                sampling_args["extra_body"] = extra_body
         return sampling_args
 
     def multi_agent_members(self) -> list[str]:
