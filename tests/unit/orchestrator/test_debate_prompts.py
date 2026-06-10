@@ -250,7 +250,6 @@ def test_render_prefill_returns_value():
 
 def test_think_visibility_default(default_prompts):
     assert default_prompts.think_visibility == {}
-    assert default_prompts.think_tag == "thinking"
 
 
 def test_think_visibility_from_yaml():
@@ -272,20 +271,21 @@ def test_think_visibility_from_yaml():
     assert dp.think_visibility["judge"] == "disabled"
 
 
-def test_think_custom_tag():
-    dp = _load_yaml("""\
-        version: 2
-        system:
-          debater_a: "A"
-          debater_b: "B"
-        question:
-          debater_a: "Q"
-          debater_b: "Q"
-        think:
-          debater_a: {tag: reason, visibility: private}
-    """)
-    assert dp.think_tag == "reason"
-    assert dp.think_visibility["debater_a"] == "private"
+def test_think_legacy_tag_key_rejected():
+    """Renderer-first: the renderer owns the think tag; a content-level
+    `tag:` key must fail loud instead of being silently dropped."""
+    with pytest.raises(ValueError, match="unknown key"):
+        _load_yaml("""\
+            version: 2
+            system:
+              debater_a: "A"
+              debater_b: "B"
+            question:
+              debater_a: "Q"
+              debater_b: "Q"
+            think:
+              debater_a: {tag: reason, visibility: private}
+        """)
 
 
 def test_think_instruction_in_render():
@@ -304,8 +304,9 @@ def test_think_instruction_in_render():
     """)
     ctx = _ctx()
     result = dp.render_instruction("debater_a", "propose", ctx)
-    assert "<thinking>" in result
-    assert "private" in result.lower()
+    # Renderer-first: no content-level think tag, only the visibility norm.
+    assert "<thinking>" not in result
+    assert "reasoning is private" in result.lower()
 
 
 def test_think_disabled_no_instruction():
@@ -573,22 +574,18 @@ def test_validate_rejects_bad_opponent_wrap():
 
 
 def test_normalize_think_empty():
-    vis, tag = _normalize_think({})
-    assert vis == {}
-    assert tag == "thinking"
+    assert _normalize_think({}) == {}
 
 
 def test_normalize_think_strings():
-    vis, tag = _normalize_think({"debater_a": "private", "debater_b": "open"})
+    vis = _normalize_think({"debater_a": "private", "debater_b": "open"})
     assert vis == {"debater_a": "private", "debater_b": "open"}
 
 
 def test_normalize_think_false():
-    vis, tag = _normalize_think({"debater_a": False})
-    assert vis == {"debater_a": "disabled"}
+    assert _normalize_think({"debater_a": False}) == {"debater_a": "disabled"}
 
 
-def test_normalize_think_dict_with_tag():
-    vis, tag = _normalize_think({"debater_a": {"tag": "reason", "visibility": "private"}})
+def test_normalize_think_visibility_dict():
+    vis = _normalize_think({"debater_a": {"visibility": "private"}})
     assert vis == {"debater_a": "private"}
-    assert tag == "reason"
