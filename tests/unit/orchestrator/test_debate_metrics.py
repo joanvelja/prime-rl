@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from prime_rl.metrics.debate import _spearman, compute_step_metrics
+from prime_rl.metrics.debate import _spearman, compute_step_metrics, write_step_metrics
+from prime_rl.utils.monitor.base import NoOpMonitor
 
 
 def _mk(
@@ -215,3 +217,112 @@ def test_twc_null_reference_lines():
     metrics = compute_step_metrics([_mk(truth="debater_a", winner="debater_b")])
     assert metrics["twc_3way_null"] == 1.0 / 3.0
     assert metrics["twc_2way_cond_null"] == 0.5
+
+
+def _mk_pcd4_final(*, final_a: float, winner: str | None) -> dict[str, Any]:
+    """Asymmetric pack rollout: debater_b is an answerless critic, so only
+    debater_a carries final_correct, and the rubric emits the role-aware
+    episode keys without the legacy all-debater aliases."""
+    return {
+        "mar_score": {"episode_categorical": {"winner": winner}},
+        "final_correct/debater_a": final_a,
+        "initial_correct/debater_a": final_a,
+        "accuracy/debater_a": final_a,
+        "any_answer_member_correct": final_a,
+        "all_answer_members_correct": final_a,
+        "flipped/debater_a": 0.0,
+        "flipped/debater_b": 0.0,
+        "turns/debater_a": 3.0,
+        "turns/debater_b": 3.0,
+        "turns/judge": 1.0,
+        "is_truncated": False,
+        "error": None,
+        "trajectory": [],
+    }
+
+
+def test_answerless_critic_pack_resolves_truth_from_single_answer_member():
+    metrics = compute_step_metrics(
+        [
+            _mk_pcd4_final(final_a=1.0, winner="debater_a"),  # truth=a, judge right
+            _mk_pcd4_final(final_a=0.0, winner="debater_b"),  # truth=b, judge right
+            _mk_pcd4_final(final_a=1.0, winner="debater_b"),  # truth=a, judge wrong
+            _mk_pcd4_final(final_a=0.0, winner="debater_a"),  # truth=b, judge wrong
+        ]
+    )
+    assert metrics["n_resolvable"] == 4.0
+    assert metrics["resolvable_rate"] == 1.0
+    assert metrics["twc_3way"] == 0.5
+    assert metrics["twc_2way_cond"] == 0.5
+    assert metrics["n_non_tie"] == 4.0
+    assert metrics["tie_rate"] == 0.0
+    assert metrics["twc_by_seat_a"] == 0.5
+    assert metrics["twc_by_seat_b"] == 0.5
+    assert metrics["position_bias"] == 0.0
+
+
+def test_symmetric_pack_with_missing_member_key_stays_unresolvable():
+    # all_debaters_correct present => every debater declares an answer, so a
+    # missing final_correct key means extraction failure, not an answerless
+    # seat. Single-sided truth inference would be wrong here.
+    rollout = _mk(truth="debater_a", winner="debater_a")
+    del rollout["final_correct/debater_b"]
+    rollout["any_answer_member_correct"] = 1.0
+    rollout["all_answer_members_correct"] = 0.0
+    rollout["any_debater_correct"] = 1.0
+    rollout["all_debaters_correct"] = 0.0
+    metrics = compute_step_metrics([rollout])
+    assert metrics["n_resolvable"] == 0.0
+
+
+def test_single_member_key_without_episode_keys_stays_unresolvable():
+    # No any_answer_member_correct => some answer-declaring member did not
+    # resolve (grader error), so the pack shape is unknown.
+    rollout = _mk(truth="debater_a", winner="debater_a")
+    del rollout["final_correct/debater_b"]
+    metrics = compute_step_metrics([rollout])
+    assert metrics["n_resolvable"] == 0.0
+
+
+def test_write_step_metrics_namespaces_payload_and_persists(tmp_path):
+    monitor = NoOpMonitor()
+    path = tmp_path / "step_7" / "train_debate_metrics.json"
+    write_step_metrics(
+        [_mk(truth="debater_a", winner="debater_a")],
+        path=path,
+        step=7,
+        monitor=monitor,
+        prefix="debate",
+    )
+    assert json.loads(path.read_text())["twc_3way"] == 1.0
+    (payload,) = monitor.history
+    assert payload["step"] == 7
+    assert payload["debate/twc_3way"] == 1.0
+    assert all(key == "step" or key.startswith("debate/") for key in payload)
+
+
+def test_write_step_metrics_eval_prefix_matches_eval_namespace(tmp_path):
+    monitor = NoOpMonitor()
+    write_step_metrics(
+        [_mk(truth="debater_a", winner="debater_b")],
+        path=tmp_path / "eval_debate_metrics_gpqa_debate.json",
+        step=3,
+        monitor=monitor,
+        prefix="eval/gpqa_debate/debate",
+    )
+    (payload,) = monitor.history
+    assert payload["eval/gpqa_debate/debate/twc_3way"] == 0.0
+
+
+def test_write_step_metrics_non_debate_batch_is_silent(tmp_path):
+    monitor = NoOpMonitor()
+    path = tmp_path / "train_debate_metrics.json"
+    write_step_metrics(
+        [{"mar_score": {"episode_categorical": {}}, "error": None}, {"reward": 1.0, "error": None}],
+        path=path,
+        step=1,
+        monitor=monitor,
+        prefix="debate",
+    )
+    assert not path.exists()
+    assert monitor.history == []

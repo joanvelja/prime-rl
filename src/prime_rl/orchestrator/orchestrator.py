@@ -37,10 +37,12 @@ if TYPE_CHECKING:
     from prime_rl.transport.base import TrainingBatchSender
     from prime_rl.utils.client import InferencePool
     from prime_rl.utils.monitor.base import Monitor
+from verifiers.clients.renderer_client import get_bridge_metrics, reset_bridge_metrics
 from verifiers.utils.async_utils import EventLoopLagMonitor, EventLoopLagStats
 
 import prime_rl._compat  # noqa: F401 — patch ring_flash_attn compat before transitive imports
 from prime_rl.configs.orchestrator import EMAPerMemberAdvantageConfig, OrchestratorConfig
+from prime_rl.metrics.debate import write_step_metrics as write_debate_step_metrics
 from prime_rl.orchestrator.ckpt import setup_ckpt_manager
 from prime_rl.orchestrator.dispatcher import DispatcherMetrics, DispatcherMode, RolloutDispatcher
 from prime_rl.orchestrator.envs import EvalEnvs, TrainEnvs, validate_eval_think_split_routing
@@ -48,8 +50,9 @@ from prime_rl.orchestrator.eval_sink import EvalSink
 from prime_rl.orchestrator.eval_source import EvalSource
 from prime_rl.orchestrator.filters import setup_filters
 from prime_rl.orchestrator.inference_metrics import InferenceMetricsCollector
+from prime_rl.orchestrator.member_generation import uncovered_trainable_members, validate_member_references
 from prime_rl.orchestrator.metrics import MetricsBuilder
-from prime_rl.orchestrator.multi_agent_advantage import RAEState
+from prime_rl.orchestrator.multi_agent_advantage import RAEState, validate_advantage_mode
 from prime_rl.orchestrator.patches import (
     monkey_patch_chat_completion_logprobs,
     monkey_patch_oai_iterable_types,
@@ -173,6 +176,7 @@ class Orchestrator:
         # True after the final train step ships — pipeline winds down without
         # scheduling new train rollouts
         self.draining = False
+        self.logged_drain_linger = False
         # Previous ``TrainBatch`` arrival timestamp; reset every ship so
         # ``step_time`` in the success log is real sink-to-sink cycle time
         self.last_batch_at = None
@@ -195,11 +199,14 @@ class Orchestrator:
         self.lora_name = None
         self.resume_step = None
         self.lag_task = None
-        self.rae_state = (
-            RAEState(momentum=config.advantage.momentum)
-            if isinstance(config.advantage, EMAPerMemberAdvantageConfig)
-            else None
+        # Per-env ``advantage`` is resolved at config validation; one shared RAE
+        # state serves every ``ema_per_member`` env (momentum consistency is
+        # enforced by ``validate_ema_advantage_momentum``).
+        ema_advantage = next(
+            (env.advantage for env in config.train.env if isinstance(env.advantage, EMAPerMemberAdvantageConfig)),
+            None,
         )
+        self.rae_state = RAEState(momentum=ema_advantage.momentum) if ema_advantage is not None else None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -304,6 +311,8 @@ class Orchestrator:
             )
             get_logger().success("Eval environment(s) ready")
 
+        self.validate_multi_agent_setup()
+
         if config.ckpt is not None and config.ckpt.resume_step is not None and self.ckpt_manager is not None:
             if config.ckpt.resume_step == -1:
                 self.resume_step = resolve_latest_ckpt_step(self.ckpt_manager.ckpt_dir)
@@ -406,7 +415,6 @@ class Orchestrator:
             mm_token_type_ids_mapping=self.mm_token_type_ids_mapping,
             batch_size=config.batch_size,
             token_batch_size=config.token_batch_size,
-            advantage_config=config.advantage,
             rae_state=self.rae_state,
             pre_filters=pre_filters,
             post_filters=post_filters,
@@ -444,6 +452,30 @@ class Orchestrator:
             interval=log_interval,
             wandb_enabled=wandb_enabled,
         )
+
+    def validate_multi_agent_setup(self) -> None:
+        """Fail-fast startup census over the loaded envs (config-time pydantic
+        validation cannot see the env protocols): every member id referenced in
+        ``multi_agent.fixed`` / ``multi_agent.train_one`` must exist in a loaded
+        multi-agent env, and each train env's resolved advantage must match its
+        multi-agent-ness."""
+        config = self.config
+        envs = [*self.train_envs, *(self.eval_envs if self.eval_envs is not None else [])]
+        members_by_env = {env.name: env.multi_agent_members() for env in envs if env.is_multi_agent}
+        validate_member_references(config.multi_agent, members_by_env)
+        if config.multi_agent.train_one is not None:
+            for env in self.train_envs:
+                if not env.is_multi_agent:
+                    continue
+                uncovered = uncovered_trainable_members(config.multi_agent, env.multi_agent_members())
+                if uncovered:
+                    get_logger().warning(
+                        f"multi_agent.train_one is set, but env {env.name!r} members {uncovered} are neither "
+                        "train_one candidates nor fixed targets — they are trainable by default in EVERY "
+                        "rollout. Add them to train_one.members or bind them to a fixed target if unintended."
+                    )
+        for env in self.train_envs:
+            validate_advantage_mode(env.name, is_multi_agent=env.is_multi_agent, advantage=env.config.advantage)
 
     async def start(self) -> None:
         """Run the orchestrator until shutdown. Drives setup, spawns the
@@ -504,9 +536,26 @@ class Orchestrator:
         ``None``) from ``add()``; we just dispatch on the result."""
         while not self.stopped.is_set():
             if self.draining and self.dispatcher.is_idle:
+                if self._trainer_broadcast_pending():
+                    # The trainer broadcasts every version up to max_steps - 2 and blocks in
+                    # _wait_for_nccl_ready until the watcher arms the receive. With off-policy
+                    # slack the dispatcher can ship the final batches before those versions
+                    # arrive — exiting now would strand the trainer forever. Stay alive until
+                    # the watcher has adopted the last expected version.
+                    if not self.logged_drain_linger:
+                        self.logged_drain_linger = True
+                        assert self.config.max_steps is not None
+                        get_logger().info(
+                            f"Drained, but trainer broadcasts are still expected "
+                            f"(v{self.policy.version} < v{self.config.max_steps - 2}) — waiting before exit"
+                        )
+                    await asyncio.sleep(0.5)
+                    continue
                 get_logger().info("Pipeline drained, exiting main loop")
                 self.stopped.set()
                 break
+
+            self.check_pipeline_health()
 
             try:
                 rollout: FinishedRollout = await asyncio.wait_for(self.dispatcher.out_q.get(), timeout=0.5)
@@ -517,7 +566,7 @@ class Orchestrator:
                 assert self.eval_sink is not None  # eval rollouts only emitted when eval is configured
                 eval_batch = self.eval_sink.add(rollout)
                 if eval_batch is not None:
-                    self.finalize_eval_batch(eval_batch)
+                    await self.finalize_eval_batch(eval_batch)
                 continue
 
             assert isinstance(rollout, TrainRollout)
@@ -527,6 +576,24 @@ class Orchestrator:
             # don't want to ship past ``max_steps``
             if train_batch is not None and not self.draining and not self.stopped.is_set():
                 await self.finalize_train_batch(train_batch)
+
+    def check_pipeline_health(self) -> None:
+        """Crash instead of stalling silently. The dispatcher and watcher run
+        as fire-and-forget tasks whose exceptions are never awaited, and a
+        starved dispatcher idles at 0 inflight while the periodic logger
+        keeps printing — both leave the run looping forever with no signal.
+        Runs every main-loop iteration: re-raise a dead component's
+        exception, then let the dispatcher's starvation watchdog fire."""
+        for task in self.component_tasks:
+            if not task.done():
+                continue
+            name = task.get_name()
+            if task.cancelled():
+                raise RuntimeError(f"Pipeline component {name!r} was cancelled unexpectedly")
+            if task.exception() is not None:
+                raise RuntimeError(f"Pipeline component {name!r} died") from task.exception()
+            raise RuntimeError(f"Pipeline component {name!r} exited unexpectedly")
+        self.dispatcher.raise_if_starved(batch_progress=self.train_sink.batch_progress())
 
     async def maybe_save_failed_train_rollout(self, rollout: TrainRollout) -> None:
         """Persist errored train arrivals before group filtering can drop them."""
@@ -544,6 +611,14 @@ class Orchestrator:
             step_path / "train_failed_rollouts.jsonl",
             exclude_keys=None if dump_trajectory else {"trajectory"},
         )
+
+    def _trainer_broadcast_pending(self) -> bool:
+        """Whether the trainer still has NCCL broadcasts only the watcher can receive."""
+        if self.config.weight_broadcast.type != "nccl":
+            return False
+        if self.config.max_steps is None:
+            return False
+        return self.policy.version < self.config.max_steps - 2
 
     async def finalize_train_batch(self, batch: TrainBatch) -> None:
         """Ship one ``TrainBatch`` out to the trainer and handle the I/O
@@ -563,13 +638,7 @@ class Orchestrator:
         save_ckpt_time = await self.maybe_save_ckpt(step)
 
         if config.max_steps is not None and step >= config.max_steps:
-            self.draining = True
-            self.dispatcher.disable_train_scheduling()
-            n_cancelled = await self.dispatcher.cancel_inflight_train_rollouts()
-            get_logger().info(
-                f"Draining pipeline (cancelled {n_cancelled} in-flight train rollout(s); "
-                f"any in-flight evals will complete)"
-            )
+            await self._enter_drain()
             return
 
         if batch.metrics.n_trainable == 0:
@@ -602,6 +671,18 @@ class Orchestrator:
             step_path / "train_rollouts.jsonl",
             exclude_keys=None if config.dump_trajectory else {"trajectory"},
         )
+        # Debate telemetry rides the same logged-rollout payload. The gate is
+        # the data itself: only rollouts whose ``mar_score.episode_categorical``
+        # carries a winner are counted, so a non-debate batch yields no metrics
+        # and the write is a no-op (absence, not failure).
+        await asyncio.to_thread(
+            write_debate_step_metrics,
+            rollout_dicts,
+            path=step_path / "train_debate_metrics.json",
+            step=step,
+            monitor=self.monitor,
+            prefix="debate",
+        )
 
         teacher_logprobs_time = 0.0  # opd only
         if config.training_mode == "opd" and self.teacher_inference is not None:
@@ -619,6 +700,10 @@ class Orchestrator:
         await self.sender.send(TrainingBatch(examples=batch.samples, step=step))
         self.update_dispatch_gate()
 
+        # Snapshot + reset the renderer client's process-global TITO bridge
+        # counters so each step logs a disjoint window
+        bridge_metrics = get_bridge_metrics()
+        reset_bridge_metrics()
         metrics = self.metrics.build(
             step=step,
             rollouts=batch.rollouts,
@@ -630,6 +715,7 @@ class Orchestrator:
             pre_filter_seen=self.train_sink.pre_filter_seen,
             pre_filter_dropped=self.train_sink.pre_filter_dropped,
             pre_filter_dropped_by_name=dict(self.train_sink.pre_filter_dropped_by_name),
+            bridge_metrics=bridge_metrics,
         )
         self.monitor.log(metrics, step=step)
         self.monitor.log_samples(rollout_dicts, step=step)
@@ -667,6 +753,23 @@ class Orchestrator:
         self.train_sink.reset_pre_filter_stats()
         self.progress.step += 1
         self.maybe_trigger_eval(self.progress.step)
+        if config.max_steps is not None and self.progress.step >= config.max_steps:
+            # Drain as soon as the final batch has shipped. Waiting for one more finalized
+            # batch to enter drain deadlocks under NCCL weight broadcast: the dispatch gate
+            # needs policy version >= max_steps - 1 to assemble that batch, but the trainer
+            # never broadcasts its receiver-less final step over NCCL (only the filesystem
+            # transport writes it).
+            await self._enter_drain()
+
+    async def _enter_drain(self) -> None:
+        if self.draining:
+            return
+        self.draining = True
+        self.dispatcher.disable_train_scheduling()
+        n_cancelled = await self.dispatcher.cancel_inflight_train_rollouts()
+        get_logger().info(
+            f"Draining pipeline (cancelled {n_cancelled} in-flight train rollout(s); any in-flight evals will complete)"
+        )
 
     def maybe_trigger_eval(self, step: int) -> None:
         """Fire eligible eval epochs and flip to ``PREFER_EVAL`` if anything
@@ -801,7 +904,7 @@ class Orchestrator:
             )
         get_logger().success("\n\t\t ".join(lines))
 
-    def finalize_eval_batch(self, batch: EvalBatch) -> None:
+    async def finalize_eval_batch(self, batch: EvalBatch) -> None:
         """Persist + log one completed eval epoch (save_rollouts,
         monitor.log_eval_samples, monitor.log)."""
         if not batch.rollouts:
@@ -810,13 +913,23 @@ class Orchestrator:
 
         rollout_dicts = [r.to_dict() for r in batch.rollouts]
         step_path = get_step_path(get_rollout_dir(self.config.output_dir), batch.step)
-        save_rollouts(
+        await asyncio.to_thread(
+            save_rollouts,
             rollout_dicts,
             step_path / f"eval_rollouts_{batch.env_name}.jsonl",
             exclude_keys=None if self.config.dump_trajectory else {"trajectory"},
         )
         self.monitor.log_eval_samples(rollout_dicts, env_name=batch.env_name, step=batch.step)
         self.monitor.log(batch.metrics.to_wandb_dict(env_name=batch.env_name, step=batch.step), step=batch.step)
+        # Same data-shape gate as the train path: non-debate eval batches
+        # yield no debate metrics and the write is a no-op.
+        write_debate_step_metrics(
+            rollout_dicts,
+            path=step_path / f"eval_debate_metrics_{batch.env_name}.json",
+            step=batch.step,
+            monitor=self.monitor,
+            prefix=f"eval/{batch.env_name}/debate",
+        )
 
         n_total = batch.metrics.n_rollouts
         error_rate = ((batch.metrics.n_cancelled + batch.metrics.n_errored) / n_total) if n_total else 0.0

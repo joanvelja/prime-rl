@@ -265,6 +265,7 @@ class RecordingOpenAIHandler(BaseHTTPRequestHandler):
                 "model": body["model"],
                 "temperature": body.get("temperature"),
                 "max_completion_tokens": body.get("max_completion_tokens"),
+                "logprobs": body.get("logprobs"),
             }
         )
 
@@ -367,6 +368,7 @@ async def _run_prime_env_server_member_generation_smoke(monkeypatch: pytest.Monk
             model_name="learner-model",
             cache_salt="7",
             dispatch_id=dispatch_id,
+            group_id="group-e2e",
         )
         assert generation is not None
 
@@ -411,6 +413,12 @@ async def _run_prime_env_server_member_generation_smoke(monkeypatch: pytest.Monk
     assert (frozen, "opponent-model") in seen
     assert ("judge", "judge-model") in seen
 
+    # On the wire, only learner requests carry the learner-only logprobs field.
+    logprobs_by_member = {record["member_id"]: record["logprobs"] for record in server.records}
+    assert logprobs_by_member[selected] is True
+    assert logprobs_by_member[frozen] is None
+    assert logprobs_by_member["judge"] is None
+
     member_rollouts = vf.rollout_to_member_rollouts(output)
     by_member = {rollout["member_id"]: rollout for rollout in member_rollouts}
     assert set(by_member) == {selected, frozen, "judge"}
@@ -429,6 +437,20 @@ class _RecordingInnerEnv:
     async def run_rollout(self, _input: Any, **kwargs: Any) -> vf.RolloutOutput:
         self.kwargs = kwargs
         return vf.RolloutOutput(example_id="ex-1")
+
+
+class _RecordingInnerMAEnv(_RecordingInnerEnv, vf.MultiAgentEnv):
+    """MA variant: real ``vf.MultiAgentEnv`` subclass so the wrapper's
+    ``isinstance``-based ``is_multi_agent`` property sees it."""
+
+    def build_prompt(self, *args, **kwargs):  # pragma: no cover - unused fake
+        raise NotImplementedError
+
+    def render_completion(self, *args, **kwargs):  # pragma: no cover - unused fake
+        raise NotImplementedError
+
+    def __init__(self, *, members: list[str]) -> None:
+        _RecordingInnerEnv.__init__(self, is_multi_agent=True, members=members)
 
 
 def _recording_eval_env(name: str, inner: _RecordingInnerEnv) -> EvalEnv:
@@ -507,7 +529,7 @@ def test_dispatcher_eval_routes_trained_members_through_train_typed_client() -> 
 
     async def run() -> None:
         dispatch_id = "eval:0:ma-eval:ex-1:0"
-        inner = _RecordingInnerEnv(is_multi_agent=True, members=["debater_a", "debater_b", "judge"])
+        inner = _RecordingInnerMAEnv(members=["debater_a", "debater_b", "judge"])
         env = _recording_eval_env("ma-eval", inner)
         dispatcher, pool = _dispatcher_for_eval(env, _multi_agent_config())
 

@@ -99,7 +99,11 @@ All metrics print to the console log (and W&B when configured).
 | `is_truncated/{all,env}/mean` | fraction truncated |
 | `empty_rollouts/{all,env}`, `errored_rollouts/{all,env}` | fraction empty/errored |
 | `metrics/{env}/{metric}` | env-specific (e.g. pass rate) |
-| `eval/{env}/{avg@k,pass@k}` | eval scores when configured |
+| `eval/{env}/{avg@k,pass@k}` | eval scores when configured (omitted when the episode scalar is structurally inert — symmetric zero-sum debate with `truth_member` unset; `truth_member` packs keep them, even on all-zero batches) |
+| `debate/{metric}` | train-batch debate telemetry (TWC, tie rate, position bias, flip rate, …); debate envs only |
+| `eval/{env}/debate/{metric}` | same debate panel per eval epoch |
+| `eval/{env}/mar/{key}` | per-member MARScore means (rewards, parse errors, member/episode metrics) |
+| `eval/{env}/winner_{count,share}/{value}` | judge-winner distribution, ties included |
 
 **Stability** — trainer log:
 
@@ -150,7 +154,7 @@ jq '.reward' {output_dir}/rollouts/step_42/train_rollouts.jsonl
 A few warnings are normal. Escalate when errors are persistent, growing, or hit a large fraction of rollouts.
 
 - **Env workers**: exceptions in env code, timeouts, sandbox errors, OOM kills (most common source — runs user code).
-- **Orchestrator**: empty/errored rollout spikes, weight-broadcast failures, checkpoint errors.
+- **Orchestrator**: empty/errored rollout spikes, weight-broadcast failures, checkpoint errors. A `RuntimeError: Dispatcher starved` crash means the pipeline sat at 0 inflight rollouts for 5 min while dispatch was allowed — rollout capacity was lost (wedged inference pool, unschedulable permit cost, permit leak); the message carries the full dispatcher state.
 - **Trainer**: NCCL/CUDA errors, OOM, NaN loss or gradients.
 - **Inference**: NCCL/CUDA errors, OOM, request timeouts.
 - **Teardown leak**: trainer logs `RL trainer finished!` and final checkpoints/weights exist, but Slurm still shows the job `RUNNING` with only the main `bash` step. Inspect inside the allocation with `srun --jobid=<id> --overlap -N<nodes> -n<nodes> --ntasks-per-node=1 ps -eo pid,ppid,stat,etime,cmd`; stale `vllm::router`/`uv run inference` with no trainer means the inference task did not receive the clean trainer-completion signal.
