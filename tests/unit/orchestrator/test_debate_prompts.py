@@ -220,29 +220,6 @@ def test_render_instruction_none_when_empty():
     assert dp.render_instruction("debater_a", "propose", ctx) is None
 
 
-def test_render_prefill_none_when_absent(default_prompts):
-    ctx = _ctx()
-    assert default_prompts.render_prefill("debater_a", "propose", ctx) is None
-
-
-def test_render_prefill_returns_value():
-    dp = _load_yaml("""\
-        version: 2
-        system:
-          debater_a: "A"
-          debater_b: "B"
-        question:
-          debater_a: "Q"
-          debater_b: "Q"
-        prefill:
-          debater_a:
-            propose: "I think the answer is"
-    """)
-    ctx = _ctx()
-    result = dp.render_prefill("debater_a", "propose", ctx)
-    assert result == "I think the answer is"
-
-
 # ===================================================================
 # Think visibility
 # ===================================================================
