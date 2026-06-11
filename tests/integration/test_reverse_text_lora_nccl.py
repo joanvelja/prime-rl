@@ -17,6 +17,9 @@ pytestmark = [pytest.mark.gpu, pytest.mark.slow]
 
 TIMEOUT = 600  # 10 minutes per leg
 
+# INFO line emitted by the trainer master rank once per NCCL LoRA adapter update.
+LORA_UPDATE_MARKER = "Broadcasted LoRA adapter via NCCL"
+
 
 @pytest.fixture(scope="module")
 def wandb_name(branch_name: str) -> str:
@@ -62,8 +65,16 @@ def start_orchestrator_log(rl_process: ProcessResult, output_dir: Path) -> list[
 
 
 @pytest.fixture(scope="module")
+def start_trainer_log(rl_process: ProcessResult, output_dir: Path) -> list[str]:
+    """Snapshot the start leg's trainer log before the resume leg overwrites it."""
+    with open(output_dir / "logs" / "trainer.log", "r") as f:
+        return strip_escape_codes(f.read()).splitlines()
+
+
+@pytest.fixture(scope="module")
 def resume_process(
     start_orchestrator_log: list[str],
+    start_trainer_log: list[str],
     run_process: Callable[..., ProcessResult],
     output_dir: Path,
     wandb_project: str,
@@ -104,6 +115,22 @@ def test_reward_goes_up(test_no_error, start_orchestrator_log: list[str]):
 def test_reward_in_range(test_no_error, start_orchestrator_log: list[str]):
     """Tests that the reward is in range in the RL process"""
     check_reward_in_range(start_orchestrator_log, min_threshold=0.65)
+
+
+def test_multiple_nccl_lora_updates(test_no_error, start_trainer_log: list[str]):
+    """At least two NCCL LoRA adapter updates must land in the start leg: a run that
+    completes exactly one update and then stalls means ready_to_update was never
+    cleared and the packer starved (both transports withhold batches while it is set)."""
+    n_updates = sum(LORA_UPDATE_MARKER in line for line in start_trainer_log)
+    assert n_updates >= 2, f"Expected >= 2 NCCL LoRA adapter updates in the start leg, found {n_updates}"
+
+
+def test_resume_multiple_nccl_lora_updates(test_resume_no_error, output_dir: Path):
+    """The resume leg must broadcast beyond the one-shot bootstrap of the restored adapter."""
+    with open(output_dir / "logs" / "trainer.log", "r") as f:
+        resume_trainer_log = strip_escape_codes(f.read()).splitlines()
+    n_updates = sum(LORA_UPDATE_MARKER in line for line in resume_trainer_log)
+    assert n_updates >= 2, f"Expected >= 2 NCCL LoRA adapter updates in the resume leg, found {n_updates}"
 
 
 def test_resume_reward_continuous(test_resume_no_error, output_dir: Path):
