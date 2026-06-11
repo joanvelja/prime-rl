@@ -275,7 +275,15 @@ class NCCLWeightBroadcast(WeightBroadcast):
 
         if self.world.is_master:
             self._notify_orchestrator(notified_runs)
+        self._sync_trainer_ranks()
         self._wait_for_nccl_ready(notified_runs)
+        # Mirror the full-FT ordering above: the barrier keeps non-master ranks out of
+        # adapter prep (the DTensor resolution in _resolve_lora_state_dict enqueues
+        # collectives) until the orchestrator has paused inference, and the flag clear
+        # re-opens batch delivery for this run — both transports withhold batches while
+        # ready_to_update is set.
+        for idx, _ in notified_runs:
+            self.multi_run_manager.ready_to_update[idx] = False
 
         for idx, _ in notified_runs:
             state_dict = self.multi_run_manager.get_state_dict_for_run(idx)
@@ -285,7 +293,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
             self.nccl_broadcast_sender.broadcast_lora_update(step, adapter_header, state_dict)
 
         if self.world.is_master:
-            self.logger.debug(f"LoRA adapter broadcasted in {time.perf_counter() - start_time:.2f}s")
+            self.logger.info(f"Broadcasted LoRA adapter via NCCL in {time.perf_counter() - start_time:.2f}s")
 
     def _resolve_lora_state_dict(self, state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         """Gather DTensors and cast everything to the broadcast dtype.
