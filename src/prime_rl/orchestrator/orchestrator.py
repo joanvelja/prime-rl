@@ -27,6 +27,7 @@ import os
 import time
 from typing import TYPE_CHECKING
 
+import psutil
 import tomli_w
 
 if TYPE_CHECKING:
@@ -119,6 +120,23 @@ TARGET_LAG = 1
 # token-export steps it hadn't flushed yet, and how often to poll for them.
 TOKEN_EXPORT_DRAIN_TIMEOUT_S = 300.0
 TOKEN_EXPORT_DRAIN_POLL_S = 2.0
+
+# Host-RAM attribution gauges, sampled on the pipeline tick. With
+# ``orchestrator_on_inference`` the orchestrator shares a node with a vLLM
+# engine + env-worker children, so a host-OOM here is invisible to step-axis
+# metrics (the step that OOMs never finishes). Split node RAM into the
+# orchestrator process tree (main proc + recursive children = env workers) vs
+# everything else (``node_other`` ≈ the co-located vLLM engine + system).
+_MEM_GAUGE_KEYS = (
+    "mem/orch_proc_gb",
+    "mem/orch_children_gb",
+    "mem/orch_tree_gb",
+    "mem/orch_children_n",
+    "mem/node_used_gb",
+    "mem/node_available_gb",
+    "mem/node_percent",
+    "mem/node_other_gb",
+)
 
 
 class Orchestrator:
@@ -467,6 +485,7 @@ class Orchestrator:
                 "event_loop_lag/p99",
                 "event_loop_lag/max",
                 "event_loop_lag/n",
+                *_MEM_GAUGE_KEYS,
             ],
             interval=log_interval,
             wandb_enabled=wandb_enabled,
@@ -901,7 +920,51 @@ class Orchestrator:
             payload["event_loop_lag/p99"] = lag_stats.p99
             payload["event_loop_lag/max"] = lag_stats.max
             payload["event_loop_lag/n"] = float(lag_stats.n)
+        try:
+            mem_body, mem_gauges = self._collect_memory()
+            body += " || " + mem_body
+            payload.update(mem_gauges)
+        except Exception as e:
+            # Observability must never take down the pipeline logger.
+            get_logger().debug(f"memory gauge failed: {e}")
         return body, payload
+
+    @staticmethod
+    def _collect_memory() -> tuple[str, dict[str, float]]:
+        """Host-RAM attribution for the orchestrator node (keys = ``_MEM_GAUGE_KEYS``).
+        Returns ``(console_fragment, gauges)``. ``orch_tree`` is this process plus
+        its recursive children (the env workers); ``node_other`` is node ``used``
+        minus that tree, i.e. ≈ the co-located vLLM engine + system."""
+        gib = float(1 << 30)
+        proc = psutil.Process()
+        main_rss = proc.memory_info().rss
+        children = proc.children(recursive=True)
+        children_rss = 0
+        for child in children:
+            try:
+                children_rss += child.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        tree_rss = main_rss + children_rss
+        vm = psutil.virtual_memory()
+        node_other = max(0.0, (vm.used - tree_rss) / gib)
+        gauges = {
+            "mem/orch_proc_gb": main_rss / gib,
+            "mem/orch_children_gb": children_rss / gib,
+            "mem/orch_tree_gb": tree_rss / gib,
+            "mem/orch_children_n": float(len(children)),
+            "mem/node_used_gb": vm.used / gib,
+            "mem/node_available_gb": vm.available / gib,
+            "mem/node_percent": vm.percent,
+            "mem/node_other_gb": node_other,
+        }
+        body = (
+            f"mem node {vm.percent:.0f}% ({vm.used / gib:.0f}/{vm.total / gib:.0f}G, "
+            f"avail {vm.available / gib:.0f}G) | orch-tree {tree_rss / gib:.0f}G "
+            f"(proc {main_rss / gib:.0f}G + {len(children)} kids {children_rss / gib:.0f}G) "
+            f"| other {node_other:.0f}G"
+        )
+        return body, gauges
 
     def log_train_batch(self, batch: TrainBatch, *, step: int, step_time: float) -> None:
         """Per-step ``Step …`` success line. Multi-env runs append an
