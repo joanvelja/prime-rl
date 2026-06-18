@@ -286,3 +286,124 @@ def test_as_train_client_is_identity_for_chat_trained_pool():
 
     eval_client = pool.eval_clients[0]
     assert pool.as_train_client(eval_client) is eval_client
+
+
+# --- regression tests for the per-peer admin-gather hardening (verify-client-hardening: SHIP) ---
+# These lock in the three behaviors proven live by fault-injection but previously
+# untested in the committed suite: multi-peer attribution, CancelledError-verbatim,
+# and the raise_on_failure=False soft path. _gather_admin is the single chokepoint
+# every weight-sync fan-out routes through, so testing it covers all call sites.
+
+
+def _client(base_url: str) -> httpx.AsyncClient:
+    # A real AsyncClient so base_url attribution is exercised exactly as in prod
+    # (the helper only reads .base_url off it; no network is touched).
+    return httpx.AsyncClient(base_url=base_url)
+
+
+async def _ok(value):
+    return value
+
+
+async def _boom(exc: BaseException):
+    raise exc
+
+
+def test_gather_admin_attributes_only_dead_peers_on_partial_failure():
+    # Three peers; peers b and c die with DISTINCT error types, peer a succeeds.
+    # The aggregated error must name ONLY the dead peers (each with its own error
+    # type) and leave the healthy peer out -- this is the attribution that turns
+    # opaque first-exception death into a recoverable, named failure.
+    from prime_rl.utils.client import _gather_admin
+
+    a, b, c = _client("http://peer-a:8000"), _client("http://peer-b:8000"), _client("http://peer-c:8000")
+    err_b = httpx.ConnectError("conn refused")
+    err_c = httpx.ReadTimeout("read timed out")
+
+    async def run():
+        return await _gather_admin(
+            [a, b, c],
+            [_ok("OK"), _boom(err_b), _boom(err_c)],
+            op_name="update weights",
+        )
+
+    with pytest.raises(AdminGatherError) as exc_info:
+        asyncio.run(run())
+
+    err = exc_info.value
+    assert err.op_name == "update weights"
+    assert err.total == 3
+    assert len(err.failures) == 2
+    failed_clients = {client for client, _ in err.failures}
+    assert failed_clients == {b, c}
+    assert a not in failed_clients
+    failed_excs = {type(exc) for _, exc in err.failures}
+    assert failed_excs == {httpx.ConnectError, httpx.ReadTimeout}
+    msg = str(err)
+    assert "http://peer-b:8000" in msg and "http://peer-c:8000" in msg
+    # The healthy peer is NOT smeared into the failure message.
+    assert "http://peer-a:8000" not in msg
+    assert "2/3" in msg
+
+
+def test_gather_admin_reraises_cancelled_verbatim():
+    # CancelledError is cooperative-cancellation, not a peer failure. It must
+    # propagate AS CancelledError (so the event loop's cancellation machinery
+    # still works), NOT be caught and re-wrapped as AdminGatherError.
+    from prime_rl.utils.client import _gather_admin
+
+    a, b = _client("http://peer-a:8000"), _client("http://peer-b:8000")
+
+    async def run():
+        return await _gather_admin(
+            [a, b],
+            [_ok("OK"), _boom(asyncio.CancelledError())],
+            op_name="update weights",
+        )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run())
+
+
+def test_gather_admin_soft_path_logs_loud_and_returns_exception_in_band():
+    # The unload_lora_adapter site passes raise_on_failure=False (idempotent
+    # teardown). It must NOT raise, but it MUST still: (a) log the dead peer
+    # loudly, and (b) return the exception in-band so the caller can see it.
+    #
+    # We assert the loud log by attaching a temporary sink to get_logger()'s
+    # private loguru _Logger instance (logger.py binds its own isolated logger,
+    # not stdlib logging or the global loguru.logger). caplog/capsys/capfd all
+    # miss it: the production sink is bound to the real sys.stdout at import time,
+    # so pytest's per-test capture layers never see the bytes. A scoped sink on
+    # the actual logger object tests emission at the source, capture-independent.
+    from prime_rl.utils.client import _gather_admin
+    from prime_rl.utils.logger import get_logger
+
+    a, b = _client("http://peer-a:8000"), _client("http://peer-b:8000")
+    err_b = RuntimeError("peer-down")
+
+    records: list[str] = []
+    logger = get_logger()
+    sink_id = logger.add(lambda msg: records.append(str(msg)), level="ERROR")
+    try:
+
+        async def run():
+            return await _gather_admin(
+                [a, b],
+                [_ok("OK"), _boom(err_b)],
+                op_name="unload LoRA adapter",
+                raise_on_failure=False,
+            )
+
+        results = asyncio.run(run())
+    finally:
+        logger.remove(sink_id)
+
+    # No raise; success and failure both observable in-band, positionally aligned.
+    assert results[0] == "OK"
+    assert isinstance(results[1], RuntimeError)
+    assert results[1] is err_b
+    # The dead peer was logged loudly at ERROR level, named with its base URL.
+    combined = "".join(records)
+    assert "unload LoRA adapter failed on inference peer http://peer-b:8000" in combined
+    assert "peer-down" in combined
