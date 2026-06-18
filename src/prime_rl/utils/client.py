@@ -519,10 +519,7 @@ async def _pause_engines(admin_clients: list[AsyncClient], *, step: int) -> None
     # the dead peer instead of an opaque first-exception that kills the job).
     await _gather_admin(
         admin_clients,
-        [
-            _admin_post(client, "/pause", params={"mode": "keep", "clear_cache": "false"})
-            for client in admin_clients
-        ],
+        [_admin_post(client, "/pause", params={"mode": "keep", "clear_cache": "false"}) for client in admin_clients],
         op_name="pause engines",
     )
     logger.debug("All inference engines paused")
@@ -608,12 +605,9 @@ async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, 
     adapters = [{"lora_name": lora_name, "lora_int_id": 1}]
 
     async def _arm_lora_update(admin_client: AsyncClient) -> None:
-        response = await admin_client.post(
-            "/update_lora",
-            json={"step": step, "adapters": adapters},
-            timeout=httpx.Timeout(connect=10.0, read=PAUSE_READ_TIMEOUT_S, write=60.0, pool=10.0),
-        )
-        response.raise_for_status()
+        # Arm is a pause-class drain op; route through _admin_post for the same
+        # bounded-timeout + transient-retry contract as the other admin sites.
+        await _admin_post(admin_client, "/update_lora", json={"step": step, "adapters": adapters})
 
     async def _wait_lora_update(admin_client: AsyncClient) -> None:
         deadline = time.monotonic() + LORA_UPDATE_STATUS_TIMEOUT_S

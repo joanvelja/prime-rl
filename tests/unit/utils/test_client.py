@@ -407,3 +407,47 @@ def test_gather_admin_soft_path_logs_loud_and_returns_exception_in_band():
     combined = "".join(records)
     assert "unload LoRA adapter failed on inference peer http://peer-b:8000" in combined
     assert "peer-down" in combined
+
+
+def test_update_lora_adapter_arms_without_dangling_timeout_constant():
+    # Site-level regression for a rebase defect the isolated _gather_admin tests
+    # could NOT catch: _arm_lora_update referenced a dropped PAUSE_READ_TIMEOUT_S
+    # constant, NameError-ing on the first NCCL-LoRA arm (the feature this PR
+    # adds). Drive update_lora_adapter end-to-end with mock admin clients and
+    # assert the arm POST to /update_lora actually fires (i.e. no NameError, and
+    # the per-peer admin contract holds).
+    from prime_rl.utils.client import update_lora_adapter
+
+    posts: list[tuple[str, dict]] = []
+
+    def make_client() -> AsyncMock:
+        client = AsyncMock()
+        client.base_url = "http://worker:8000"
+
+        async def _post(path, **kwargs):
+            posts.append((path, kwargs))
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        async def _get(path, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json = MagicMock(return_value={"status": "ok"})
+            return resp
+
+        client.post.side_effect = _post
+        client.get.side_effect = _get
+        return client
+
+    clients = [make_client(), make_client()]
+    # Should NOT raise NameError; arms + waits + pauses/resumes all run.
+    asyncio.run(update_lora_adapter(clients, lora_name="test-lora", weight_dir=Path("/tmp/bcast"), step=7))
+
+    arm_posts = [(path, kw) for path, kw in posts if path == "/update_lora"]
+    # One arm POST per peer, carrying the step + adapters payload.
+    assert len(arm_posts) == 2, f"expected 2 arm posts, got {len(arm_posts)}: {posts}"
+    for _, kw in arm_posts:
+        assert kw["json"]["step"] == 7
+        assert kw["json"]["adapters"] == [{"lora_name": "test-lora", "lora_int_id": 1}]
