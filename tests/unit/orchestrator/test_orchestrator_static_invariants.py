@@ -174,7 +174,11 @@ def test_eval_path_reaches_debate_step_metrics():
     assert len(calls) == 1
     prefix_kw = _call_kw(calls[0], "prefix")
     assert prefix_kw is not None
-    assert ast.unparse(prefix_kw.value) == "f'eval/{batch.env_name}/debate'"
+    # Deliberately env-name-free: orchestrator.py uses prefix="eval/debate" (a
+    # literal, not f"eval/{batch.env_name}/debate") so the eval debate panel
+    # overlays the train "debate/*" panel and stays comparable across runs
+    # regardless of env name. See orchestrator.finalize_eval_batch.
+    assert ast.unparse(prefix_kw.value) == "'eval/debate'"
     monitor_kw = _call_kw(calls[0], "monitor")
     assert monitor_kw is not None
     assert ast.unparse(monitor_kw.value) == "self.monitor"

@@ -58,9 +58,19 @@ def is_baseline_config(path: Path) -> bool:
 
 def is_composed_config_layer(path: Path) -> bool:
     """Composition overlays are valid only when loaded after a base config."""
-    return path.parts[:3] == ("configs", "sft", "overrides") or (
-        path.parts[:2] == ("configs", "sft") and path.name.startswith("isambard_")
-    )
+    if path.parts[:3] == ("configs", "sft", "overrides"):
+        return True
+    if path.parts[:2] == ("configs", "sft") and path.name.startswith("isambard_"):
+        return True
+    # The generated debate config tree (configs/debate/) is a generator SOURCE:
+    # base.toml + per-debater + per-judge fragments that ``gen.py`` composes into
+    # complete entrypoint configs under configs/debate/generated/. Only the
+    # generated/* outputs are standalone-loadable; the source layers are partial
+    # (a judge fragment is just [orchestrator.multi_agent.fixed.judge]) and must
+    # not be loaded on their own. The generated outputs ARE still validated.
+    if path.parts[:2] == ("configs", "debate") and path.parts[2:3] != ("generated",):
+        return True
+    return False
 
 
 @pytest.mark.parametrize("config_file", get_config_files(), ids=lambda x: x.as_posix())
