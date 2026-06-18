@@ -9,7 +9,13 @@ import verifiers as vf
 from prime_rl.configs.multi_agent import FixedMemberTargetConfig
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.orchestrator.member_generation import _fixed_client
-from prime_rl.utils.client import _is_retryable_lora_error, init_nccl_broadcast, load_lora_adapter, setup_clients
+from prime_rl.utils.client import (
+    AdminGatherError,
+    _is_retryable_lora_error,
+    init_nccl_broadcast,
+    load_lora_adapter,
+    setup_clients,
+)
 
 
 def make_status_error(status_code: int) -> httpx.HTTPStatusError:
@@ -66,13 +72,28 @@ def test_init_nccl_broadcast_requires_divisible_world_size():
 
 
 def test_init_nccl_broadcast_propagates_missing_route():
+    # A failed peer must NOT be swallowed. The fan-out now raises an
+    # attributed AdminGatherError naming the dead peer (converting the opaque
+    # first-exception that killed the whole job into a recoverable, named
+    # failure) while preserving the underlying HTTPStatusError as the cause.
     mock_client = AsyncMock()
+    mock_client.base_url = "http://worker-a:8000"
     mock_response = MagicMock()
     mock_response.raise_for_status.side_effect = make_status_error(404)
     mock_client.post.return_value = mock_response
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(AdminGatherError) as exc_info:
         asyncio.run(init_nccl_broadcast([mock_client], host="localhost", port=29501, timeout=10))
+
+    err = exc_info.value
+    assert err.op_name == "init NCCL broadcaster"
+    assert err.total == 1
+    assert len(err.failures) == 1
+    failed_client, failed_exc = err.failures[0]
+    assert failed_client is mock_client
+    assert isinstance(failed_exc, httpx.HTTPStatusError)
+    # The dead peer is named in the aggregated message.
+    assert "http://worker-a:8000" in str(err)
 
 
 def test_init_nccl_broadcast_assigns_rank_offsets():
