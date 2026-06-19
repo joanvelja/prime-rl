@@ -1,0 +1,42 @@
+# gemma-4-26B-A4B NATIVE-port GPU smoke (SFT, fake data, fp32, sdpa).
+# Proves the native Gemma4 MoE (dual-path shared-MLP + 128-expert grouped_mm router)
+# loads the real A4B checkpoint at scale, runs fwd/bwd FINITE with sane grad-norm.
+# Numerics already validated == HF (job 4950944: looped-fp32 cos=1.0, grouped_mm == loop).
+max_steps = 6
+output_dir = "/projects/a6r/joanv.a6r/tmp/gemma4-moe-smoke-out"
+clean_output_dir = false
+
+[model]
+name = "google/gemma-4-26B-A4B-it"
+impl = "custom"
+attn = "sdpa"
+moe_use_grouped_mm = true
+optimization_dtype = "float32"
+reduce_dtype = "float32"
+optim_cpu_offload = true
+
+[model.ac]
+mode = "full"
+
+[data]
+type = "fake"
+seq_len = 512
+batch_size = 16
+micro_batch_size = 1
+
+[scheduler]
+type = "constant"
+
+[deployment]
+type = "multi_node"
+gpus_per_node = 4
+num_nodes = 4
+
+[slurm]
+job_name = "gemma4-moe-smoke"
+partition = "workq"
+account = "brics.a6r"
+time = "00:40:00"
+project_dir = "/projects/a6r/joanv.a6r/tmp/gemma4-smoke-wt"
+template_path = "/projects/a6r/joanv.a6r/tmp/gemma4-smoke-wt/configs/sft/templates/isambard_multi_node_sft.sbatch.j2"
+pre_run_command = "export PYTHONPATH=$PROJECT_DIR/src"
