@@ -743,7 +743,10 @@ def train(config: TrainerConfig):
         weight_ckpt_manager.save(progress.step, model, tokenizer)
         weight_ckpt_manager.maybe_clean()
 
-    logger.info(f"Peak memory: {max(to_col_format(monitor.history)['perf/peak_memory']):.1f} GiB")
+    history = to_col_format(monitor.history)
+    peak_memory_values = history.get("perf/peak_memory", [])
+    if peak_memory_values:
+        logger.info(f"Peak memory: {max(peak_memory_values):.1f} GiB")
     logger.success("RL trainer finished!")
 
     # Stop metrics/health server if configured
@@ -754,7 +757,6 @@ def train(config: TrainerConfig):
 
     # Optionally, print benchmark table and export JSON
     if config.bench is not None and world.is_master:
-        history = to_col_format(monitor.history)
         print_benchmark(history)
         if config.bench.output_json:
             export_benchmark_json(history, config.bench.output_json)
