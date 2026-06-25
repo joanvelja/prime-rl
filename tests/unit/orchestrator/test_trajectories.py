@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock
 
 import numpy as np
-import pybase64
 import pytest
 import verifiers as vf
 
@@ -32,10 +31,13 @@ def _decode_mm_thw(sample) -> list:
 
 
 def _routed_experts_payload(data, start: int = 0) -> dict:
-    arr = np.asarray(data, dtype=np.uint8)
+    """A routed_experts payload as it reaches the orchestrator hydrate post-cutover
+    (issue #76 PR1): raw bytes (rebound from a ZMQ frame) + explicit dtype, no b64."""
+    arr = np.ascontiguousarray(np.asarray(data, dtype=np.uint8))
     return {
-        "data": pybase64.b64encode(memoryview(np.ascontiguousarray(arr))).decode("ascii"),
+        "data": arr.tobytes(),
         "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
         "start": start,
     }
 
@@ -1048,6 +1050,75 @@ def test_interleave_rollout_multi_step_with_routed_experts():
             dtype=np.uint8,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "n_vllm_rows, golden",
+    [
+        # Under-length: vLLM returned 2 rows but the merged sample has 4 tokens.
+        # align pads dim-0 with zero rows up to 4 -> golden has 2 real + 2 zero.
+        (
+            2,
+            np.asarray([[[10, 11]], [[20, 21]], [[0, 0]], [[0, 0]]], dtype=np.uint8),
+        ),
+        # Over-length: vLLM returned 6 rows for a 4-token sample (e.g. a truncated
+        # rollout). align slices dim-0 down to 4 -> golden is the first 4 rows.
+        (
+            6,
+            np.asarray([[[10, 11]], [[20, 21]], [[30, 31]], [[40, 41]]], dtype=np.uint8),
+        ),
+    ],
+)
+def test_truncation_align_byte_identical(n_vllm_rows, golden):
+    """T2 (strongest correctness proof): a rollout whose routed_experts.shape[0]
+    disagrees with the token count, both over and under.
+
+    G1: hydrate must ACCEPT the mismatch (the only length check is bytes-vs-shape,
+    never a token-count cross-check) — align_routed_experts is the sole dim-0
+    arbiter. The finalized array must be byte-identical to a pre-cutover golden,
+    proving the same bytes reach the trainer contract after the b64->raw cutover.
+    """
+    # Single-step sample: prompt=[1,2], completion=[3,4] -> 4 tokens expected.
+    vllm_rows = np.asarray([[[10 * (i + 1), 10 * (i + 1) + 1]] for i in range(n_vllm_rows)], dtype=np.uint8)
+    # Match the golden's real rows to the vLLM rows align would keep.
+    output = vf.RolloutOutput(
+        example_id=0,
+        trajectory=[
+            vf.TrajectoryStep(
+                prompt=[{"role": "user", "content": "U1"}],
+                completion=[{"role": "assistant", "content": "A1"}],
+                response=MagicMock(),
+                tokens=vf.TrajectoryStepTokens(
+                    prompt_ids=[1, 2],
+                    prompt_mask=[0, 0],
+                    completion_ids=[3, 4],
+                    completion_mask=[1, 1],
+                    completion_logprobs=[-0.1, -0.2],
+                    overlong_prompt=False,
+                    is_truncated=False,
+                    routed_experts=_routed_experts_payload(vllm_rows),
+                ),
+                reward=None,
+                advantage=None,
+                is_truncated=False,
+                trajectory_id="1",
+                extras={},
+            )
+        ],
+        sampling_args={"temperature": 1.0},
+        error=None,
+    )
+
+    rollouts = interleave_rollout(output)
+    assert rollouts is not None and len(rollouts) == 1
+    sample = rollouts[0]
+
+    assert sample.routed_experts is not None
+    finalized = _sample_routed_experts(sample)
+    # G1: hydrate accepted the mismatch; align produced exactly the golden bytes.
+    assert finalized.shape == (4, 1, 2)
+    np.testing.assert_array_equal(finalized, golden)
+    assert finalized.tobytes() == golden.tobytes()
 
 
 def test_interleave_rollout_none_routed_experts_stays_none():

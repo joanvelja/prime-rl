@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pybase64
 import torch
 import verifiers as vf
 
@@ -250,10 +249,12 @@ def interleave_rollout(
             routed_experts = None
             routed_experts_start = None
             if routed_experts_payload is not None:
-                decoded_routed_experts = pybase64.b64decode_as_bytearray(routed_experts_payload["data"])
-                routed_experts = np.frombuffer(decoded_routed_experts, dtype=np.uint8).reshape(
-                    routed_experts_payload["shape"]
-                )
+                # data is already raw bytes (rebound from a ZMQ frame at the env
+                # client, issue #76 PR1) — no b64 decode. dtype is carried in the
+                # payload (G5), so np.frombuffer is parameterized, not hardcoded.
+                routed_experts = np.frombuffer(
+                    routed_experts_payload["data"], dtype=np.dtype(routed_experts_payload["dtype"])
+                ).reshape(routed_experts_payload["shape"])
                 routed_experts_start = routed_experts_payload["start"]
 
             return {
