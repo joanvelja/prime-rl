@@ -51,7 +51,10 @@ def test_debate_prompt_pack_uses_same_deepseek_sampling_policy() -> None:
     # provider in the pool, so the privacy guarantee holds while a single dead
     # provider no longer fails every grade (the grader_error=1.0 incident).
     assert text.count("allow_fallbacks: true") == 2
-    assert text.count("require_parameters: true") == 2
+    # require_parameters was REMOVED from both provider blocks: combined with zdr +
+    # fp8 + a pinned order it left no eligible OpenRouter route -> ModelError ->
+    # silent 0.0 grade (the grader_error=1.0 incident). Assert it stays gone.
+    assert text.count("require_parameters: true") == 0
     assert text.count("zdr: true") == 2
     assert text.count("data_collection: deny") == 2
     assert text.count("- AtlasCloud") == 2
