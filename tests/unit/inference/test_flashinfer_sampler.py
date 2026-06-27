@@ -1,6 +1,7 @@
 import inspect
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from prime_rl.inference.vllm import flashinfer_sampler
@@ -143,6 +144,7 @@ def test_sampler_contract_sweep_failure_classifier_allows_fp_noise():
     assert sweep.probe_failed(result, atol=1e-8)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="apply_all_penalties requires a CUDA device")
 def test_dense_presence_shortcut_matches_native_prompt_and_output_penalties():
     from vllm.v1.sample.ops.penalties import apply_all_penalties
 
