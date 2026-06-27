@@ -284,6 +284,68 @@ def test_final_output_capture_handles_empty_stream():
     assert capture.final_res is None
 
 
+class _FakeTokenizer:
+    def __init__(self, pad_token_id, eos_token_id):
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
+
+
+class _FakeEngineClient:
+    def __init__(self, tokenizer):
+        self._tokenizer = tokenizer
+
+    def get_tokenizer(self):
+        return self._tokenizer
+
+
+def _make_serving(pad_token_id, eos_token_id):
+    # ``custom_init_app_state`` instantiates the subclass via ``object.__new__``
+    # + ``__dict__.update`` (its ``__init__`` never runs), so mirror that here
+    # and inject only the engine client the pad guard reads.
+    serving = PrimeRlServingTokens.__new__(PrimeRlServingTokens)
+    serving.engine_client = _FakeEngineClient(_FakeTokenizer(pad_token_id, eos_token_id))
+    return serving
+
+
+def test_suppress_pad_blocks_real_pad_distinct_from_eos():
+    serving = _make_serving(pad_token_id=0, eos_token_id=1)
+    sp = SamplingParams(max_tokens=1)
+    serving._maybe_suppress_pad_token(sp)
+    assert sp.bad_words_token_ids == [[0]]
+
+
+def test_suppress_pad_skips_when_pad_equals_eos():
+    serving = _make_serving(pad_token_id=1, eos_token_id=1)
+    sp = SamplingParams(max_tokens=1)
+    serving._maybe_suppress_pad_token(sp)
+    assert not sp.bad_words_token_ids
+
+
+def test_suppress_pad_skips_when_pad_is_none():
+    serving = _make_serving(pad_token_id=None, eos_token_id=1)
+    sp = SamplingParams(max_tokens=1)
+    serving._maybe_suppress_pad_token(sp)
+    assert not sp.bad_words_token_ids
+
+
+def test_suppress_pad_handles_eos_as_list():
+    serving = _make_serving(pad_token_id=0, eos_token_id=[1, 2])
+    sp = SamplingParams(max_tokens=1)
+    serving._maybe_suppress_pad_token(sp)
+    assert sp.bad_words_token_ids == [[0]]
+
+
+def test_suppress_pad_appends_to_existing_and_is_idempotent():
+    serving = _make_serving(pad_token_id=0, eos_token_id=1)
+    sp = SamplingParams(max_tokens=1)
+    sp._bad_words_token_ids = [[5]]
+    serving._maybe_suppress_pad_token(sp)
+    assert sp.bad_words_token_ids == [[5], [0]]
+    # A second call must not double-append.
+    serving._maybe_suppress_pad_token(sp)
+    assert sp.bad_words_token_ids == [[5], [0]]
+
+
 def test_client_set_max_tokens_assumes_set_when_body_unreadable():
     # No raw_request → can't tell, don't override.
     assert asyncio.run(_client_set_max_tokens(None)) is True
