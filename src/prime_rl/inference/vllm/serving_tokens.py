@@ -175,6 +175,40 @@ class PrimeRlServingTokens(ServingTokens):
         )
         return diff, override
 
+    @cached_property
+    def _pad_token_id_to_suppress(self) -> int | None:
+        """Pad token id to block from generation, or None to leave sampling untouched.
+
+        Tied-embedding models (Gemma: pad_token_id=0, tie_word_embeddings=True) can put
+        nonzero probability on their pad token. Sampled mid-completion it is trained on
+        (the completion span is not loss-masked) and pad is not a stop token, so RL can
+        amplify it into pad-spam. vLLM does not suppress pad by default. Block it only
+        when pad is a real id distinct from eos -- never when pad == eos, where pad IS the
+        stop token and suppressing it would break termination.
+        """
+        tokenizer = self.engine_client.get_tokenizer()
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if not isinstance(pad_id, int) or isinstance(pad_id, bool) or pad_id < 0:
+            return None
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        eos_ids = {eos_id} if isinstance(eos_id, int) else set(eos_id or [])
+        if pad_id in eos_ids:
+            return None
+        return pad_id
+
+    def _maybe_suppress_pad_token(self, sampling_params: SamplingParams) -> None:
+        pad_id = self._pad_token_id_to_suppress
+        if pad_id is None:
+            return
+        existing = sampling_params.bad_words_token_ids or []
+        if [pad_id] in existing:
+            return
+        # Assumes the request does not also set string bad_words: vLLM's
+        # update_from_tokenizer rebuilds _bad_words_token_ids from bad_words
+        # strings (clobbering this append). prime-rl rollout requests never set
+        # string bad_words, so the injection survives; revisit if that changes.
+        sampling_params._bad_words_token_ids = [*existing, [pad_id]]
+
     async def serve_tokens(
         self,
         request: GenerateRequest,
@@ -238,6 +272,7 @@ class PrimeRlServingTokens(ServingTokens):
             )
 
         sampling_params: SamplingParams = request.sampling_params
+        self._maybe_suppress_pad_token(sampling_params)
 
         # Upstream ``ServingTokens.serve_tokens`` parses ``request.kv_transfer_params``
         # but never threads it into the engine, so PD disagg never fires on
