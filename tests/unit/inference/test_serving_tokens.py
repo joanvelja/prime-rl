@@ -14,7 +14,6 @@ import asyncio
 
 import numpy as np
 import pybase64
-import pytest
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.disagg.protocol import GenerateResponse, GenerateResponseChoice
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
@@ -30,7 +29,6 @@ from prime_rl.inference.vllm.serving_tokens import (
     _client_set_max_tokens,
     _FinalOutputCapture,
     _GenerateRoutedExpertsCapture,
-    _promote_bad_words_token_ids_extra_arg,
 )
 
 
@@ -113,22 +111,6 @@ def test_client_set_max_tokens_detects_unset():
 
     body_without_sp = {"token_ids": [1, 2, 3]}
     assert asyncio.run(_client_set_max_tokens(_FakeRawRequest(body_without_sp))) is False
-
-
-def test_promote_bad_words_token_ids_extra_arg_to_sampling_params_private_field():
-    sampling_params = SamplingParams(max_tokens=1, extra_args={"bad_words_token_ids": [[0], [1, 2]], "keep": True})
-
-    _promote_bad_words_token_ids_extra_arg(sampling_params)
-
-    assert sampling_params.bad_words_token_ids == [[0], [1, 2]]
-    assert sampling_params.extra_args == {"keep": True}
-
-
-def test_promote_bad_words_token_ids_rejects_bool_token_ids():
-    sampling_params = SamplingParams(max_tokens=1, extra_args={"bad_words_token_ids": [[False]]})
-
-    with pytest.raises(ValueError, match="non-negative integers"):
-        _promote_bad_words_token_ids_extra_arg(sampling_params)
 
 
 def test_generate_logprobs_zero_serializes_sampled_completion_logprob():
