@@ -335,6 +335,15 @@ def test_suppress_pad_handles_eos_as_list():
     assert sp.bad_words_token_ids == [[0]]
 
 
+def test_suppress_pad_skips_when_pad_in_eos_list():
+    # pad coincides with one of several eos ids: pad IS a stop token here, so
+    # suppressing it would break termination — leave sampling untouched.
+    serving = _make_serving(pad_token_id=1, eos_token_id=[1, 2])
+    sp = SamplingParams(max_tokens=1)
+    serving._maybe_suppress_pad_token(sp)
+    assert not sp.bad_words_token_ids
+
+
 def test_suppress_pad_appends_to_existing_and_is_idempotent():
     serving = _make_serving(pad_token_id=0, eos_token_id=1)
     sp = SamplingParams(max_tokens=1)

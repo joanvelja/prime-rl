@@ -203,6 +203,10 @@ class PrimeRlServingTokens(ServingTokens):
         existing = sampling_params.bad_words_token_ids or []
         if [pad_id] in existing:
             return
+        # Assumes the request does not also set string bad_words: vLLM's
+        # update_from_tokenizer rebuilds _bad_words_token_ids from bad_words
+        # strings (clobbering this append). prime-rl rollout requests never set
+        # string bad_words, so the injection survives; revisit if that changes.
         sampling_params._bad_words_token_ids = [*existing, [pad_id]]
 
     async def serve_tokens(
