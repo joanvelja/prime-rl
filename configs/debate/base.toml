@@ -5,8 +5,13 @@ level = "info"
 interval = 50
 keep_last = 1
 
+# NCCL (direct GPU->GPU collective) not filesystem: at 12 inference replicas the
+# filesystem path has every replica read the multi-GB rank-64 adapter from Lustre
+# simultaneously while serving decode -> read storm -> httpx.ReadError (not retried)
+# -> WeightWatcher dies -> run lost (observed 2/8 runs dead in <10 steps, 2026-06-28).
+# NCCL avoids the filesystem entirely. Unblocked here: no quantize, multi-node.
 [weight_broadcast]
-type = "filesystem"
+type = "nccl"
 keep_all = true
 
 [orchestrator]
