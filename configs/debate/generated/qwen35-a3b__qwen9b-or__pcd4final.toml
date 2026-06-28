@@ -23,13 +23,14 @@ level = "info"
 interval = 50
 keep_last = 1
 
-# NCCL (direct GPU->GPU collective) not filesystem: at 12 inference replicas the
-# filesystem path has every replica read the multi-GB rank-64 adapter from Lustre
-# simultaneously while serving decode -> read storm -> httpx.ReadError (not retried)
-# -> WeightWatcher dies -> run lost (observed 2/8 runs dead in <10 steps, 2026-06-28).
-# NCCL avoids the filesystem entirely. Unblocked here: no quantize, multi-node.
+# Filesystem broadcast with bounded concurrent reads. NCCL LoRA broadcast fails at
+# 4t12i (receive-thread cuda error -> 12/12 step-1 timeout, 2026-06-28). The
+# filesystem read-storm (all 12 replicas reading the multi-GB rank-64 adapter from
+# Lustre at once while serving decode -> httpx.ReadError -> watcher dies) is fixed
+# upstream in utils/client.py:load_lora_adapter via a concurrency semaphore
+# (LORA_LOAD_MAX_CONCURRENCY) + ReadError retry.
 [weight_broadcast]
-type = "nccl"
+type = "filesystem"
 keep_all = true
 
 [orchestrator]

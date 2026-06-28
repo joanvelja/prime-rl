@@ -651,12 +651,13 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
     if isinstance(exception, httpx.HTTPStatusError):
         # Retry on 404 (adapter not found) or 500 (server error during loading)
         return exception.response.status_code in (404, 500)
-    # Retry only failures where a new POST can plausibly succeed: connection
-    # establishment problems (server restarting, transient network). A READ
-    # timeout means the server accepted the request and is still working on a
-    # serialized load — re-POSTing just queues a duplicate behind it, so let
-    # the generous per-attempt read window be the verdict instead.
-    if isinstance(exception, (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)):
+    # Retry failures where a fresh POST can plausibly succeed: connection-establishment
+    # problems (server restarting, transient network) and a mid-read connection RESET
+    # (httpx.ReadError) — the read aborted, the prior load is not progressing, so a new
+    # POST is safe. Deliberately NOT httpx.ReadTimeout: that means the server accepted
+    # the request and is still working a serialized load, where re-POSTing only queues a
+    # duplicate behind it (death spiral); let the generous per-attempt read window decide.
+    if isinstance(exception, (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError, httpx.ReadError)):
         return True
     return False
 
@@ -676,6 +677,11 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
 # are reserved for connection-class failures where a new POST can help.
 LORA_LOAD_READ_TIMEOUT_S = 900.0
 LORA_LOAD_TOTAL_TIMEOUT_S = 1200.0
+# Cap how many replicas read the adapter from shared storage concurrently. All 12
+# reading a multi-GB rank-64 adapter from Lustre at once (while serving decode) caused
+# a read storm -> httpx.ReadError -> watcher death (2026-06-28). A small semaphore
+# serializes the fan-out into waves, trading a little sync latency for robustness.
+LORA_LOAD_MAX_CONCURRENCY = 4
 
 
 async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_path: Path) -> None:
@@ -691,6 +697,11 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
     lora_path_posix = lora_path.as_posix()
     logger.info(f"Loading LoRA adapter {lora_name} from {lora_path} on {len(admin_clients)} inference server(s)")
 
+    # Serialize the fan-out so at most LORA_LOAD_MAX_CONCURRENCY replicas read the
+    # adapter from shared storage at once (avoids the Lustre read storm). A backing-off
+    # retry releases its slot during the wait, so a slow replica never starves others.
+    semaphore = asyncio.Semaphore(LORA_LOAD_MAX_CONCURRENCY)
+
     @retry(
         retry=retry_if_exception(_is_retryable_lora_error),
         stop=stop_after_delay(LORA_LOAD_TOTAL_TIMEOUT_S) | stop_after_attempt(10),
@@ -701,18 +712,19 @@ async def load_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lo
         # `gather` surfaces only the first failure; log per-server so a stuck
         # replica in a multi-server fanout is identifiable from the logs.
         logger.debug(f"Sending request to load LoRA adapter {lora_name} from {lora_path} on {admin_client.base_url}")
-        try:
-            response = await admin_client.post(
-                "/load_lora_adapter",
-                json={"lora_name": lora_name, "lora_path": lora_path_posix},
-                timeout=httpx.Timeout(connect=10.0, read=LORA_LOAD_READ_TIMEOUT_S, write=60.0, pool=10.0),
-            )
-            response.raise_for_status()
-        except Exception as exc:
-            logger.warning(
-                f"Failed to load LoRA adapter {lora_name} from {lora_path} on {admin_client.base_url}: {exc!r}"
-            )
-            raise
+        async with semaphore:
+            try:
+                response = await admin_client.post(
+                    "/load_lora_adapter",
+                    json={"lora_name": lora_name, "lora_path": lora_path_posix},
+                    timeout=httpx.Timeout(connect=10.0, read=LORA_LOAD_READ_TIMEOUT_S, write=60.0, pool=10.0),
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to load LoRA adapter {lora_name} from {lora_path} on {admin_client.base_url}: {exc!r}"
+                )
+                raise
 
     await _gather_admin(
         admin_clients,
