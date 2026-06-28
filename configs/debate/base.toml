@@ -36,6 +36,17 @@ name = "debate-r64"
 type = "rae"
 beta = 0.9
 
+# Length control for multi-agent debate: RAE frontier-gated linear length penalty
+# (reward -= coef * scale * tokens/seq_len, applied only to the winning/frontier
+# set). coef=1.0 chosen from a real-data replay of pcd4/pcd4final/simul rollouts:
+# at this coef the longest-quartile winners' advantage drops ~23% with zero
+# sign-flips, arresting the observed length explosion (mean +44%, p90 +50%,
+# truncation 0->25% over training) without inverting the learning signal.
+# Escalate toward 2-3 only if the length curve keeps climbing while the emitted
+# length_penalty.sign_flipped fraction stays ~0.
+[orchestrator.advantage.length_penalty]
+coef = 1.0
+
 [orchestrator.train]
 num_workers = 64
 
