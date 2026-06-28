@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from collections.abc import Mapping
 from itertools import cycle
 from pathlib import Path
@@ -595,52 +594,49 @@ async def update_weights(
             await _resume_engines(admin_clients)
 
 
-LORA_UPDATE_STATUS_TIMEOUT_S = 300.0
-LORA_UPDATE_STATUS_INTERVAL_S = 0.2
-
-
 async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, weight_dir: Path, step: int) -> None:
-    """Arm an NCCL LoRA update, release the trainer broadcast, and wait for completion."""
+    """Pause engines, release the trainer broadcast, run the blocking NCCL LoRA receive, resume.
+
+    Mirrors the full-weight ``update_weights`` path: the receive runs inline on each worker's
+    busy-loop thread (so it cannot overlap decode), and NCCL_READY is touched *before* the
+    blocking call so the trainer SEND and all 48 receivers enter the rooted collective together.
+    """
     logger = get_logger()
     adapters = [{"lora_name": lora_name, "lora_int_id": 1}]
 
-    async def _arm_lora_update(admin_client: AsyncClient) -> None:
-        # Arm is a pause-class drain op; route through _admin_post for the same
-        # bounded-timeout + transient-retry contract as the other admin sites.
-        await _admin_post(admin_client, "/update_lora", json={"step": step, "adapters": adapters})
-
-    async def _wait_lora_update(admin_client: AsyncClient) -> None:
-        deadline = time.monotonic() + LORA_UPDATE_STATUS_TIMEOUT_S
-        while time.monotonic() < deadline:
-            response = await admin_client.get(
-                "/update_lora/status",
-                params={"step": step},
-                timeout=httpx.Timeout(connect=10.0, read=30.0, write=60.0, pool=10.0),
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "ok":
-                    return
-            elif response.status_code >= 500:
+    async def _post_update_lora(admin_client: AsyncClient) -> None:
+        # Retry ONLY connection-establishment failures: the receive RPC never started, so a
+        # late re-POST safely rejoins the rooted collective (NCCL waits for all ranks). Do NOT
+        # retry 5xx (a one-shot collective failure is fatal -- the trainer SEND won't replay and
+        # the comm is aborted) or ReadTimeout (re-POSTing behind a running receive is the
+        # documented death spiral). The bounded read timeout converts a wedged engine into a
+        # TimeoutError that _gather_admin attributes to the dead peer.
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception(lambda e: isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))),
+            stop=stop_after_delay(2 * UPDATE_WEIGHTS_TIMEOUT_S) | stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+            reraise=True,
+        ):
+            with attempt:
+                response = await admin_client.post(
+                    "/update_lora",
+                    json={"step": step, "adapters": adapters},
+                    timeout=httpx.Timeout(connect=10.0, read=UPDATE_WEIGHTS_TIMEOUT_S, write=60.0, pool=10.0),
+                )
                 response.raise_for_status()
-            await asyncio.sleep(LORA_UPDATE_STATUS_INTERVAL_S)
-        raise TimeoutError(f"Timed out waiting for NCCL LoRA update step {step}")
 
     await _pause_engines(admin_clients, step=step)
     try:
-        await _gather_admin(
-            admin_clients,
-            [_arm_lora_update(admin_client) for admin_client in admin_clients],
-            op_name="arm NCCL LoRA update",
-        )
+        # Release the trainer SEND before the blocking receive: both sides must be in the
+        # rooted collective for it to complete, so the marker must precede the wait.
         nccl_ready_file = weight_dir / NCCL_READY_MARKER
         nccl_ready_file.parent.mkdir(parents=True, exist_ok=True)
         nccl_ready_file.touch()
         logger.debug(f"Created NCCL_READY marker at {nccl_ready_file}")
         await _gather_admin(
             admin_clients,
-            [_wait_lora_update(admin_client) for admin_client in admin_clients],
-            op_name="await NCCL LoRA update",
+            [_post_update_lora(admin_client) for admin_client in admin_clients],
+            op_name="update LoRA adapter",
         )
     finally:
         await _resume_engines(admin_clients)

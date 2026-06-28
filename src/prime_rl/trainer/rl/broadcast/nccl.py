@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import StatelessProcessGroup
+from vllm.utils.torch_utils import current_stream
 
 from prime_rl.configs.trainer import LoRAConfig, NCCLWeightBroadcastConfig
 from prime_rl.trainer.lora import build_lora_peft_config
@@ -184,6 +185,12 @@ class NCCLWeightBroadcastSender:
     # gpu_memory_utilization on the inference side.
     LORA_CHUNK_BYTES = 512 * 1024 * 1024
 
+    # Wall-clock deadline for the rooted LoRA broadcast to land. pynccl broadcasts are
+    # fire-and-forget enqueues with no per-collective timeout, so a receiver that dies without
+    # raising would otherwise strand this SEND until an external teardown (~15 min observed).
+    # Sized above any legitimate transfer but below the orchestrator's admin-timeout cascade.
+    LORA_BROADCAST_DEADLINE_S = 300.0
+
     @torch.no_grad()
     def broadcast_lora_update(self, step: int, adapter_header: dict, state_dict: dict[str, Tensor]) -> None:
         """Broadcast a single LoRA adapter update into the inference pool in bounded chunks."""
@@ -193,6 +200,41 @@ class NCCLWeightBroadcastSender:
         broadcast_object({"step": step, "adapters": [adapter_header], "num_chunks": len(chunks)}, self.communicator)
         for chunk in chunks:
             broadcast_state_dict(chunk, self.communicator)
+        self._wait_broadcast_or_abort(step)
+
+    def _wait_broadcast_or_abort(self, step: int) -> None:
+        """Bound the fire-and-forget broadcast with a wall-clock deadline + ncclCommAbort.
+
+        pynccl ``broadcast`` enqueues on the compute stream and returns with no host wait and
+        no per-collective timeout, so a receiver that dies *without raising* (hard kill,
+        hardware fault) would strand this rooted SEND until an external teardown (~15 min idle
+        on run 5407668). Poll a completion event against a deadline; on timeout or a sticky
+        CUDA error (a peer aborted the comm), ``destroy()`` -> ncclCommAbort errors the
+        collective on every peer and we raise, so the run fails fast and attributably instead
+        of holding the trainer GPUs idle.
+        """
+        # Record on the SAME stream pynccl enqueues the broadcasts on (vLLM's TLS-cached
+        # current_stream, not necessarily torch's default), or the event could complete
+        # instantly and turn this backstop into a silent no-op.
+        done = torch.cuda.Event()
+        done.record(current_stream())
+        deadline = time.monotonic() + self.LORA_BROADCAST_DEADLINE_S
+        while True:
+            try:
+                completed = done.query()
+            except BaseException:
+                self.communicator.destroy()
+                raise
+            if completed:
+                return
+            if time.monotonic() > deadline:
+                self.communicator.destroy()
+                raise TimeoutError(
+                    f"NCCL LoRA broadcast for step {step} did not complete within "
+                    f"{self.LORA_BROADCAST_DEADLINE_S:.0f}s; a receiver likely died. "
+                    "Aborted the broadcast communicator to fail fast."
+                )
+            time.sleep(0.5)
 
     def _chunk_state_dict(self, state_dict: dict[str, Tensor]) -> list[dict[str, Tensor]]:
         chunks: list[dict[str, Tensor]] = []
