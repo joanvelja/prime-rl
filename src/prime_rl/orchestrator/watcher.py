@@ -123,7 +123,7 @@ class WeightWatcher:
                             f"Observer {type(observer).__name__}.on_version_pending({next_step}) raised: {exc!r}"
                         )
 
-                get_logger().debug(f"Updating weights to step {next_step}")
+                get_logger().info(f"Updating weights to step {next_step}")
                 t1 = time.perf_counter()
                 await self.inference.update_weights(
                     weights_path,
@@ -134,7 +134,7 @@ class WeightWatcher:
                 self.last_update_weights_time = time.perf_counter() - t1
                 self.update_count += 1
                 self.last_error = None
-                get_logger().debug(
+                get_logger().info(
                     f"Updated weights to step {next_step} in {format_time(self.last_update_weights_time)}"
                 )
 

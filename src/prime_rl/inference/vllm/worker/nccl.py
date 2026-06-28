@@ -1,5 +1,4 @@
 import pickle
-import threading
 import time
 from typing import TYPE_CHECKING, Any, Generator, cast
 
@@ -134,63 +133,50 @@ class NCCLWeightBroadcastReceiver:
 class NCCLWeightUpdateWorker(Worker):
     """vLLM worker extension for updating weights in-place using NCCL."""
 
-    def arm_lora_receive(self, step: int, header_expectation: dict | None = None) -> None:
-        """Arm a background LoRA receive and return after the receiver thread is live.
+    @torch.no_grad()
+    def receive_lora_update(self, step: int, header_expectation: dict | None = None) -> dict:
+        """Receive and apply an NCCL LoRA update inline on the worker busy-loop thread.
 
-        This method is intentionally fast: the API server awaits this worker RPC
-        before returning 202 to the orchestrator. The blocking NCCL receive runs
-        in the background and is joined by ``wait_lora_receive``.
+        Runs as a blocking ``collective_rpc`` -- the same execution model as
+        ``update_weights_from_path`` -- so the receive collective cannot overlap
+        ``execute_model`` on this worker: the multiproc busy loop is single-threaded and
+        the engine core is blocked in this RPC, so no decode step is dispatched while the
+        broadcast is in flight. The earlier daemon-thread design issued the collective on a
+        private, never-synchronized CUDA stream concurrent with live decode, which corrupted
+        the CUDA context under load (``unhandled cuda error`` on the first broadcast).
+
+        The leading ``torch.cuda.synchronize`` drains any in-flight model side-stream
+        collectives (TP custom all-reduce, EP all-to-all) so the side broadcast starts on a
+        quiesced device; a sticky fault from a prior decode step also surfaces here,
+        attributably, rather than on the broadcast op.
         """
-        thread = getattr(self, "_lora_receive_thread", None)
-        if thread is not None and thread.is_alive():
-            state = getattr(self, "_lora_receive_state", {})
-            raise RuntimeError(f"LoRA receive for step {state.get('step')} is still in flight")
-
-        self._lora_receive_state = {
-            "step": step,
-            "status": "armed",
-            "error": None,
-        }
-        self._lora_receive_error = None
-        thread = threading.Thread(
-            target=self._run_lora_receive_thread,
-            args=(step, header_expectation),
-            name=f"lora-receive-step-{step}",
-            daemon=True,
-        )
-        self._lora_receive_thread = thread
-        thread.start()
-
-    def _run_lora_receive_thread(self, step: int, header_expectation: dict | None) -> None:
-        # Fresh threads default to cuda:0; bind to this worker's device or every nonzero
-        # TP rank corrupts the NCCL receive.
-        if isinstance(self.device, torch.device) and self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
-        self._lora_receive_state["status"] = "receiving"
-        try:
-            self.receive_lora_update(step, header_expectation)
-        except BaseException as exc:
-            self._lora_receive_error = exc
-            self._lora_receive_state["status"] = "error"
-            self._lora_receive_state["error"] = repr(exc)
-            return
-        self._lora_receive_state["status"] = "ok"
-
-    def receive_lora_update(self, step: int, header_expectation: dict | None) -> None:
-        """Receive and apply an NCCL LoRA update."""
         receiver = getattr(self, "nccl_broadcast_receiver", None)
         if receiver is None:
             raise RuntimeError("NCCL broadcast receiver is not initialized")
 
-        receive_start = time.perf_counter()
-        header = self._receive_lora_object(receiver.communicator)
-        adapter = self._validate_lora_header(step, header, header_expectation)
-        num_chunks = header["num_chunks"]
-        tensors: dict[str, torch.Tensor] = {}
-        for chunk_idx in range(num_chunks):
-            tensors.update(self._receive_lora_chunk_to_host(receiver.communicator, chunk_idx))
-        commit_start = time.perf_counter()
-        self._commit_lora_adapter(adapter, tensors)
+        try:
+            # Inside the try so a sticky prior-decode fault surfaced by the sync also aborts the
+            # communicator: otherwise this rank would re-raise without abort while the other
+            # ranks on the replica hang in the (now unmatchable) broadcast, defeating fail-fast.
+            if isinstance(self.device, torch.device) and self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            receive_start = time.perf_counter()
+            header = self._receive_lora_object(receiver.communicator)
+            adapter = self._validate_lora_header(step, header, header_expectation)
+            num_chunks = header["num_chunks"]
+            tensors: dict[str, torch.Tensor] = {}
+            for chunk_idx in range(num_chunks):
+                tensors.update(self._receive_lora_chunk_to_host(receiver.communicator, chunk_idx))
+            commit_start = time.perf_counter()
+            self._commit_lora_adapter(adapter, tensors)
+        except BaseException:
+            # A receiver failing mid-collective would otherwise strand the rooted 49-rank
+            # broadcast: the trainer SEND and the other 47 receivers wait forever (there is no
+            # per-collective NCCL timeout). Abort this communicator so the collective errors
+            # out on every peer and the run fails fast and attributably. ncclCommAbort is safe
+            # during an uncoordinated failure (PyNcclCommunicator.destroy wraps it).
+            receiver.communicator.destroy()
+            raise
         memory = ""
         if isinstance(self.device, torch.device) and self.device.type == "cuda":
             allocated = torch.cuda.memory_allocated(self.device) / 2**20
@@ -200,6 +186,7 @@ class NCCLWeightUpdateWorker(Worker):
             f"LoRA update for step {step}: received {len(tensors)} tensors ({num_chunks} chunks) "
             f"in {commit_start - receive_start:.2f}s, committed in {time.perf_counter() - commit_start:.2f}s{memory}"
         )
+        return {"status": "ok", "step": step}
 
     def _receive_lora_chunk_to_host(self, communicator: PyNcclCommunicator, chunk_idx: int) -> dict[str, torch.Tensor]:
         """Receive one ``broadcast_state_dict`` chunk and stage it in pinned host memory.
@@ -353,23 +340,6 @@ class NCCLWeightUpdateWorker(Worker):
             f"LoRA adapter {lora_id}: materialized in {activate_start - materialize_start:.2f}s, "
             f"activated in {time.perf_counter() - activate_start:.2f}s"
         )
-
-    def wait_lora_receive(self, step: int) -> dict:
-        state = getattr(self, "_lora_receive_state", None)
-        if state is None:
-            raise RuntimeError(f"No LoRA receive has been armed for step {step}")
-        if state["step"] != step:
-            raise RuntimeError(f"LoRA receive armed for step {state['step']}, not {step}")
-
-        thread = getattr(self, "_lora_receive_thread", None)
-        if thread is None:
-            raise RuntimeError(f"LoRA receive thread missing for step {step}")
-        thread.join()
-
-        error = getattr(self, "_lora_receive_error", None)
-        if error is not None:
-            raise RuntimeError(f"LoRA receive failed for step {step}: {error!r}") from error
-        return {"status": state["status"], "step": step}
 
     def init_broadcaster(
         self,

@@ -106,22 +106,6 @@ async def load_lora_adapter(lora_request: LoadLoRAAdapterRequest, raw_request: R
     return {"status": "ok"}
 
 
-def _lora_update_tasks(request: Request) -> dict[int, asyncio.Task]:
-    tasks = getattr(request.app.state, "lora_update_tasks", None)
-    if tasks is None:
-        tasks = {}
-        request.app.state.lora_update_tasks = tasks
-    return tasks
-
-
-def _lora_update_adapters(request: Request) -> dict[int, list[dict]]:
-    adapters = getattr(request.app.state, "lora_update_adapters", None)
-    if adapters is None:
-        adapters = {}
-        request.app.state.lora_update_adapters = adapters
-    return adapters
-
-
 def _registered_lora_update_steps(request: Request) -> set[int]:
     steps = getattr(request.app.state, "registered_lora_update_steps", None)
     if steps is None:
@@ -140,14 +124,11 @@ def _normalize_lora_update_adapter(adapter: dict) -> dict:
     return adapter
 
 
-def _register_lora_update_success(request: Request, step: int) -> None:
+def _register_lora_update(request: Request, step: int, adapters: list[dict]) -> None:
+    """Register the received adapter as a resident LoRARequest so the server can route to it."""
     registered_steps = _registered_lora_update_steps(request)
     if step in registered_steps:
         return
-
-    adapters = _lora_update_adapters(request).get(step)
-    if not adapters:
-        raise RuntimeError(f"No LoRA adapter metadata stored for step {step}")
     adapter = adapters[0]
     lora_name = adapter["lora_name"]
     # Sentinel path: the adapter was committed in-memory by the workers and must stay resident in
@@ -164,6 +145,14 @@ def _register_lora_update_success(request: Request, step: int) -> None:
 
 @router.post("/update_lora")
 async def update_lora(request: Request):
+    """Blocking NCCL LoRA receive (mirrors /update_weights).
+
+    The receive collective runs inline on each worker's busy-loop thread via
+    ``collective_rpc``, so it cannot overlap decode (the prior async arm-on-a-daemon-thread
+    design raced live decode and threw ``unhandled cuda error``). Returns 200 on success,
+    500 on failure. The trainer SEND must already be released -- the orchestrator touches
+    NCCL_READY before calling this -- so both sides enter the rooted collective together.
+    """
     data = await request.json()
     step = data["step"]
     try:
@@ -185,25 +174,8 @@ async def update_lora(request: Request):
             }
         ],
     }
-    await engine_client(request).collective_rpc("arm_lora_receive", args=(step, header_expectation))
-    task = asyncio.create_task(engine_client(request).collective_rpc("wait_lora_receive", args=(step,)))
-    _lora_update_tasks(request)[step] = task
-    _lora_update_adapters(request)[step] = adapters
-    return JSONResponse({"status": "receiving", "step": step}, status_code=202)
-
-
-@router.get("/update_lora/status")
-async def update_lora_status(request: Request, step: int):
-    task = _lora_update_tasks(request).get(step)
-    if task is None:
-        return JSONResponse({"status": "unknown", "step": step}, status_code=404)
-    if not task.done():
-        return {"status": "receiving", "step": step}
-    try:
-        await task
-    except Exception as exc:
-        return JSONResponse({"status": "error", "step": step, "message": repr(exc)}, status_code=500)
-    _register_lora_update_success(request, step)
+    await engine_client(request).collective_rpc("receive_lora_update", args=(step, header_expectation))
+    _register_lora_update(request, step, adapters)
     return {"status": "ok", "step": step}
 
 

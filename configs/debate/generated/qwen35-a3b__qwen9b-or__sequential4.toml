@@ -23,8 +23,14 @@ level = "info"
 interval = 50
 keep_last = 1
 
+# NCCL (direct GPU->GPU collective) weight broadcast. The 4t12i receive-thread-vs-decode
+# race that previously broke this is fixed (inline blocking receive on the busy-loop
+# thread + dual-sided ncclCommAbort fail-fast; this branch). Validated 2026-06-28: 9
+# clean syncs, mismatch_kl stable ~0.05-0.08 (= correct weights), ~26s median sync vs the
+# filesystem read-storm's 60-226s tail. Filesystem path stays hardened
+# (utils/client.py LORA_LOAD_MAX_CONCURRENCY + ReadError retry) as the fallback.
 [weight_broadcast]
-type = "filesystem"
+type = "nccl"
 keep_all = true
 
 [orchestrator]
@@ -53,6 +59,17 @@ name = "debate-r64"
 [orchestrator.advantage]
 type = "rae"
 beta = 0.9
+
+# Length control for multi-agent debate: RAE frontier-gated linear length penalty
+# (reward -= coef * scale * tokens/seq_len, applied only to the winning/frontier
+# set). coef=1.0 chosen from a real-data replay of pcd4/pcd4final/simul rollouts:
+# at this coef the longest-quartile winners' advantage drops ~23% with zero
+# sign-flips, arresting the observed length explosion (mean +44%, p90 +50%,
+# truncation 0->25% over training) without inverting the learning signal.
+# Escalate toward 2-3 only if the length curve keeps climbing while the emitted
+# length_penalty.sign_flipped fraction stays ~0.
+[orchestrator.advantage.length_penalty]
+coef = 1.0
 
 [orchestrator.train]
 num_workers = 64
@@ -129,6 +146,11 @@ dp = 1
 [inference.vllm_extra]
 moe_backend = "triton"
 gdn_prefill_backend = "triton"
+# Text-only debate on a multimodal-capable checkpoint: skip the vision tower,
+# its profiling pass, and the mm processor cache (frees memory + startup time).
+language_model_only = true
+skip_mm_profiling = true
+mm_processor_cache_gb = 0.0
 # Raised 128->256: engine rode the 128 cap (Running p95=126), decode still climbing, KV p95 ~59%.
 # Pair with orchestrator.max_inflight_rollouts=2300 (raising one without the other buys nothing).
 max_num_seqs = 256

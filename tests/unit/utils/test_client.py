@@ -409,45 +409,43 @@ def test_gather_admin_soft_path_logs_loud_and_returns_exception_in_band():
     assert "peer-down" in combined
 
 
-def test_update_lora_adapter_arms_without_dangling_timeout_constant():
-    # Site-level regression for a rebase defect the isolated _gather_admin tests
-    # could NOT catch: _arm_lora_update referenced a dropped PAUSE_READ_TIMEOUT_S
-    # constant, NameError-ing on the first NCCL-LoRA arm (the feature this PR
-    # adds). Drive update_lora_adapter end-to-end with mock admin clients and
-    # assert the arm POST to /update_lora actually fires (i.e. no NameError, and
-    # the per-peer admin contract holds).
-    from prime_rl.utils.client import update_lora_adapter
+def test_update_lora_adapter_blocking_post_fires_per_peer(tmp_path):
+    # Site-level regression driving update_lora_adapter end-to-end with mock admin clients:
+    # the NCCL LoRA receive is now a single blocking POST /update_lora per peer (mirroring
+    # /update_weights), not an arm + status-poll. Assert the per-peer admin contract holds --
+    # pause, then one blocking /update_lora carrying the step + adapters payload, then resume --
+    # and that NCCL_READY is touched before the blocking call so the trainer SEND is released.
+    from prime_rl.utils.client import NCCL_READY_MARKER, update_lora_adapter
 
     posts: list[tuple[str, dict]] = []
+    weight_dir = tmp_path / "bcast"
 
     def make_client() -> AsyncMock:
         client = AsyncMock()
         client.base_url = "http://worker:8000"
 
         async def _post(path, **kwargs):
+            if path == "/update_lora":
+                # The marker must exist before the blocking receive (deadlock guard).
+                assert (weight_dir / NCCL_READY_MARKER).exists()
             posts.append((path, kwargs))
             resp = MagicMock()
             resp.raise_for_status = MagicMock()
             resp.status_code = 200
             return resp
 
-        async def _get(path, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json = MagicMock(return_value={"status": "ok"})
-            return resp
-
         client.post.side_effect = _post
-        client.get.side_effect = _get
         return client
 
     clients = [make_client(), make_client()]
-    # Should NOT raise NameError; arms + waits + pauses/resumes all run.
-    asyncio.run(update_lora_adapter(clients, lora_name="test-lora", weight_dir=Path("/tmp/bcast"), step=7))
+    asyncio.run(update_lora_adapter(clients, lora_name="test-lora", weight_dir=weight_dir, step=7))
 
-    arm_posts = [(path, kw) for path, kw in posts if path == "/update_lora"]
-    # One arm POST per peer, carrying the step + adapters payload.
-    assert len(arm_posts) == 2, f"expected 2 arm posts, got {len(arm_posts)}: {posts}"
-    for _, kw in arm_posts:
+    update_posts = [(path, kw) for path, kw in posts if path == "/update_lora"]
+    # One blocking POST per peer, carrying the step + adapters payload.
+    assert len(update_posts) == 2, f"expected 2 update posts, got {len(update_posts)}: {posts}"
+    for _, kw in update_posts:
         assert kw["json"]["step"] == 7
         assert kw["json"]["adapters"] == [{"lora_name": "test-lora", "lora_int_id": 1}]
+    # Pause precedes resume; both fan out to every peer.
+    assert [path for path, _ in posts if path == "/pause"], "expected a /pause per peer"
+    assert [path for path, _ in posts if path == "/resume"], "expected a /resume per peer"

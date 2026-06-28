@@ -63,6 +63,11 @@ dp = 1
 [inference.vllm_extra]
 moe_backend = "triton"
 gdn_prefill_backend = "triton"
+# Text-only debate on a multimodal-capable checkpoint: skip the vision tower,
+# its profiling pass, and the mm processor cache (frees memory + startup time).
+language_model_only = true
+skip_mm_profiling = true
+mm_processor_cache_gb = 0.0
 # Raised 128->256: engine rode the 128 cap (Running p95=126), decode still climbing, KV p95 ~59%.
 # Pair with orchestrator.max_inflight_rollouts=2300 (raising one without the other buys nothing).
 max_num_seqs = 256
