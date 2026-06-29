@@ -483,7 +483,7 @@ def _is_retryable_admin_error(exception: BaseException) -> bool:
 # AsyncClient uses `timeout=None`, so without this a stuck server would hang the
 # weight update forever: the read timeout converts a hang into a TimeoutException
 # that tenacity retries. Sized for `/pause`, which drains in-flight requests
-# (mode="keep") and so can legitimately take a while.
+# (mode="wait") and so can legitimately take a while.
 ADMIN_TIMEOUT_S = 300.0
 # `/update_weights` runs a collective NCCL receive across all DP workers, which
 # can take longer than the other admin ops.
@@ -518,7 +518,7 @@ async def _pause_engines(admin_clients: list[AsyncClient], *, step: int) -> None
     # the dead peer instead of an opaque first-exception that kills the job).
     await _gather_admin(
         admin_clients,
-        [_admin_post(client, "/pause", params={"mode": "keep", "clear_cache": "false"}) for client in admin_clients],
+        [_admin_post(client, "/pause", params={"mode": "wait", "clear_cache": "true"}) for client in admin_clients],
         op_name="pause engines",
     )
     logger.debug("All inference engines paused")
@@ -569,12 +569,15 @@ async def update_weights(
         # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
         await _pause_engines(admin_clients, step=step)
 
+        nccl_ready_released = False
+        update_completed = False
         try:
             # Create ready marker before servers enter receive path (used by NCCL broadcast)
             if weight_dir is not None:
                 nccl_ready_file = weight_dir / NCCL_READY_MARKER
                 nccl_ready_file.parent.mkdir(parents=True, exist_ok=True)
                 nccl_ready_file.touch()
+                nccl_ready_released = True
                 logger.debug(f"Created NCCL_READY marker at {nccl_ready_file}")
 
             await _gather_admin(
@@ -590,8 +593,15 @@ async def update_weights(
                 ],
                 op_name="update weights",
             )
+            update_completed = True
         finally:
-            await _resume_engines(admin_clients)
+            if update_completed or not nccl_ready_released:
+                await _resume_engines(admin_clients)
+            else:
+                logger.error(
+                    "Skipping /resume after failed update weights because NCCL_READY was released; "
+                    "restart inference engines before continuing."
+                )
 
 
 async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, weight_dir: Path, step: int) -> None:
@@ -626,20 +636,30 @@ async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, 
                 response.raise_for_status()
 
     await _pause_engines(admin_clients, step=step)
+    nccl_ready_released = False
+    update_completed = False
     try:
         # Release the trainer SEND before the blocking receive: both sides must be in the
         # rooted collective for it to complete, so the marker must precede the wait.
         nccl_ready_file = weight_dir / NCCL_READY_MARKER
         nccl_ready_file.parent.mkdir(parents=True, exist_ok=True)
         nccl_ready_file.touch()
+        nccl_ready_released = True
         logger.debug(f"Created NCCL_READY marker at {nccl_ready_file}")
         await _gather_admin(
             admin_clients,
             [_post_update_lora(admin_client) for admin_client in admin_clients],
             op_name="update LoRA adapter",
         )
+        update_completed = True
     finally:
-        await _resume_engines(admin_clients)
+        if update_completed or not nccl_ready_released:
+            await _resume_engines(admin_clients)
+        else:
+            logger.error(
+                "Skipping /resume after failed LoRA update because NCCL_READY was released; "
+                "restart inference engines before continuing."
+            )
 
 
 def _is_retryable_lora_error(exception: BaseException) -> bool:

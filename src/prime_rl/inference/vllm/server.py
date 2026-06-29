@@ -1,4 +1,5 @@
 import asyncio
+import os
 from argparse import Namespace
 from typing import Any
 
@@ -60,6 +61,8 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 
 # Create our own router for custom endpoints
 router = APIRouter()
+PAUSE_MODES = {"abort", "wait", "keep"}
+UPDATE_WEIGHTS_TIMEOUT_S = float(os.environ.get("PRIME_RL_UPDATE_WEIGHTS_TIMEOUT_S", "720"))
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -70,6 +73,17 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def _parse_bool_query(value: str | None, *, default: bool) -> bool:
+    if value is None:
+        return default
+    value = value.lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"expected boolean query value, got {value!r}")
+
+
 WORKER_EXTENSION_CLS = {
     "nccl": "prime_rl.inference.vllm.worker.nccl.NCCLWeightUpdateWorker",
     "filesystem": "prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker",
@@ -78,9 +92,17 @@ WORKER_EXTENSION_CLS = {
 
 @router.post("/pause")
 async def pause(request: Request):
-    logger.debug("Received /pause request (mode=keep, clear_cache=False)")
-    await engine_client(request).pause_generation(mode="keep", clear_cache=False)
-    return {"status": "paused"}
+    mode = request.query_params.get("mode", "wait")
+    if mode not in PAUSE_MODES:
+        return JSONResponse({"status": "error", "message": f"invalid pause mode {mode!r}"}, status_code=400)
+    try:
+        clear_cache = _parse_bool_query(request.query_params.get("clear_cache"), default=True)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
+    logger.debug(f"Received /pause request (mode={mode}, clear_cache={clear_cache})")
+    await engine_client(request).pause_generation(mode=mode, clear_cache=clear_cache)
+    return {"status": "paused", "mode": mode, "clear_cache": clear_cache}
 
 
 @router.post("/resume")
@@ -92,7 +114,11 @@ async def resume(request: Request):
 @router.post("/update_weights")
 async def update_weights(request: Request):
     data = await request.json()
-    await engine_client(request).collective_rpc("update_weights_from_path", args=(data.get("weight_dir"),))
+    await engine_client(request).collective_rpc(
+        "update_weights_from_path",
+        timeout=UPDATE_WEIGHTS_TIMEOUT_S,
+        args=(data.get("weight_dir"),),
+    )
     return {"status": "ok"}
 
 
@@ -174,7 +200,11 @@ async def update_lora(request: Request):
             }
         ],
     }
-    await engine_client(request).collective_rpc("receive_lora_update", args=(step, header_expectation))
+    await engine_client(request).collective_rpc(
+        "receive_lora_update",
+        timeout=UPDATE_WEIGHTS_TIMEOUT_S,
+        args=(step, header_expectation),
+    )
     _register_lora_update(request, step, adapters)
     return {"status": "ok", "step": step}
 

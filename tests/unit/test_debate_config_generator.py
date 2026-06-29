@@ -5,6 +5,7 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GENERATED = ROOT / "configs" / "debate" / "generated"
+CALIBRATION = ROOT / "configs" / "calibration"
 GPQA_OE_JUDGE_PROMPT = ROOT / "deps" / "verifiers" / "verifiers" / "utils" / "judge_prompts" / "gpqa_oe.yaml"
 
 
@@ -37,6 +38,32 @@ def test_generated_single_agent_eval_uses_deepseek_grader() -> None:
         assert args["judge_model"] == "deepseek/deepseek-v4-flash", path
         assert args["judge_base_url"] == "https://openrouter.ai/api/v1", path
         assert args["judge_api_key_var"] == "OPENROUTER_API_KEY", path
+
+
+def test_generated_debate_configs_use_64k_context_budget() -> None:
+    for path in sorted(GENERATED.glob("*.toml")):
+        config = tomllib.loads(path.read_text())
+        train_sampling = config["orchestrator"]["train"]["sampling"]
+
+        assert config["seq_len"] == 65536, path
+        assert config["trainer"]["model"]["seq_len"] == 65536, path
+        assert config["inference"]["model"]["max_model_len"] == 65536, path
+        assert config["seq_len"] - train_sampling["max_completion_tokens"] >= 49152, path
+
+
+def test_calibration_gpqa_debate_configs_use_64k_context_budget() -> None:
+    paths = [
+        *CALIBRATION.glob("gpqa*debate*.toml"),
+        *CALIBRATION.glob("topology_*.toml"),
+    ]
+    for path in sorted(paths):
+        config = tomllib.loads(path.read_text())
+        train_sampling = config["orchestrator"]["train"]["sampling"]
+
+        assert config["seq_len"] == 65536, path
+        assert config["trainer"]["model"]["seq_len"] == 65536, path
+        assert config["inference"]["model"]["max_model_len"] == 65536, path
+        assert config["seq_len"] - train_sampling["max_completion_tokens"] >= 49152, path
 
 
 def test_debate_prompt_pack_uses_same_deepseek_sampling_policy() -> None:

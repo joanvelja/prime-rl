@@ -10,11 +10,15 @@ from prime_rl.configs.multi_agent import FixedMemberTargetConfig
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.orchestrator.member_generation import _fixed_client
 from prime_rl.utils.client import (
+    ADMIN_TIMEOUT_S,
     AdminGatherError,
     _is_retryable_lora_error,
+    _pause_engines,
     init_nccl_broadcast,
     load_lora_adapter,
     setup_clients,
+    update_lora_adapter,
+    update_weights,
 )
 
 
@@ -62,6 +66,28 @@ def test_load_lora_adapter_succeeds_on_first_attempt():
         json={"lora_name": "test-lora", "lora_path": "/test/path"},
         timeout=httpx.Timeout(connect=10.0, read=900.0, write=60.0, pool=10.0),
     )
+
+
+def test_pause_engines_waits_and_clears_cache():
+    posts: list[tuple[str, dict]] = []
+    client = AsyncMock()
+    client.base_url = "http://worker:8000"
+
+    async def _post(path, **kwargs):
+        posts.append((path, kwargs))
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    client.post.side_effect = _post
+
+    asyncio.run(_pause_engines([client], step=3))
+
+    assert len(posts) == 1
+    path, kwargs = posts[0]
+    assert path == "/pause"
+    assert kwargs["params"] == {"mode": "wait", "clear_cache": "true"}
+    assert kwargs["timeout"].read == ADMIN_TIMEOUT_S
 
 
 def test_init_nccl_broadcast_requires_divisible_world_size():
@@ -415,7 +441,7 @@ def test_update_lora_adapter_blocking_post_fires_per_peer(tmp_path):
     # /update_weights), not an arm + status-poll. Assert the per-peer admin contract holds --
     # pause, then one blocking /update_lora carrying the step + adapters payload, then resume --
     # and that NCCL_READY is touched before the blocking call so the trainer SEND is released.
-    from prime_rl.utils.client import NCCL_READY_MARKER, update_lora_adapter
+    from prime_rl.utils.client import NCCL_READY_MARKER
 
     posts: list[tuple[str, dict]] = []
     weight_dir = tmp_path / "bcast"
@@ -449,3 +475,61 @@ def test_update_lora_adapter_blocking_post_fires_per_peer(tmp_path):
     # Pause precedes resume; both fan out to every peer.
     assert [path for path, _ in posts if path == "/pause"], "expected a /pause per peer"
     assert [path for path, _ in posts if path == "/resume"], "expected a /resume per peer"
+
+
+def test_update_lora_adapter_skips_resume_after_released_collective_failure(tmp_path):
+    from prime_rl.utils.client import NCCL_READY_MARKER
+
+    posts: list[str] = []
+    weight_dir = tmp_path / "bcast"
+    client = AsyncMock()
+    client.base_url = "http://worker:8000"
+
+    async def _post(path, **kwargs):
+        posts.append(path)
+        resp = MagicMock()
+        if path == "/update_lora":
+            assert (weight_dir / NCCL_READY_MARKER).exists()
+            resp.raise_for_status.side_effect = make_status_error(500)
+        else:
+            resp.raise_for_status = MagicMock()
+        return resp
+
+    client.post.side_effect = _post
+
+    with pytest.raises(AdminGatherError):
+        asyncio.run(update_lora_adapter([client], lora_name="test-lora", weight_dir=weight_dir, step=7))
+
+    assert (weight_dir / NCCL_READY_MARKER).exists()
+    assert "/pause" in posts
+    assert "/update_lora" in posts
+    assert "/resume" not in posts
+
+
+def test_update_weights_skips_resume_after_released_collective_failure(tmp_path):
+    from prime_rl.utils.client import NCCL_READY_MARKER
+
+    posts: list[str] = []
+    weight_dir = tmp_path / "bcast"
+    client = AsyncMock()
+    client.base_url = "http://worker:8000"
+
+    async def _post(path, **kwargs):
+        posts.append(path)
+        resp = MagicMock()
+        if path == "/update_weights":
+            assert (weight_dir / NCCL_READY_MARKER).exists()
+            resp.raise_for_status.side_effect = make_status_error(500)
+        else:
+            resp.raise_for_status = MagicMock()
+        return resp
+
+    client.post.side_effect = _post
+
+    with pytest.raises(AdminGatherError):
+        asyncio.run(update_weights([client], weight_dir=weight_dir, step=7))
+
+    assert (weight_dir / NCCL_READY_MARKER).exists()
+    assert "/pause" in posts
+    assert "/update_weights" in posts
+    assert "/resume" not in posts

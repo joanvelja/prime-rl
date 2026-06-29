@@ -49,7 +49,7 @@ tp = 4
 dp = 1
 api_server_count = 1
 gpu_memory_utilization = 0.85
-max_model_len = 32768
+max_model_len = 65536
 server_start_retries = 2
 wait_timeout_s = 1800
 

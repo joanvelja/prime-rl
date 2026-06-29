@@ -83,7 +83,7 @@ args = {grader_args(s["pref"])}"""
 # Source: base + debaters/{dname} + judges/{jname} + schedule:{sname}
 output_dir = "outputs/isambard/calibration/debate_{run}"
 max_steps = 50
-seq_len = 32768
+seq_len = 65536
 
 [wandb]
 project = "{WANDB_PROJECT}"

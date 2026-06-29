@@ -15,7 +15,7 @@ enable_router_replay = true
 
 [trainer.model]
 impl = "custom"
-seq_len = 32768
+seq_len = 65536
 attn = "flash_attention_3"
 optim_cpu_offload = true
 fsdp_cpu_offload = false
@@ -44,7 +44,7 @@ thinking_token_budget = 8192
 extra_body = { top_k = 20, min_p = 0.0, presence_penalty = 1.5 }
 
 [inference]
-gpu_memory_utilization = 0.92
+gpu_memory_utilization = 0.9
 enable_return_routed_experts = true
 enable_lora = true
 max_lora_rank = 64
@@ -54,7 +54,7 @@ enable_prefix_caching = true
 enable_dbo = false
 
 [inference.model]
-max_model_len = 32768
+max_model_len = 65536
 
 [inference.parallel]
 tp = 4

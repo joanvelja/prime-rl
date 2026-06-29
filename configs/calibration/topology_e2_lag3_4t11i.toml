@@ -16,7 +16,7 @@
 
 output_dir = "outputs/isambard/calibration/topology_e2_lag3_4t11i"
 max_steps = 14
-seq_len = 32768
+seq_len = 65536
 
 [log]
 level = "info"
@@ -52,7 +52,7 @@ enable_router_replay = true
 
 [trainer.model]
 impl = "custom"
-seq_len = 32768
+seq_len = 65536
 attn = "flash_attention_3"
 optim_cpu_offload = true
 fsdp_cpu_offload = false
@@ -159,7 +159,7 @@ enable_prefix_caching = true
 enable_dbo = false
 
 [inference.model]
-max_model_len = 32768
+max_model_len = 65536
 
 [inference.parallel]
 tp = 4

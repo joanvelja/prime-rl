@@ -5,7 +5,7 @@
 
 output_dir = "outputs/isambard/calibration/gpqa_debate_5step"
 max_steps = 5
-seq_len = 32768
+seq_len = 65536
 
 [log]
 level = "info"
@@ -32,7 +32,7 @@ num_infer_nodes = 1
 
 [trainer.model]
 impl = "custom"
-seq_len = 32768
+seq_len = 65536
 attn = "flash_attention_3"
 optim_cpu_offload = true
 fsdp_cpu_offload = false
@@ -113,7 +113,7 @@ enable_lora = true
 max_lora_rank = 32
 
 [inference.model]
-max_model_len = 32768
+max_model_len = 65536
 
 [inference.parallel]
 tp = 4
