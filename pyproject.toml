@@ -156,6 +156,11 @@ override-dependencies = [
     "nvidia-cudnn-cu12>=9.15 ; platform_machine == 'x86_64'",
     "nvidia-cudnn-cu13>=9.15 ; platform_machine == 'aarch64'",
     "nvidia-cutlass-dsl>=4.4.1",
+    # Adopt NCCL 2.30.7 over torch's hard pin (==2.28.9). torch dlopens its wheel's libnccl by
+    # absolute path, so an LD_LIBRARY_PATH overlay is a no-op for torch (verified job 5441116) — the
+    # wheel swap is the only path. NCCL 2.x is ABI-back-compatible (SONAME libnccl.so.2), so torch
+    # built against 2.28 runs on 2.30.7. aarch64 only (x86 uses nccl-cu12). Validated: W1 (nccl-tests).
+    "nvidia-nccl-cu13==2.30.7 ; platform_machine == 'aarch64'",
     "transformers==5.6.2",
     "torch==2.11.0",
     "openenv-core",
