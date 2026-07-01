@@ -340,7 +340,6 @@ class ElasticInferencePool:
             server.status = "ready"
             return True
 
-        # Debug: log why pre-check failed (before attempting load)
         self.logger.debug(
             f"Pre-check failed on {ip}: loaded={loaded.path if loaded else None} "
             f"(step={loaded.step if loaded else None}), desired={self._desired.path} (step={self._desired.step})"
@@ -366,7 +365,6 @@ class ElasticInferencePool:
             self.logger.debug(f"Successfully synced server {ip}")
             return True
 
-        # Debug: log why adapter didn't match after loading
         self.logger.warning(
             f"Adapter mismatch on {ip} after loading: "
             f"loaded={loaded.path if loaded else None} (step={loaded.step if loaded else None}), "
@@ -522,6 +520,12 @@ class ElasticInferencePool:
         if lora_name is None:
             raise ValueError("Elastic inference pool requires LoRA training (lora_name must be set)")
         await self.sync_weights(weight_dir, lora_name, step)
+
+    async def remove_lora_adapter(self, lora_name: str, lora_int_id: int) -> None:
+        raise ValueError("Elastic inference pool does not support explicit LoRA adapter retirement")
+
+    async def unload_lora_adapter(self, lora_name: str) -> None:
+        raise ValueError("Elastic inference pool does not support explicit LoRA adapter retirement")
 
     def get_metrics(self) -> dict[str, float]:
         return {

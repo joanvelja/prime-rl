@@ -46,6 +46,8 @@ from verifiers.types import (
 )
 from verifiers.utils.save_utils import state_to_output
 
+from prime_rl.orchestrator.utils import save_rollouts
+
 # ---------------------------------------------------------------------------
 # Fake client — system boundary stub
 # ---------------------------------------------------------------------------
@@ -241,6 +243,20 @@ def test_rollout_steps_carry_prompt_completion_and_tokens(canonical_rollout):
         assert len(step["prompt"]) > 0
         assert len(step["completion"]) > 0
         assert step["tokens"] is not None, "token data lost — trainer alignment depends on it"
+
+
+def test_full_rollout_jsonl_preserves_private_reasoning(canonical_rollout, tmp_path):
+    state, _ = canonical_rollout
+    path = tmp_path / "train_rollouts_full.jsonl"
+
+    save_rollouts([state], path)
+
+    row = json.loads(path.read_text().splitlines()[0])
+    first_step = row["trajectory"][0]
+    assert first_step["completion"][0]["content"] == "I propose <answer>B</answer>"
+    assert first_step["completion"][0]["reasoning_content"] == "a-think-1"
+    assert first_step["response"]["message"]["content"] == "I propose <answer>B</answer>"
+    assert first_step["response"]["message"]["reasoning_content"] == "a-think-1"
 
 
 def test_rollout_completes_with_schedule_exhausted(canonical_rollout):

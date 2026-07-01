@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 from argparse import Namespace
+from pathlib import Path
 from typing import Any
 
 import uvloop
@@ -12,12 +14,14 @@ from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.lora.protocol import LoadLoRAAdapterRequest
+from vllm.entrypoints.serve.lora.protocol import LoadLoRAAdapterRequest, UnloadLoRAAdapterRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from prime_rl.configs.inference import InferenceConfig
+from prime_rl.inference.lora_staging import _default_stage_root, cleanup_staged_lora_adapter, maybe_stage_lora_adapter
+from prime_rl.inference.vllm.worker.diagnostics import process_rss_bytes
 from prime_rl.utils.logger import get_logger
 
 logger = get_logger()
@@ -73,6 +77,63 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def staged_lora_paths(request: Request) -> dict[str, str]:
+    paths = getattr(request.app.state, "prime_rl_staged_lora_paths", None)
+    if paths is None:
+        paths = {}
+        request.app.state.prime_rl_staged_lora_paths = paths
+    return paths
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except FileNotFoundError:
+                pass
+    return total
+
+
+async def _log_lora_diagnostics(request: Request, *, event: str, lora_name: str) -> None:
+    stage_root = _default_stage_root()
+    staged_paths = staged_lora_paths(request)
+    api_diag = {
+        "pid": os.getpid(),
+        "rss_bytes": process_rss_bytes(),
+        "public_lora_count": len(models(request).lora_requests),
+        "public_lora_names": sorted(models(request).lora_requests),
+        "staged_count": len(staged_paths),
+        "staged_bytes": sum(_dir_size_bytes(Path(path)) for path in staged_paths.values()),
+        "stage_root": stage_root.as_posix(),
+        "stage_root_bytes": _dir_size_bytes(stage_root),
+    }
+    worker_diag = None
+    try:
+        worker_diag = await engine_client(request).collective_rpc(
+            "lora_worker_diagnostics",
+            timeout=60.0,
+        )
+    except Exception as exc:
+        worker_diag = {"error": repr(exc)}
+
+    logger.info(
+        "prime_rl_lora_diagnostics %s",
+        json.dumps(
+            {
+                "event": event,
+                "lora_name": lora_name,
+                "api": api_diag,
+                "workers": worker_diag,
+            },
+            sort_keys=True,
+        ),
+    )
+
+
 def _parse_bool_query(value: str | None, *, default: bool) -> bool:
     if value is None:
         return default
@@ -125,10 +186,43 @@ async def update_weights(request: Request):
 @router.post("/load_lora_adapter")
 async def load_lora_adapter(lora_request: LoadLoRAAdapterRequest, raw_request: Request):
     """Wrapper around vLLM's /v1/load_lora_adapter."""
+    source_path = Path(lora_request.lora_path)
+    local_path = maybe_stage_lora_adapter(source_path, lora_request.lora_name)
+    if local_path != source_path:
+        lora_request = lora_request.model_copy(update={"lora_path": local_path.as_posix()})
+
     handler = models(raw_request)
     response = await handler.load_lora_adapter(lora_request)
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(), status_code=response.error.code)
+    if local_path != source_path:
+        staged_lora_paths(raw_request)[lora_request.lora_name] = local_path.as_posix()
+    await _log_lora_diagnostics(raw_request, event="after_load", lora_name=lora_request.lora_name)
+    return {"status": "ok"}
+
+
+@router.post("/unload_lora_adapter")
+async def unload_lora_adapter(lora_request: UnloadLoRAAdapterRequest, raw_request: Request):
+    """Wrapper around vLLM's /v1/unload_lora_adapter that cleans node-local staged adapters."""
+    handler = models(raw_request)
+    registered_lora = handler.lora_requests.get(lora_request.lora_name)
+    if registered_lora is not None:
+        removed = await engine_client(raw_request).remove_lora(registered_lora.lora_int_id)
+        logger.debug(
+            "Removed worker-side LoRA adapter %s (int_id=%s, removed=%s)",
+            lora_request.lora_name,
+            registered_lora.lora_int_id,
+            removed,
+        )
+
+    response = await handler.unload_lora_adapter(lora_request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(), status_code=response.error.code)
+
+    staged_path = staged_lora_paths(raw_request).pop(lora_request.lora_name, None)
+    if staged_path is not None:
+        cleanup_staged_lora_adapter(Path(staged_path))
+    await _log_lora_diagnostics(raw_request, event="after_unload", lora_name=lora_request.lora_name)
     return {"status": "ok"}
 
 
@@ -146,7 +240,12 @@ def _normalize_lora_update_adapter(adapter: dict) -> dict:
         adapter["lora_name"] = adapter["name"]
     if "lora_name" not in adapter:
         raise ValueError("LoRA update adapter is missing 'lora_name'")
-    adapter.setdefault("lora_int_id", 1)
+    if "lora_int_id" not in adapter:
+        raise ValueError("LoRA update adapter is missing 'lora_int_id'")
+    if "adapter_version" not in adapter:
+        raise ValueError("LoRA update adapter is missing 'adapter_version'")
+    adapter["lora_int_id"] = int(adapter["lora_int_id"])
+    adapter["adapter_version"] = int(adapter["adapter_version"])
     return adapter
 
 
@@ -174,8 +273,8 @@ async def update_lora(request: Request):
     """Blocking NCCL LoRA receive (mirrors /update_weights).
 
     The receive collective runs inline on each worker's busy-loop thread via
-    ``collective_rpc``, so it cannot overlap decode (the prior async arm-on-a-daemon-thread
-    design raced live decode and threw ``unhandled cuda error``). Returns 200 on success,
+    ``collective_rpc``, so it cannot overlap decode (arming the receive on a daemon thread
+    would race live decode and throw ``unhandled cuda error``). Returns 200 on success,
     500 on failure. The trainer SEND must already be released -- the orchestrator touches
     NCCL_READY before calling this -- so both sides enter the rooted collective together.
     """
@@ -197,6 +296,7 @@ async def update_lora(request: Request):
             {
                 "lora_name": adapters[0]["lora_name"],
                 "lora_int_id": adapters[0]["lora_int_id"],
+                "adapter_version": adapters[0]["adapter_version"],
             }
         ],
     }
@@ -207,6 +307,20 @@ async def update_lora(request: Request):
     )
     _register_lora_update(request, step, adapters)
     return {"status": "ok", "step": step}
+
+
+@router.post("/remove_lora_adapter")
+async def remove_lora_adapter(request: Request):
+    data = await request.json()
+    lora_name = data["lora_name"]
+    lora_int_id = int(data["lora_int_id"])
+    await engine_client(request).collective_rpc(
+        "remove_lora_adapter",
+        timeout=UPDATE_WEIGHTS_TIMEOUT_S,
+        args=(lora_int_id,),
+    )
+    models(request).lora_requests.pop(lora_name, None)
+    return {"status": "ok", "lora_name": lora_name, "lora_int_id": lora_int_id}
 
 
 @router.get("/liveness")
@@ -249,8 +363,7 @@ async def custom_init_app_state(
     1. Call the original init_app_state to set up standard state, including
        vLLM 0.20's ``serving_tokens`` for ``/inference/v1/generate``.
     2. Replace ``serving_tokens`` with ``PrimeRlServingTokens`` so DP-rank
-       routing and ``routed_experts`` export survive the migration off the
-       legacy ``/v1/generate`` endpoint.
+       routing and ``routed_experts`` export keep working.
     """
     await init_app_state(engine_client, state, args, supported_tasks)
 

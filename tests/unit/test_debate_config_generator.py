@@ -25,9 +25,9 @@ def test_generated_debate_envs_wire_gt_grader() -> None:
 
 
 def test_generated_single_agent_eval_uses_deepseek_grader() -> None:
-    # The grader sampling/provider policy was hoisted out of the per-config TOML
-    # into the shared gpqa_oe prompt pack (single source of truth); the eval now
-    # references it via ``judge_prompt_pack``. The policy itself is asserted in
+    # The grader sampling/provider policy lives in the shared gpqa_oe prompt pack
+    # (single source of truth); the eval references it via ``judge_prompt_pack``.
+    # The policy itself is asserted in
     # ``test_debate_prompt_pack_uses_same_deepseek_sampling_policy``.
     for path in sorted(GENERATED.glob("*.toml")):
         config = tomllib.loads(path.read_text())
@@ -49,6 +49,14 @@ def test_generated_debate_configs_use_64k_context_budget() -> None:
         assert config["trainer"]["model"]["seq_len"] == 65536, path
         assert config["inference"]["model"]["max_model_len"] == 65536, path
         assert config["seq_len"] - train_sampling["max_completion_tokens"] >= 49152, path
+
+
+def test_generated_debate_configs_use_filesystem_lora_broadcast_on_scratch() -> None:
+    for path in sorted(GENERATED.glob("*.toml")):
+        config = tomllib.loads(path.read_text())
+
+        assert config["weight_broadcast"]["type"] == "filesystem", path
+        assert config["output_dir"].startswith("/scratch/a6r/joanv.a6r/outputs/isambard/calibration/debate_"), path
 
 
 def test_calibration_gpqa_debate_configs_use_64k_context_budget() -> None:
@@ -73,14 +81,13 @@ def test_debate_prompt_pack_uses_same_deepseek_sampling_policy() -> None:
     assert text.count("max_completion_tokens: 8192") == 2
     assert text.count("effort: high") == 2
     assert text.count("exclude: true") == 2
-    # ZDR-constrained provider POOL with fallbacks (was: single pinned provider,
-    # allow_fallbacks false). zdr:true + data_collection:deny still filter every
-    # provider in the pool, so the privacy guarantee holds while a single dead
-    # provider no longer fails every grade (the grader_error=1.0 incident).
+    # ZDR-constrained provider pool with fallbacks. zdr:true + data_collection:deny
+    # filter every provider in the pool, so the privacy guarantee holds; fallbacks
+    # stop one dead provider from failing every grade.
     assert text.count("allow_fallbacks: true") == 2
-    # require_parameters was REMOVED from both provider blocks: combined with zdr +
-    # fp8 + a pinned order it left no eligible OpenRouter route -> ModelError ->
-    # silent 0.0 grade (the grader_error=1.0 incident). Assert it stays gone.
+    # Both provider blocks omit require_parameters: combined with zdr + fp8 + a
+    # pinned order it leaves no eligible OpenRouter route -> ModelError -> silent
+    # 0.0 grade.
     assert text.count("require_parameters: true") == 0
     assert text.count("zdr: true") == 2
     assert text.count("data_collection: deny") == 2

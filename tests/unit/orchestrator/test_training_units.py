@@ -274,8 +274,8 @@ def test_metrics_builder_emits_member_metrics_and_omits_solve_rates_for_ma_rows(
     assert to_log["multi_agent/rae/baseline_keys_total"] == 2
     assert to_log["multi_agent/prover/rae_baseline_mean"] == pytest.approx(0.1)
     assert to_log["multi_agent/judge/rae_baseline_mean"] == pytest.approx(-0.1)
-    # Zero-sum member rows have no group-solve semantics — keys omitted
-    # instead of the old degenerate solve_none=1.0 / effective_batch_size=0.0
+    # Zero-sum member rows have no group-solve semantics; computing them would yield
+    # degenerate solve_none=1.0 / effective_batch_size=0.0, so the keys are omitted
     assert "solve_none/all" not in to_log
     assert "solve_all/all" not in to_log
     assert "effective_batch_size/all" not in to_log
@@ -363,7 +363,7 @@ def test_member_truncation_derives_from_member_trajectory_not_episode():
     TrainSink._inherit_episode_accounting(clean_member, episode)
 
     assert truncated_member["is_truncated"] is True
-    # Episode truncation no longer smears onto members whose own steps are clean
+    # Episode truncation does not smear onto members whose own steps are clean
     assert clean_member["is_truncated"] is False
     # Episode-level fields still inherit
     assert clean_member["stop_condition"] == "prompt_too_long"

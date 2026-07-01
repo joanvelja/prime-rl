@@ -109,6 +109,82 @@ def _content_text(content: Any) -> str:
     return json.dumps(content, sort_keys=True, default=str)
 
 
+def _private_reasoning(raw: dict[str, Any]) -> tuple[str, list[str]]:
+    chunks: list[str] = []
+    sources: list[str] = []
+
+    reasoning_content = raw.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        chunks.append(reasoning_content)
+        sources.append("reasoning_content")
+
+    thinking_blocks = raw.get("thinking_blocks")
+    if thinking_blocks and not chunks:
+        if isinstance(thinking_blocks, list):
+            text_blocks = [_content_text(block) for block in thinking_blocks]
+            chunks.extend(block for block in text_blocks if block)
+        else:
+            text = _content_text(thinking_blocks)
+            if text:
+                chunks.append(text)
+        if chunks:
+            sources.append("thinking_blocks")
+
+    return "\n\n".join(chunks), sources
+
+
+def _docent_content(raw: dict[str, Any], normalized_role: str) -> str | list[dict[str, Any]]:
+    public_content = _content_text(raw.get("content"))
+    if normalized_role != "assistant":
+        return public_content
+
+    private_reasoning, _ = _private_reasoning(raw)
+    if not private_reasoning:
+        return public_content
+
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "reasoning",
+            "reasoning": private_reasoning,
+        }
+    ]
+    if public_content:
+        blocks.append(
+            {
+                "type": "text",
+                "text": public_content,
+            }
+        )
+    return blocks
+
+
+def _private_reasoning_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "reasoning":
+                total += len(str(part.get("reasoning") or ""))
+    return total
+
+
+def _public_text_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                total += len(str(part.get("text") or ""))
+    return total
+
+
 def _normalize_message(raw: dict[str, Any], *, step_index: int | None) -> dict[str, Any]:
     role = raw.get("role")
     normalized_role = "system" if role == "developer" else role
@@ -120,10 +196,14 @@ def _normalize_message(raw: dict[str, Any], *, step_index: int | None) -> dict[s
         metadata["prime_rl_original_role"] = role
     if step_index is not None:
         metadata["prime_rl_step_index"] = step_index
+    private_reasoning, private_sources = _private_reasoning(raw)
+    if private_reasoning:
+        metadata["prime_rl_has_private_reasoning"] = True
+        metadata["prime_rl_private_reasoning_sources"] = private_sources
 
     message: dict[str, Any] = {
         "role": normalized_role,
-        "content": _content_text(raw.get("content")),
+        "content": _docent_content(raw, normalized_role),
     }
     if metadata:
         message["metadata"] = metadata
@@ -155,6 +235,36 @@ def _normalize_message(raw: dict[str, Any], *, step_index: int | None) -> dict[s
         message["tool_calls"] = tool_calls
 
     return message
+
+
+def _step_metadata(step: dict[str, Any], messages: list[dict[str, Any]], *, step_index: int) -> dict[str, Any]:
+    private_chars = _private_reasoning_chars(messages)
+    public_chars = _public_text_chars(messages)
+    extras = step.get("extras") or {}
+    metadata: dict[str, Any] = {
+        "step_index": step_index,
+        "reward": step.get("reward"),
+        "advantage": step.get("advantage"),
+        "extras": extras,
+        "has_tokens": step.get("tokens") is not None,
+        "has_private_reasoning": private_chars > 0,
+        "private_reasoning_chars": private_chars,
+        "public_text_chars": public_chars,
+        "channels": {
+            "public": {
+                "present": public_chars > 0,
+                "visibility": "all",
+            },
+            "private": {
+                "present": private_chars > 0,
+                "visibility": "self",
+            },
+        },
+    }
+    for key in ("member_id", "phase", "fields", "generation", "parse_error"):
+        if key in extras and extras[key] is not None:
+            metadata[key] = extras[key]
+    return metadata
 
 
 def _messages_from_prompt_completion(
@@ -217,6 +327,37 @@ def _agent_run_metadata(
     return {key: value for key, value in metadata.items() if value is not None}
 
 
+def _channel_summary(transcripts: list[Any]) -> dict[str, Any]:
+    members: list[str] = []
+    phases: list[str] = []
+    public_turn_count = 0
+    private_reasoning_turn_count = 0
+
+    for transcript in transcripts:
+        meta = transcript.metadata
+        member_id = meta.get("member_id")
+        if isinstance(member_id, str) and member_id not in members:
+            members.append(member_id)
+        phase = meta.get("phase")
+        if isinstance(phase, str) and phase not in phases:
+            phases.append(phase)
+        channels = meta.get("channels") or {}
+        if (channels.get("public") or {}).get("present"):
+            public_turn_count += 1
+        if (channels.get("private") or {}).get("present"):
+            private_reasoning_turn_count += 1
+
+    return {
+        "channel_schema": "prime-rl-public-private-v1",
+        "has_private_reasoning": private_reasoning_turn_count > 0,
+        "private_reasoning_policy": "public_only_cross_agent",
+        "members": members,
+        "phases": phases,
+        "public_turn_count": public_turn_count,
+        "private_reasoning_turn_count": private_reasoning_turn_count,
+    }
+
+
 def build_agent_run(
     rollout: dict[str, Any],
     *,
@@ -242,13 +383,7 @@ def build_agent_run(
             Transcript(
                 name=f"trajectory_step_{step_index}",
                 messages=[parse_chat_message(message) for message in messages],
-                metadata={
-                    "step_index": step_index,
-                    "reward": step.get("reward"),
-                    "advantage": step.get("advantage"),
-                    "extras": step.get("extras") or {},
-                    "has_tokens": step.get("tokens") is not None,
-                },
+                metadata=_step_metadata(step, messages, step_index=step_index),
             )
         )
 
@@ -279,6 +414,12 @@ def build_agent_run(
         line_number=line_number,
         source_label=source_label,
     )
+    private_reasoning_chars = sum(
+        int(transcript.metadata.get("private_reasoning_chars") or 0) for transcript in transcripts
+    )
+    metadata["has_private_reasoning"] = private_reasoning_chars > 0
+    metadata["private_reasoning_chars"] = private_reasoning_chars
+    metadata["channels"] = _channel_summary(transcripts)
     name_parts = [
         str(metadata.get("env_name", "unknown-env")),
         str(metadata.get("example_id", "unknown-example")),

@@ -16,6 +16,7 @@ from tenacity import AsyncRetrying, retry, retry_if_exception, stop_after_attemp
 
 from prime_rl.configs.shared import ClientConfig
 from prime_rl.utils.logger import get_logger
+from prime_rl.utils.lora import versioned_lora_adapter, versioned_lora_name
 
 # Identity tuple used by ``select_train_client`` to key load counts. ``api_base_url``
 # distinguishes servers; ``X-data-parallel-rank`` distinguishes DP shards within a
@@ -111,6 +112,14 @@ class InferencePool(Protocol):
         """Update weights on all inference servers."""
         ...
 
+    async def remove_lora_adapter(self, lora_name: str, lora_int_id: int) -> None:
+        """Remove a resident LoRA adapter from all inference servers."""
+        ...
+
+    async def unload_lora_adapter(self, lora_name: str) -> None:
+        """Unload a filesystem-backed LoRA adapter from all inference servers."""
+        ...
+
     def get_metrics(self) -> dict[str, float]:
         """Get pool metrics."""
         ...
@@ -193,6 +202,12 @@ class StaticInferencePool:
         self, weight_dir: Path | None, lora_name: str | None = None, step: int = 0, nccl_lora: bool = False
     ) -> None:
         await update_weights(self._admin_clients, weight_dir, lora_name=lora_name, step=step, nccl_lora=nccl_lora)
+
+    async def remove_lora_adapter(self, lora_name: str, lora_int_id: int) -> None:
+        await remove_lora_adapter(self._admin_clients, lora_name=lora_name, lora_int_id=lora_int_id)
+
+    async def unload_lora_adapter(self, lora_name: str) -> None:
+        await unload_lora_adapter(self._admin_clients, lora_name=lora_name)
 
     def get_metrics(self) -> dict[str, float]:
         return {}
@@ -412,10 +427,9 @@ async def check_health(
 class AdminGatherError(RuntimeError):
     """One or more inference-server peers failed a fan-out admin operation.
 
-    Names the failing peers so an opaque first-exception death (the death
-    multiplier behind the weight-sync OOM incident: one bad peer raises and the
-    bare ``asyncio.gather`` kills the whole 16-node job with no attribution)
-    becomes an attributable, potentially-recoverable error.
+    Names the failing peers so an opaque first-exception death (one bad peer
+    raises and the bare ``asyncio.gather`` kills the whole job with no
+    attribution) becomes an attributable, potentially-recoverable error.
     """
 
     def __init__(self, op_name: str, failures: list[tuple[AsyncClient, BaseException]], total: int) -> None:
@@ -443,7 +457,7 @@ async def _gather_admin(
     orchestrator/watcher can act on *which* peer died instead of an opaque
     first-exception. On full success the result list is returned unchanged so
     callers that consume per-peer payloads (e.g. the model-presence check) keep
-    working exactly as before.
+    working.
     """
     results = await asyncio.gather(*coros, return_exceptions=True)
     failures: list[tuple[AsyncClient, BaseException]] = []
@@ -488,6 +502,11 @@ ADMIN_TIMEOUT_S = 300.0
 # `/update_weights` runs a collective NCCL receive across all DP workers, which
 # can take longer than the other admin ops.
 UPDATE_WEIGHTS_TIMEOUT_S = 720.0
+# NCCL-LoRA updates install a new versioned adapter while old-version rollouts
+# remain resumable. Freezing in-flight requests should be fast; a long pause
+# here means the admin path is unhealthy, not that 16k-token rollouts should
+# drain before every adapter update.
+LORA_UPDATE_PAUSE_TIMEOUT_S = 120.0
 
 
 async def _admin_post(client: AsyncClient, path: str, *, timeout_s: float = ADMIN_TIMEOUT_S, **kwargs) -> None:
@@ -510,16 +529,31 @@ async def _admin_post(client: AsyncClient, path: str, *, timeout_s: float = ADMI
             response.raise_for_status()
 
 
-async def _pause_engines(admin_clients: list[AsyncClient], *, step: int) -> None:
-    """Pause all inference engines, waiting for in-flight requests to drain."""
+async def _pause_engines(
+    admin_clients: list[AsyncClient],
+    *,
+    step: int,
+    mode: str = "wait",
+    clear_cache: bool = True,
+    timeout_s: float = ADMIN_TIMEOUT_S,
+) -> None:
+    """Pause all inference engines before a weight-sync admin phase."""
     logger = get_logger()
-    logger.info(f"Updating policy in-flight to v{step}")
+    logger.info(f"Updating policy in-flight to v{step} (pause mode={mode}, clear_cache={clear_cache})")
     # Compose retry (per-peer _admin_post) with attribution (_gather_admin names
     # the dead peer instead of an opaque first-exception that kills the job).
     await _gather_admin(
         admin_clients,
-        [_admin_post(client, "/pause", params={"mode": "wait", "clear_cache": "true"}) for client in admin_clients],
-        op_name="pause engines",
+        [
+            _admin_post(
+                client,
+                "/pause",
+                params={"mode": mode, "clear_cache": str(clear_cache).lower()},
+                timeout_s=timeout_s,
+            )
+            for client in admin_clients
+        ],
+        op_name=f"pause engines ({mode})",
     )
     logger.debug("All inference engines paused")
 
@@ -564,7 +598,7 @@ async def update_weights(
             raise ValueError("NCCL LoRA update requires a broadcast marker directory")
         await update_lora_adapter(admin_clients, lora_name, weight_dir, step)
     elif lora_name is not None and weight_dir is not None:
-        await load_lora_adapter(admin_clients, lora_name, weight_dir)
+        await load_lora_adapter(admin_clients, versioned_lora_name(lora_name, step), weight_dir)
     else:
         # Pause engines so all DP workers drain in-flight work and can join the NCCL broadcast
         await _pause_engines(admin_clients, step=step)
@@ -607,12 +641,14 @@ async def update_weights(
 async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, weight_dir: Path, step: int) -> None:
     """Pause engines, release the trainer broadcast, run the blocking NCCL LoRA receive, resume.
 
-    Mirrors the full-weight ``update_weights`` path: the receive runs inline on each worker's
-    busy-loop thread (so it cannot overlap decode), and NCCL_READY is touched *before* the
-    blocking call so the trainer SEND and all 48 receivers enter the rooted collective together.
+    The receive runs inline on each worker's busy-loop thread (so it cannot
+    overlap decode), and NCCL_READY is touched *before* the blocking call so the
+    trainer SEND and all receivers enter the rooted collective together.
+    Unlike full-weight reload, this is a versioned LoRA install: in-flight
+    old-version rollouts are frozen and resumed rather than drained or aborted.
     """
     logger = get_logger()
-    adapters = [{"lora_name": lora_name, "lora_int_id": 1}]
+    adapters = [versioned_lora_adapter(lora_name, step)]
 
     async def _post_update_lora(admin_client: AsyncClient) -> None:
         # Retry ONLY connection-establishment failures: the receive RPC never started, so a
@@ -635,7 +671,13 @@ async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, 
                 )
                 response.raise_for_status()
 
-    await _pause_engines(admin_clients, step=step)
+    await _pause_engines(
+        admin_clients,
+        step=step,
+        mode="keep",
+        clear_cache=False,
+        timeout_s=LORA_UPDATE_PAUSE_TIMEOUT_S,
+    )
     nccl_ready_released = False
     update_completed = False
     try:
@@ -662,6 +704,22 @@ async def update_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, 
             )
 
 
+async def remove_lora_adapter(admin_clients: list[AsyncClient], lora_name: str, lora_int_id: int) -> None:
+    """Remove one resident LoRA adapter version from every inference server."""
+    await _gather_admin(
+        admin_clients,
+        [
+            _admin_post(
+                admin_client,
+                "/remove_lora_adapter",
+                json={"lora_name": lora_name, "lora_int_id": lora_int_id},
+            )
+            for admin_client in admin_clients
+        ],
+        op_name="remove LoRA adapter",
+    )
+
+
 def _is_retryable_lora_error(exception: BaseException) -> bool:
     """Check if an exception should trigger a retry for LoRA loading."""
     if isinstance(exception, httpx.HTTPStatusError):
@@ -681,22 +739,20 @@ def _is_retryable_lora_error(exception: BaseException) -> bool:
 # Per-attempt and total bounds for `/load_lora_adapter`. Sized for the worst
 # real case, not the best: a rank-64 expert-targeted adapter is a multi-GB
 # safetensors file, and at weight-update time every replica reads it from
-# Lustre simultaneously while still serving decode traffic — 30s reads were
-# routinely exceeded at 13 replicas (watcher died, fail-fast killed the run,
-# 2026-06-11). The bounds still convert a genuinely stuck server into a
-# TimeoutException (tenacity retries per attempt; `_TOTAL` is the wall-clock
-# budget across all retries — whichever stop condition fires first).
+# Lustre simultaneously while still serving decode traffic. The bounds convert
+# a genuinely stuck server into a TimeoutException (tenacity retries per
+# attempt; `_TOTAL` is the wall-clock budget across all retries — whichever
+# stop condition fires first).
 # Read window per attempt is deliberately ~the whole budget: vLLM serializes
 # adapter loads per engine, so re-POSTing a slow-but-progressing load only
-# queues a duplicate behind it (observed death spiral on a busy replica,
-# 2026-06-11: 240s attempts stacked until the total budget reraised). Retries
-# are reserved for connection-class failures where a new POST can help.
+# queues a duplicate behind it (death spiral). Retries are reserved for
+# connection-class failures where a new POST can help.
 LORA_LOAD_READ_TIMEOUT_S = 900.0
 LORA_LOAD_TOTAL_TIMEOUT_S = 1200.0
-# Cap how many replicas read the adapter from shared storage concurrently. All 12
-# reading a multi-GB rank-64 adapter from Lustre at once (while serving decode) caused
-# a read storm -> httpx.ReadError -> watcher death (2026-06-28). A small semaphore
-# serializes the fan-out into waves, trading a little sync latency for robustness.
+# Cap how many replicas read the adapter from shared storage concurrently. Every
+# replica reading a multi-GB rank-64 adapter from Lustre at once (while serving
+# decode) causes a read storm -> httpx.ReadError. A small semaphore serializes
+# the fan-out into waves, trading a little sync latency for robustness.
 LORA_LOAD_MAX_CONCURRENCY = 4
 
 
@@ -756,9 +812,11 @@ async def unload_lora_adapter(admin_clients: list[AsyncClient], lora_name: str) 
 
     async def _unload_lora_adapter(admin_client: AsyncClient) -> None:
         logger.debug(f"Sending request to unload LoRA adapter {lora_name}")
-        await admin_client.post("/v1/unload_lora_adapter", json={"lora_name": lora_name})
-        # TODO: The first one can fail, but subsequent ones should succeed.
-        # response.raise_for_status()
+        response = await admin_client.post("/unload_lora_adapter", json={"lora_name": lora_name})
+        if response.status_code == 404:
+            logger.debug(f"LoRA adapter {lora_name} was already absent on {admin_client.base_url}")
+            return
+        response.raise_for_status()
 
     await _gather_admin(
         admin_clients,

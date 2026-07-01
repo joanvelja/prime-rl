@@ -250,8 +250,8 @@ def interleave_rollout(
             routed_experts_start = None
             if routed_experts_payload is not None:
                 # data is already raw bytes (rebound from a ZMQ frame at the env
-                # client, issue #76 PR1) — no b64 decode. dtype is carried in the
-                # payload (G5), so np.frombuffer is parameterized, not hardcoded.
+                # client) — no b64 decode. dtype is carried in the payload, so
+                # np.frombuffer is parameterized, not hardcoded.
                 routed_experts = np.frombuffer(
                     routed_experts_payload["data"], dtype=np.dtype(routed_experts_payload["dtype"])
                 ).reshape(routed_experts_payload["shape"])
@@ -283,8 +283,8 @@ def interleave_rollout(
             return None
         prepared_steps.append(prepared)
 
-    # Deferred routed_experts state per sample: O(N) chunk list concatenated
-    # once at finalize, replacing the prior O(N²) per-extension unpack/repack.
+    # Deferred routed_experts state per sample: an O(N) chunk list concatenated
+    # once at finalize, avoiding an O(N²) per-step unpack/repack.
     sample_routed_state: dict[int, dict[str, Any]] = {}
     routed_prefix_states: dict[int, list[tuple[list[int], list[int], dict[str, Any]]]] = {}
 
@@ -485,9 +485,9 @@ def interleave_rollout(
                 )
 
     # Finalize routed_experts for each sample. One concat per sample (O(N) byte
-    # work) replaces the previous per-step unpack/concat/repack (O(N²)). The
-    # boundary entries between steps were already inserted as one-entry chunks
-    # during extend_sample, so a straight concat is correct.
+    # work), not an O(N²) per-step unpack/concat/repack. Boundary entries between
+    # steps were inserted as one-entry chunks during extend_sample, so a straight
+    # concat is correct.
     for _, sample, _ in active_samples:
         state = sample_routed_state.get(id(sample))
         if state is None:

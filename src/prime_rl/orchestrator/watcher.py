@@ -12,6 +12,7 @@ from prime_rl.orchestrator.types import Policy, VersionObserver
 from prime_rl.utils.async_utils import safe_cancel
 from prime_rl.utils.client import InferencePool
 from prime_rl.utils.logger import format_time, get_logger
+from prime_rl.utils.lora import versioned_lora_int_id, versioned_lora_name
 from prime_rl.utils.pathing import get_broadcast_dir, get_step_path, wait_for_path
 from prime_rl.utils.utils import get_latest_ckpt_step
 
@@ -45,6 +46,9 @@ class WeightWatcher:
         self.next_ckpt_step: int = ckpt_step
         self.current_update_step: int | None = None
         self.last_error: str | None = None
+        self.live_lora_steps: set[int] = set()
+        if self.lora_name is not None and ckpt_step > 0 and self.config.weight_broadcast.type == "nccl":
+            self.live_lora_steps.add(ckpt_step)
 
         self.task: asyncio.Task | None = None
         self.update_lock = asyncio.Lock()
@@ -141,8 +145,10 @@ class WeightWatcher:
                 self.ckpt_step = next_step
                 self.policy.version = next_step
                 if self.lora_name is not None:
-                    self.inference.update_model_name(self.lora_name)
-                    self.policy.model_name = self.lora_name
+                    live_lora_name = versioned_lora_name(self.lora_name, next_step)
+                    self.inference.update_model_name(live_lora_name)
+                    self.policy.model_name = live_lora_name
+                    self.live_lora_steps.add(next_step)
 
                 for observer in self.observers:
                     try:
@@ -151,11 +157,35 @@ class WeightWatcher:
                         get_logger().warning(
                             f"Observer {type(observer).__name__}.on_new_version({next_step}) raised: {exc!r}"
                         )
+                await self.retire_unused_lora_versions()
             except Exception as exc:
                 self.last_error = repr(exc)
                 raise
             finally:
                 self.current_update_step = None
+
+    def active_policy_versions(self) -> set[int]:
+        versions = {self.policy.version}
+        for observer in self.observers:
+            getter = getattr(observer, "active_policy_versions", None)
+            if callable(getter):
+                versions.update(getter())
+        return versions
+
+    async def retire_unused_lora_versions(self) -> None:
+        if self.lora_name is None:
+            return
+        active_versions = self.active_policy_versions()
+        retired = sorted(step for step in self.live_lora_steps if step not in active_versions)
+        for step in retired:
+            lora_name = versioned_lora_name(self.lora_name, step)
+            if self.config.weight_broadcast.type == "nccl":
+                await self.inference.remove_lora_adapter(lora_name, versioned_lora_int_id(step))
+            else:
+                await self.inference.unload_lora_adapter(lora_name)
+            self.live_lora_steps.remove(step)
+        if retired:
+            get_logger().info(f"Retired {self.config.weight_broadcast.type} LoRA adapter version(s): {retired}")
 
     def gauges(self) -> dict[str, float]:
         return {

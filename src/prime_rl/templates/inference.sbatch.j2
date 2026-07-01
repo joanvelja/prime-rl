@@ -147,6 +147,8 @@ srun bash -s <<'CLEANUP_SH'
     pkill -9 -x mooncake_client 2>/dev/null
     sleep 2
     rm -rf /dev/shm/vllm-* /dev/shm/vllm_* /tmp/vllm-* /tmp/torch-* /tmp/torchelastic_* 2>/dev/null
+    find /dev/shm -maxdepth 1 -user "$(id -u)" \
+        \( -name 'prime_rl_lora' -o -name 'prime_rl_lora_*' \) -exec rm -rf {} + 2>/dev/null
     # Node-local compile caches from this job on this host (see cache-node-local.sh).
     rm -rf /tmp/torch_inductor_${SLURM_JOB_ID}_$(hostname -s) \
            /tmp/triton_cache_${SLURM_JOB_ID}_$(hostname -s) \
@@ -236,7 +238,7 @@ srun --kill-on-bad-exit=1 bash -c '
     export VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 
     # The kv_transfer_config (NIXL transfer + any KV offload connector) is built in
-    # InferenceConfig.to_vllm() from the per-node config, so it is no longer assembled here.
+    # InferenceConfig.to_vllm() from the per-node config.
 
     DECODE_COMPILE_CFG='"'"'{"cudagraph_mode":"FULL_DECODE_ONLY"}'"'"'
 

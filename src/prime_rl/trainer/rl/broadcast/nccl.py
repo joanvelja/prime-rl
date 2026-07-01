@@ -21,6 +21,7 @@ from prime_rl.trainer.utils import get_world
 from prime_rl.trainer.utils import maybe_clean as maybe_clean_path
 from prime_rl.trainer.weights import get_max_layer_num
 from prime_rl.utils.logger import get_logger
+from prime_rl.utils.lora import versioned_lora_adapter
 from prime_rl.utils.nccl import disable_nccl_p2p_if_unavailable
 from prime_rl.utils.pathing import sync_wait_for_path
 from prime_rl.utils.utils import get_broadcast_dir, get_step_path
@@ -330,8 +331,8 @@ class NCCLWeightBroadcast(WeightBroadcast):
         for idx, _ in notified_runs:
             state_dict = self.multi_run_manager.get_state_dict_for_run(idx)
             state_dict = self._resolve_lora_state_dict(state_dict)
-            adapter_header = self._build_lora_adapter_header(model, idx)
             step = self.multi_run_manager.progress[idx].step
+            adapter_header = self._build_lora_adapter_header(model, idx, step=step)
             self.nccl_broadcast_sender.broadcast_lora_update(step, adapter_header, state_dict)
 
         if self.world.is_master:
@@ -350,7 +351,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
             state_dict[key] = value.to(dtype)
         return state_dict
 
-    def _build_lora_adapter_header(self, model: nn.Module, idx: int) -> dict:
+    def _build_lora_adapter_header(self, model: nn.Module, idx: int, *, step: int) -> dict:
         if self.lora_config is None:
             raise RuntimeError("Cannot build LoRA adapter header without trainer LoRA config")
         orch_lora = self.multi_run_manager.config[idx].student.model.lora
@@ -360,8 +361,7 @@ class NCCLWeightBroadcast(WeightBroadcast):
             raise RuntimeError(f"Run {idx} LoRA config must have name, rank, and alpha resolved before broadcast")
 
         return {
-            "lora_name": orch_lora.name,
-            "lora_int_id": idx + 1,
+            **versioned_lora_adapter(orch_lora.name, step),
             "rank": orch_lora.rank,
             "alpha": orch_lora.alpha,
             "peft_config": build_lora_peft_config(

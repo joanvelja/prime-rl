@@ -138,8 +138,8 @@ class SinglePacker(BasePacker):
         # The master decodes + re-encodes the whole batch every step (rollout
         # bytes + routed_experts blobs — hundreds of MB of transient large
         # allocations). glibc keeps those freed pages in its arena, so trainer
-        # rank-0 RSS ratchets to OOM over a run (steps 12-25 on 4t12i r64). Drop
-        # the references and return the freed pages to the OS each step.
+        # rank-0 RSS ratchets to OOM over a run. Drop the references and return
+        # the freed pages to the OS each step.
         del micro_batch_grid, batch, batches
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
