@@ -331,6 +331,12 @@ class RolloutDispatcher:
     async def on_new_version(self, step: int) -> None:
         """No-op: the dispatcher drains in ``on_version_pending`` (pre-pause)."""
 
+    def active_policy_versions(self) -> set[int]:
+        """Policy versions still referenced by scheduled or in-flight groups."""
+        versions = {m.policy_version for m in self.inflight.values()}
+        versions.update(group.policy_version_at_start for group in self.groups.values())
+        return versions
+
     async def fill_inflight(self) -> None:
         """Schedule new rollouts up to ``max_inflight``, honoring
         ``self.mode``. Eval scheduling ignores the orchestrator's dispatch
@@ -441,6 +447,7 @@ class RolloutDispatcher:
             target_rollouts=group_size,
             eval_step=eval_step,
             policy_version_at_start=self.policy.version,
+            model_name_at_start=self.policy.model_name if kind == "eval" else self.train_model_name,
             dispatch_ids=dispatch_ids,
         )
 
@@ -453,14 +460,16 @@ class RolloutDispatcher:
         """
         # Train rollouts use the rollout pool (teacher in SFT) via the
         # renderer/token train client. Eval always evaluates the student and
-        # pins a client from the eval pool (chat-completions) — the same path
-        # the legacy orchestrator used, so single-agent eval scores stay
-        # comparable. Multi-agent eval groups re-type that client below to
-        # match the train path.
+        # pins a client from the eval pool (chat-completions), so single-agent
+        # eval scores stay comparable. Multi-agent eval groups re-type that
+        # client below to match the train path.
         if group.kind == "eval":
-            pool, model_name = self.eval_inference, self.policy.model_name
+            pool = self.eval_inference
         else:
-            pool, model_name = self.inference, self.train_model_name
+            pool = self.inference
+        model_name = group.model_name_at_start or (
+            self.policy.model_name if group.kind == "eval" else self.train_model_name
+        )
 
         # Pin a single client per group to keep prefix-cache hits
         if group.pinned_client is None:

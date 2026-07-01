@@ -5,3 +5,6 @@
 # Slingshot is libfabric, NOT InfiniBand -> do NOT use ibv_devinfo/NCCL_IB_HCA.
 # Idempotent and side-effect-safe to source from `set -euo pipefail` scripts.
 command -v module >/dev/null 2>&1 && { module load brics/nccl 2>/dev/null || true; unset NCCL_ALGO; }
+# Standing CXI plugin upgrade: brics aws-ofi-nccl 1.8.1 (v7) -> locally-built 1.20.0 (v12). Sourced
+# AFTER the brics/nccl load so 1.20.0 stays first even when this file reloads the module.
+source "$(dirname "${BASH_SOURCE[0]}")/nccl-ofi-stack.sh" 2>/dev/null || true

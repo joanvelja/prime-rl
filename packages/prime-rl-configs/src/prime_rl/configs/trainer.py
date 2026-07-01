@@ -485,6 +485,15 @@ class FileSystemWeightBroadcastConfig(BaseWeightBroadcastConfig):
     save_format: Literal["safetensors", "torch"] = "safetensors"
     """Weight checkpoint serialization format."""
 
+    stripe_enabled: bool = True
+    """Set Lustre stripe defaults on broadcast directories before checkpoint files are created."""
+
+    stripe_count: int = Field(16, ge=1)
+    """Lustre stripe count for newly-created filesystem broadcast files."""
+
+    stripe_size: str = "1M"
+    """Lustre stripe size for newly-created filesystem broadcast files."""
+
 
 class NCCLWeightBroadcastConfig(BaseWeightBroadcastConfig):
     type: Literal["nccl"] = "nccl"

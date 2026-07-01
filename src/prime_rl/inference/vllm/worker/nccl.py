@@ -266,7 +266,7 @@ class NCCLWeightUpdateWorker(Worker):
             if len(expected_adapters) != 1 or not isinstance(expected_adapters[0], dict):
                 raise RuntimeError("LoRA update expectation must contain exactly one adapter")
             expected_adapter = expected_adapters[0]
-            for key in ("lora_name", "lora_int_id"):
+            for key in ("lora_name", "lora_int_id", "adapter_version"):
                 if key in expected_adapter and adapter.get(key) != expected_adapter[key]:
                     raise RuntimeError(
                         f"LoRA update header {key}={adapter.get(key)!r} did not match expected "
@@ -277,7 +277,7 @@ class NCCLWeightUpdateWorker(Worker):
         if not isinstance(num_chunks, int) or num_chunks < 1:
             raise RuntimeError(f"LoRA update header needs a positive num_chunks, got {num_chunks!r}")
 
-        for key in ("lora_name", "lora_int_id", "peft_config"):
+        for key in ("lora_name", "lora_int_id", "adapter_version", "peft_config"):
             if key not in adapter:
                 raise RuntimeError(f"LoRA update adapter header is missing {key!r}")
         return adapter
@@ -340,6 +340,22 @@ class NCCLWeightUpdateWorker(Worker):
             f"LoRA adapter {lora_id}: materialized in {activate_start - materialize_start:.2f}s, "
             f"activated in {time.perf_counter() - activate_start:.2f}s"
         )
+
+    @torch.no_grad()
+    def remove_lora_adapter(self, lora_int_id: int) -> dict:
+        """Remove a resident LoRA adapter version from the worker cache."""
+        model_runner = getattr(self, "model_runner", None)
+        lora_manager = getattr(model_runner, "lora_manager", None)
+        if lora_manager is None:
+            raise RuntimeError("LoRA is not enabled in the vLLM model runner")
+
+        adapter_manager = getattr(lora_manager, "_adapter_manager", None)
+        if adapter_manager is None:
+            raise RuntimeError("vLLM LoRA adapter manager is not initialized")
+
+        removed = adapter_manager.remove_adapter(int(lora_int_id))
+        logger.info(f"Removed LoRA adapter {lora_int_id}: removed={removed}")
+        return {"status": "ok", "lora_int_id": int(lora_int_id), "removed": bool(removed)}
 
     def init_broadcaster(
         self,

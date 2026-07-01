@@ -11,7 +11,7 @@ supported-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-10T23:37:49.383138959Z"
+exclude-newer = "2026-06-23T17:26:48.18861004Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -56,6 +56,7 @@ overrides = [
     { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64'", specifier = ">=9.15" },
     { name = "nvidia-cudnn-cu13", marker = "platform_machine == 'aarch64'", specifier = ">=9.15" },
     { name = "nvidia-cutlass-dsl", specifier = ">=4.4.1" },
+    { name = "nvidia-nccl-cu13", marker = "platform_machine == 'aarch64'", specifier = "==2.30.7" },
     { name = "openenv-core" },
     { name = "torch", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64'", specifier = "==2.11.0" },
     { name = "torch", marker = "platform_machine == 'aarch64'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu130" },
@@ -3261,10 +3262,10 @@ wheels = [
 
 [[package]]
 name = "nvidia-nccl-cu13"
-version = "2.28.9"
+version = "2.30.7"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/55/1920646a2e43ffd4fc958536b276197ed740e9e0c54105b4bb3521591fc7/nvidia_nccl_cu13-2.28.9-py3-none-manylinux_2_18_aarch64.whl", hash = "sha256:01c873ba1626b54caa12272ed228dc5b2781545e0ae8ba3f432a8ef1c6d78643", size = 196561677, upload-time = "2025-11-18T05:49:03.45Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/21/a73174c6157101bdf1ffc22b517f76ff0082613989dd9bc8f43e8034caac/nvidia_nccl_cu13-2.30.7-py3-none-manylinux_2_18_aarch64.whl", hash = "sha256:ca786ffa5a647c75d4d1f5cc72a6c4f537947e2ba8823d7c8aaf768e7a7b9f77", size = 215983881, upload-time = "2026-06-09T03:23:15.633Z" },
 ]
 
 [[package]]
@@ -4833,7 +4834,7 @@ source = { editable = "deps/research-environments/environments/rlm_uuid_ctf" }
 dependencies = [
     { name = "datasets", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "prime-sandboxes", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "verifiers", extra = ["packages"], marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "verifiers", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 
 [package.metadata]

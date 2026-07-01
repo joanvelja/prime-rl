@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Literal
@@ -30,6 +31,10 @@ class FileSystemWeightBroadcast(WeightBroadcast):
         super().__init__(output_dir, lora_config)
         self.save_format: Literal["safetensors", "torch"] = config.save_format
         self.save_sharded = config.save_sharded if lora_config is None else False
+        self.stripe_enabled = config.stripe_enabled
+        self.stripe_count = config.stripe_count
+        self.stripe_size = config.stripe_size
+        self._striped_broadcast_dirs: set[Path] = set()
         self.world = get_world()
         self.multi_run_manager = get_multi_run_manager()
         self.logger.debug(
@@ -76,10 +81,9 @@ class FileSystemWeightBroadcast(WeightBroadcast):
             # TODO: Broadcast ready to update in sync, then we dont need to gather on not ready
             if self.world.is_master:
                 try:
-                    save_dir = get_step_path(
-                        get_broadcast_dir(self.multi_run_manager.get_run_dir(idx)),
-                        self.multi_run_manager.progress[idx].step,
-                    )
+                    broadcast_dir = get_broadcast_dir(self.multi_run_manager.get_run_dir(idx))
+                    self._ensure_broadcast_dir_striped(broadcast_dir)
+                    save_dir = get_step_path(broadcast_dir, self.multi_run_manager.progress[idx].step)
                     save_dir.mkdir(parents=True, exist_ok=True)
 
                     self.logger.debug(f"Saving weights for run {idx} to {save_dir}")
@@ -103,8 +107,9 @@ class FileSystemWeightBroadcast(WeightBroadcast):
 
                 except FileNotFoundError:
                     self.logger.warning(f"Run {idx} is deleted, skipping")
-                except Exception as e:
-                    self.logger.error(f"Error broadcasting weights for run {idx}: {e}")
+                except Exception:
+                    self.logger.exception(f"Error broadcasting weights for run {idx}")
+                    raise
                 finally:
                     self.multi_run_manager.ready_to_update[idx] = False
 
@@ -115,6 +120,33 @@ class FileSystemWeightBroadcast(WeightBroadcast):
         """Notify the orchestrator that the weights have been broadcast by writing a 'STABLE' file to a shared filesystem."""
         stable_file = save_dir / "STABLE"
         stable_file.touch()
+
+    def _ensure_broadcast_dir_striped(self, broadcast_dir: Path) -> None:
+        if not self.world.is_master or not self.stripe_enabled:
+            return
+        if broadcast_dir in self._striped_broadcast_dirs:
+            return
+
+        broadcast_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "lfs",
+            "setstripe",
+            "-c",
+            str(self.stripe_count),
+            "-S",
+            self.stripe_size,
+            broadcast_dir.as_posix(),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self.logger.debug(
+                f"Set Lustre stripe defaults on {broadcast_dir} (count={self.stripe_count}, size={self.stripe_size})"
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            self.logger.warning(
+                f"Could not set Lustre stripe defaults on {broadcast_dir}; continuing with filesystem defaults: {exc}"
+            )
+        self._striped_broadcast_dirs.add(broadcast_dir)
 
     def maybe_clean(self, interval_to_keep: int | None):
         for idx in self.multi_run_manager.used_idxs:

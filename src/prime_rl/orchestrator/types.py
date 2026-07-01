@@ -62,6 +62,7 @@ class GroupState:
     eval_step: int | None = None
     pinned_client: vf.ClientConfig | None = None
     policy_version_at_start: int = 0
+    model_name_at_start: str = ""
     dispatch_ids: list[str] = field(default_factory=list)
     scheduled: int = 0
 

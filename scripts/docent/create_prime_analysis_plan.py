@@ -49,6 +49,20 @@ FAILURE_SCHEMA = {
             "citations": True,
             "description": "Specific transcript evidence supporting the label.",
         },
+        "evidence_channel": {
+            "type": "string",
+            "enum": ["public_only", "private_only", "public_and_private", "metadata_only", "unclear"],
+            "description": "Whether the decisive evidence came from public transcript text, private reasoning blocks, both, metadata, or is unclear.",
+        },
+        "private_reasoning_summary": {
+            "type": "string",
+            "citations": True,
+            "description": "If private reasoning blocks were present, summarize what they add beyond public text. Use 'none observed' if absent or uninformative.",
+        },
+        "airgap_or_visibility_issue": {
+            "type": "boolean",
+            "description": "True when private reasoning appears to leak into an opponent/judge-visible prompt, public message, or reward decision.",
+        },
         "suggested_fix": {
             "type": "string",
             "description": "A concrete change to try in the environment, prompt, policy, or analysis setup.",
@@ -61,6 +75,9 @@ FAILURE_SCHEMA = {
         "confidence",
         "summary",
         "evidence",
+        "evidence_channel",
+        "private_reasoning_summary",
+        "airgap_or_visibility_issue",
         "suggested_fix",
     ],
     "additionalProperties": False,
@@ -177,6 +194,12 @@ LIMIT {args.limit}
             "\n\nTranscript:\n",
             candidate_runs.run.as_type("agent_run"),
             "\n\nClassify the outcome and failure mode. Use direct transcript citations for summary and evidence. "
+            "Prime-RL assistant messages may contain separate Docent content blocks: text blocks are public messages "
+            "visible to the debate transcript, while reasoning blocks are private model thinking preserved for analysis. "
+            "Do not treat private reasoning as public leakage unless the same substance later appears in public text or "
+            "in another agent's prompt. State whether decisive evidence came from public text, private reasoning, or both. "
+            "Flag airgap_or_visibility_issue only when private reasoning appears judge/opponent-visible or appears to affect "
+            "a reward/decision that should only see public content. "
             "If the reward seems inconsistent with the transcript, choose verification_or_reward_issue.",
         ],
         output_schema=FAILURE_SCHEMA,

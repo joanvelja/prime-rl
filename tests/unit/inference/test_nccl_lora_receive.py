@@ -88,6 +88,7 @@ def _lora_header(step=7, lora_name="debater_a", lora_int_id=1):
             {
                 "lora_name": lora_name,
                 "lora_int_id": lora_int_id,
+                "adapter_version": step,
                 "peft_config": {
                     "r": 4,
                     "lora_alpha": 8,
@@ -103,20 +104,24 @@ def test_lora_receive_commits_in_memory_adapter(monkeypatch):
     worker, adapter_manager = _worker_with_fake_lora_manager()
     tensors = {"model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(4, 8)}
 
-    monkeypatch.setattr(NCCLWeightUpdateWorker, "_receive_lora_object", lambda self, communicator: _lora_header())
+    monkeypatch.setattr(
+        NCCLWeightUpdateWorker,
+        "_receive_lora_object",
+        lambda self, communicator: _lora_header(lora_int_id=8),
+    )
     monkeypatch.setattr(
         NCCLWeightUpdateWorker, "_receive_lora_chunk_to_host", lambda self, communicator, chunk_idx: dict(tensors)
     )
 
     worker.receive_lora_update(
         7,
-        {"step": 7, "adapters": [{"lora_name": "debater_a", "lora_int_id": 1}]},
+        {"step": 7, "adapters": [{"lora_name": "debater_a", "lora_int_id": 8, "adapter_version": 7}]},
     )
 
-    assert adapter_manager.removed == [1]
-    assert adapter_manager.activated == [1]
-    assert adapter_manager.adapters[1].peft_rank == 4
-    assert adapter_manager.adapters[1].tensors == tensors
+    assert adapter_manager.removed == [8]
+    assert adapter_manager.activated == [8]
+    assert adapter_manager.adapters[8].peft_rank == 4
+    assert adapter_manager.adapters[8].tensors == tensors
 
 
 def test_lora_receive_rejects_header_mismatch_before_tensor_receive(monkeypatch):
@@ -134,5 +139,36 @@ def test_lora_receive_rejects_header_mismatch_before_tensor_receive(monkeypatch)
     with pytest.raises(RuntimeError, match="did not match expected"):
         worker.receive_lora_update(
             7,
-            {"step": 7, "adapters": [{"lora_name": "debater_a", "lora_int_id": 1}]},
+            {"step": 7, "adapters": [{"lora_name": "debater_a", "lora_int_id": 8, "adapter_version": 7}]},
         )
+
+
+def test_lora_receive_can_keep_distinct_adapter_versions(monkeypatch):
+    worker, adapter_manager = _worker_with_fake_lora_manager()
+    tensors = {"model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(4, 8)}
+
+    monkeypatch.setattr(
+        NCCLWeightUpdateWorker, "_receive_lora_chunk_to_host", lambda self, communicator, chunk_idx: dict(tensors)
+    )
+    monkeypatch.setattr(
+        NCCLWeightUpdateWorker,
+        "_receive_lora_object",
+        lambda self, communicator: _lora_header(step=7, lora_int_id=8),
+    )
+    worker.receive_lora_update(
+        7,
+        {"step": 7, "adapters": [{"lora_name": "debater_a", "lora_int_id": 8, "adapter_version": 7}]},
+    )
+
+    monkeypatch.setattr(
+        NCCLWeightUpdateWorker,
+        "_receive_lora_object",
+        lambda self, communicator: _lora_header(step=8, lora_int_id=9),
+    )
+    worker.receive_lora_update(
+        8,
+        {"step": 8, "adapters": [{"lora_name": "debater_a", "lora_int_id": 9, "adapter_version": 8}]},
+    )
+
+    assert set(adapter_manager.adapters) == {8, 9}
+    assert adapter_manager.activated == [8, 9]

@@ -114,7 +114,9 @@ def test_nccl_lora_broadcast_clears_ready_flag_after_barrier_and_wait(tmp_path, 
 
     monkeypatch.setattr(broadcast_nccl, "sync_wait_for_path", fake_wait)
     monkeypatch.setattr(
-        NCCLWeightBroadcast, "_build_lora_adapter_header", lambda self, model, idx: {"lora_name": "test"}
+        NCCLWeightBroadcast,
+        "_build_lora_adapter_header",
+        lambda self, model, idx, *, step: {"lora_name": "test", "lora_int_id": step + 1, "adapter_version": step},
     )
 
     def fake_send(step, adapter_header, state_dict):

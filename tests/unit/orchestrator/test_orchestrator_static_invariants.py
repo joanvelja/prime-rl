@@ -141,8 +141,8 @@ def test_eval_rollout_persistence_honors_dump_trajectory():
 
 
 def test_debate_step_metrics_import_binds_metrics_module():
-    # The call sites below go through this alias; if an upstream sync drops
-    # or rebinds it, the wiring is dead even when the calls survive.
+    # The call sites below go through this alias; if it is dropped or rebound,
+    # the wiring is dead even when the calls survive.
     imports = [
         alias
         for node in ast.walk(_tree())
@@ -154,8 +154,7 @@ def test_debate_step_metrics_import_binds_metrics_module():
 
 def test_train_path_reaches_debate_step_metrics():
     # main_loop → finalize_train_batch → (to_thread) write_debate_step_metrics.
-    # This call site was silently dropped once in an upstream sync (7f58452c8);
-    # this pin makes the next drop go red.
+    # Pins that this call site stays wired; fails red if it is dropped.
     assert _reaches("main_loop", "write_debate_step_metrics")
     calls = [
         node

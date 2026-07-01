@@ -11,12 +11,14 @@ from prime_rl.configs.shared import ClientConfig
 from prime_rl.orchestrator.member_generation import _fixed_client
 from prime_rl.utils.client import (
     ADMIN_TIMEOUT_S,
+    LORA_UPDATE_PAUSE_TIMEOUT_S,
     AdminGatherError,
     _is_retryable_lora_error,
     _pause_engines,
     init_nccl_broadcast,
     load_lora_adapter,
     setup_clients,
+    unload_lora_adapter,
     update_lora_adapter,
     update_weights,
 )
@@ -68,6 +70,48 @@ def test_load_lora_adapter_succeeds_on_first_attempt():
     )
 
 
+def test_update_weights_loads_filesystem_lora_under_versioned_name(tmp_path):
+    client = AsyncMock()
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    client.post.return_value = response
+
+    asyncio.run(update_weights([client], weight_dir=tmp_path / "step_7", lora_name="test-lora", step=7))
+
+    client.post.assert_called_once_with(
+        "/load_lora_adapter",
+        json={"lora_name": "test-lora__v00000007", "lora_path": (tmp_path / "step_7").as_posix()},
+        timeout=httpx.Timeout(connect=10.0, read=900.0, write=60.0, pool=10.0),
+    )
+
+
+def test_unload_lora_adapter_ignores_missing_adapter():
+    mock_client = AsyncMock()
+    mock_client.base_url = "http://worker:8000"
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.raise_for_status = MagicMock()
+    mock_client.post.return_value = mock_response
+
+    asyncio.run(unload_lora_adapter([mock_client], "test-lora"))
+
+    mock_client.post.assert_called_once_with("/unload_lora_adapter", json={"lora_name": "test-lora"})
+    mock_response.raise_for_status.assert_not_called()
+
+
+def test_unload_lora_adapter_logs_but_does_not_raise_for_non_missing_error():
+    mock_client = AsyncMock()
+    mock_client.base_url = "http://worker:8000"
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_response.raise_for_status.side_effect = make_status_error(500)
+    mock_client.post.return_value = mock_response
+
+    asyncio.run(unload_lora_adapter([mock_client], "test-lora"))
+
+    mock_response.raise_for_status.assert_called_once()
+
+
 def test_pause_engines_waits_and_clears_cache():
     posts: list[tuple[str, dict]] = []
     client = AsyncMock()
@@ -88,6 +132,28 @@ def test_pause_engines_waits_and_clears_cache():
     assert path == "/pause"
     assert kwargs["params"] == {"mode": "wait", "clear_cache": "true"}
     assert kwargs["timeout"].read == ADMIN_TIMEOUT_S
+
+
+def test_pause_engines_can_keep_inflight_without_clearing_cache():
+    posts: list[tuple[str, dict]] = []
+    client = AsyncMock()
+    client.base_url = "http://worker:8000"
+
+    async def _post(path, **kwargs):
+        posts.append((path, kwargs))
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    client.post.side_effect = _post
+
+    asyncio.run(_pause_engines([client], step=3, mode="keep", clear_cache=False, timeout_s=17.0))
+
+    assert len(posts) == 1
+    path, kwargs = posts[0]
+    assert path == "/pause"
+    assert kwargs["params"] == {"mode": "keep", "clear_cache": "false"}
+    assert kwargs["timeout"].read == 17.0
 
 
 def test_init_nccl_broadcast_requires_divisible_world_size():
@@ -315,8 +381,7 @@ def test_as_train_client_is_identity_for_chat_trained_pool():
 
 
 # --- regression tests for the per-peer admin-gather hardening (verify-client-hardening: SHIP) ---
-# These lock in the three behaviors proven live by fault-injection but previously
-# untested in the committed suite: multi-peer attribution, CancelledError-verbatim,
+# These lock in three behaviors: multi-peer attribution, CancelledError-verbatim,
 # and the raise_on_failure=False soft path. _gather_admin is the single chokepoint
 # every weight-sync fan-out routes through, so testing it covers all call sites.
 
@@ -437,8 +502,8 @@ def test_gather_admin_soft_path_logs_loud_and_returns_exception_in_band():
 
 def test_update_lora_adapter_blocking_post_fires_per_peer(tmp_path):
     # Site-level regression driving update_lora_adapter end-to-end with mock admin clients:
-    # the NCCL LoRA receive is now a single blocking POST /update_lora per peer (mirroring
-    # /update_weights), not an arm + status-poll. Assert the per-peer admin contract holds --
+    # the NCCL LoRA receive is a single blocking POST /update_lora per peer (mirroring
+    # /update_weights). Assert the per-peer admin contract holds --
     # pause, then one blocking /update_lora carrying the step + adapters payload, then resume --
     # and that NCCL_READY is touched before the blocking call so the trainer SEND is released.
     from prime_rl.utils.client import NCCL_READY_MARKER
@@ -471,9 +536,21 @@ def test_update_lora_adapter_blocking_post_fires_per_peer(tmp_path):
     assert len(update_posts) == 2, f"expected 2 update posts, got {len(update_posts)}: {posts}"
     for _, kw in update_posts:
         assert kw["json"]["step"] == 7
-        assert kw["json"]["adapters"] == [{"lora_name": "test-lora", "lora_int_id": 1}]
-    # Pause precedes resume; both fan out to every peer.
-    assert [path for path, _ in posts if path == "/pause"], "expected a /pause per peer"
+        assert kw["json"]["adapters"] == [
+            {
+                "base_lora_name": "test-lora",
+                "lora_name": "test-lora__v00000007",
+                "lora_int_id": 8,
+                "adapter_version": 7,
+            }
+        ]
+    # Pause precedes resume; both fan out to every peer. NCCL-LoRA freezes
+    # in-flight old-version rollouts instead of draining or aborting them.
+    pause_posts = [(path, kw) for path, kw in posts if path == "/pause"]
+    assert pause_posts, "expected a /pause per peer"
+    for _, kw in pause_posts:
+        assert kw["params"] == {"mode": "keep", "clear_cache": "false"}
+        assert kw["timeout"].read == LORA_UPDATE_PAUSE_TIMEOUT_S
     assert [path for path, _ in posts if path == "/resume"], "expected a /resume per peer"
 
 

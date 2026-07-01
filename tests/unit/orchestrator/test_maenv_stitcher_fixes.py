@@ -1,11 +1,11 @@
-"""Regression tests for three MAEnv findings on Phase 5 round-2.
+"""Regression tests for three MAEnv findings.
 
 F1. Consecutive user-role messages are folded at the MAEnv rollout
     boundary so the token-stitch tail is _is_valid_env_tail-accepted and
     the chat template sees alternating role boundaries.
 F2. DebateEnv.build_prompt derives per-utterance round_index from
     positional ordering in the transcript, not from slot_id arithmetic.
-    Sparse/semantic slot_ids no longer produce nonsensical labels.
+    Sparse/semantic slot_ids don't corrupt the round labels.
 F3. DebatePrompts._validate rejects per-turn variables in system and
     question templates at load time (they'd break the monotonic prefix
     invariant silently if rendered per slot).
@@ -319,8 +319,8 @@ def test_validate_rejects_phase_in_question():
 
 
 def test_validate_rejects_is_first_round_in_system():
-    # Bypass case gatekeeper flagged: is_first_round is in build_context
-    # (prompts.py:245) but was missing from the original _PER_TURN_VARS list.
+    # is_first_round is a per-turn variable (build_context, prompts.py:245),
+    # so it must be in _PER_TURN_VARS and rejected in system templates.
     pack = {
         "version": 2,
         "system": {
@@ -340,8 +340,8 @@ def test_validate_rejects_is_first_round_in_system():
 
 
 def test_validate_rejects_statement_tag_bypass():
-    # {% if round_index > 0 %}X{% endif %} evades the old regex which only
-    # matched {{ ... }} expression tags. AST-based check catches it.
+    # {% if round_index > 0 %}X{% endif %} hides the per-turn var in a
+    # statement tag, not a {{ ... }} expression — the AST-based check catches it.
     pack = {
         "version": 2,
         "system": {
@@ -361,7 +361,7 @@ def test_validate_rejects_statement_tag_bypass():
 
 
 def test_validate_rejects_index_access_bypass():
-    # {{ data[round_index] }} — indirect index access evaded old regex.
+    # {{ data[round_index] }} — per-turn var used as an index, not a bare reference.
     pack = {
         "version": 2,
         "system": {
@@ -381,7 +381,7 @@ def test_validate_rejects_index_access_bypass():
 
 
 def test_validate_rejects_set_directive_bypass():
-    # {% set r = round_index %} — evaded regex, AST catches it.
+    # {% set r = round_index %} — per-turn var bound in a set directive, caught by the AST check.
     pack = {
         "version": 2,
         "system": {

@@ -425,7 +425,7 @@ def test_dispatcher_eval_routes_trained_members_through_train_typed_client() -> 
         await _schedule_eval_rollout(dispatcher, "ma-eval", [dispatch_id])
 
         assert inner.kwargs is not None
-        # The pinned eval client was re-typed to the train path's renderer client
+        # The rollout client is the train path's renderer client, not the env's pinned eval client.
         rollout_client = inner.kwargs["client"]
         assert rollout_client.client_type == "renderer"
         assert rollout_client.api_base_url == "http://student/v1"

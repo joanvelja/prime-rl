@@ -87,6 +87,7 @@ from prime_rl.utils.async_utils import safe_cancel
 from prime_rl.utils.client import init_nccl_broadcast, setup_inference_pool
 from prime_rl.utils.heartbeat import Heartbeat
 from prime_rl.utils.logger import format_time, get_logger, setup_logger
+from prime_rl.utils.lora import versioned_lora_name
 from prime_rl.utils.monitor import setup_monitor
 from prime_rl.utils.pathing import get_log_dir, get_rollout_dir, get_step_path
 from prime_rl.utils.usage_reporter import UsageReporter
@@ -382,6 +383,7 @@ class Orchestrator:
         self.lora_name = config.student.model.lora.name if config.student.model.lora else None
 
         if self.resume_step is not None and self.ckpt_manager is not None:
+            resume_broadcast_wait_started = time.time() if config.weight_broadcast.type == "nccl" else None
             self.ckpt_manager.load(self.progress, step=self.resume_step, rae_state=self.rae_state)
             get_logger().info(f"Resuming orchestrator from checkpoint step {self.resume_step}")
             if self.rae_state is not None and self.rae_state.baselines:
@@ -393,10 +395,16 @@ class Orchestrator:
                         f"(state: {sorted(state_envs)}, configured: {sorted(configured_envs)}). "
                         "Renaming an env in the TOML orphans every baseline — all keys start cold."
                     )
-            check_exists = config.weight_broadcast.type != "nccl"
+            check_exists = True
             wait_timeout = config.ckpt.wait_for_weights_timeout if config.ckpt else None
+            if config.weight_broadcast.type == "nccl" and wait_timeout is None:
+                wait_timeout = config.weight_broadcast.timeout
             weights_path = get_weight_dir(
-                config.output_dir, self.progress.step, check_exists=check_exists, wait_timeout=wait_timeout
+                config.output_dir,
+                self.progress.step,
+                check_exists=check_exists,
+                wait_timeout=wait_timeout,
+                min_stable_mtime=resume_broadcast_wait_started,
             )
             await self.student_inference.update_weights(
                 weights_path,
@@ -405,8 +413,9 @@ class Orchestrator:
                 nccl_lora=self.lora_name is not None and config.weight_broadcast.type == "nccl",
             )
             if self.lora_name is not None:
-                self.student_inference.update_model_name(self.lora_name)
-                self.policy.model_name = self.lora_name
+                live_lora_name = versioned_lora_name(self.lora_name, self.progress.step)
+                self.student_inference.update_model_name(live_lora_name)
+                self.policy.model_name = live_lora_name
             self.policy.version = self.progress.step
         else:
             get_logger().info("Training from scratch")
@@ -627,8 +636,8 @@ class Orchestrator:
                     await self.finalize_train_batch(train_batch)
             finally:
                 # Free the just-processed rollout/batch and return heap pages to
-                # the OS once per shipped batch — the per-step arena reclaim the
-                # orchestrator lacked (shutdown-only trim let RSS ratchet to OOM).
+                # the OS once per shipped batch — without per-batch reclaim, RSS
+                # ratchets to OOM.
                 del train_batch, eval_batch, rollout
                 if should_release_memory:
                     await asyncio.to_thread(trim_process_memory)
@@ -1074,8 +1083,8 @@ class Orchestrator:
             step=batch.step,
             monitor=self.monitor,
             # Constant prefix (not env-namespaced) so eval debate metrics mirror the
-            # train panel's `debate/*` (orchestrator.py:733) — lets train-vs-eval
-            # overlay in one panel and stay comparable across runs regardless of env name.
+            # train panel's `debate/*` — lets train-vs-eval overlay in one panel and
+            # stay comparable across runs regardless of env name.
             prefix="eval/debate",
         )
 

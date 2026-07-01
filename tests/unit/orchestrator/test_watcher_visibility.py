@@ -85,3 +85,65 @@ def test_watcher_gauges_mark_unhealthy_after_error():
     assert gauges["watcher/is_updating"] == 0.0
     assert gauges["watcher/current_update_step"] == 0.0
     assert gauges["watcher/healthy"] == 0.0
+
+
+def test_watcher_retires_only_inactive_nccl_lora_versions():
+    class FakeInference:
+        def __init__(self):
+            self.removed = []
+            self.unloaded = []
+
+        async def remove_lora_adapter(self, lora_name: str, lora_int_id: int) -> None:
+            self.removed.append((lora_name, lora_int_id))
+
+        async def unload_lora_adapter(self, lora_name: str) -> None:
+            self.unloaded.append(lora_name)
+
+    class FakeObserver:
+        def active_policy_versions(self) -> set[int]:
+            return {2}
+
+    watcher = object.__new__(WeightWatcher)
+    watcher.lora_name = "r8-1e-4"
+    watcher.config = SimpleNamespace(weight_broadcast=SimpleNamespace(type="nccl"))
+    watcher.policy = SimpleNamespace(version=3)
+    watcher.observers = [FakeObserver()]
+    watcher.inference = FakeInference()
+    watcher.live_lora_steps = {1, 2, 3}
+
+    asyncio.run(watcher.retire_unused_lora_versions())
+
+    assert watcher.inference.removed == [("r8-1e-4__v00000001", 2)]
+    assert watcher.inference.unloaded == []
+    assert watcher.live_lora_steps == {2, 3}
+
+
+def test_watcher_retires_only_inactive_filesystem_lora_versions():
+    class FakeInference:
+        def __init__(self):
+            self.removed = []
+            self.unloaded = []
+
+        async def remove_lora_adapter(self, lora_name: str, lora_int_id: int) -> None:
+            self.removed.append((lora_name, lora_int_id))
+
+        async def unload_lora_adapter(self, lora_name: str) -> None:
+            self.unloaded.append(lora_name)
+
+    class FakeObserver:
+        def active_policy_versions(self) -> set[int]:
+            return {2}
+
+    watcher = object.__new__(WeightWatcher)
+    watcher.lora_name = "r8-1e-4"
+    watcher.config = SimpleNamespace(weight_broadcast=SimpleNamespace(type="filesystem"))
+    watcher.policy = SimpleNamespace(version=3)
+    watcher.observers = [FakeObserver()]
+    watcher.inference = FakeInference()
+    watcher.live_lora_steps = {1, 2, 3}
+
+    asyncio.run(watcher.retire_unused_lora_versions())
+
+    assert watcher.inference.removed == []
+    assert watcher.inference.unloaded == ["r8-1e-4__v00000001"]
+    assert watcher.live_lora_steps == {2, 3}

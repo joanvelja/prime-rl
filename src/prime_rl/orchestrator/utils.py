@@ -185,7 +185,13 @@ async def compute_teacher_logprobs(
     return await asyncio.gather(*[_compute_single(client, sample) for client, sample in zip(cycle(clients), samples)])
 
 
-def get_weight_dir(output_dir: Path, step: int, check_exists: bool = True, wait_timeout: int | None = None) -> Path:
+def get_weight_dir(
+    output_dir: Path,
+    step: int,
+    check_exists: bool = True,
+    wait_timeout: int | None = None,
+    min_stable_mtime: float | None = None,
+) -> Path:
     """Get the weight directory for a given checkpoint step.
 
     Args:
@@ -196,18 +202,29 @@ def get_weight_dir(output_dir: Path, step: int, check_exists: bool = True, wait_
             (useful for NCCL mode where weights are broadcasted, not stored on disk).
         wait_timeout: Maximum time in seconds to wait for a stable directory to appear.
             If None, no waiting is performed.
+        min_stable_mtime: If set, ignore STABLE markers older than this Unix
+            timestamp. This is used by NCCL resume bootstrap to avoid treating
+            stale broadcast markers from a previous attempt as a fresh trainer
+            notification.
     """
     ckpt_weight_dir = get_step_path(get_ckpt_dir(output_dir), step) / "weight"
     broadcast_weight_dir = get_step_path(get_broadcast_dir(output_dir), step)
 
+    def is_fresh_stable(stable_file: Path) -> bool:
+        if not stable_file.exists():
+            return False
+        if min_stable_mtime is None:
+            return True
+        return stable_file.stat().st_mtime >= min_stable_mtime
+
     def find_stable_dir() -> Path | None:
         # For checkpoint weights, check STABLE file in parent directory (checkpoints/step_{step}/STABLE)
         ckpt_step_dir = get_step_path(get_ckpt_dir(output_dir), step)
-        if (ckpt_step_dir / "STABLE").exists() and ckpt_weight_dir.exists():
+        if is_fresh_stable(ckpt_step_dir / "STABLE") and ckpt_weight_dir.exists():
             return ckpt_weight_dir
 
         # For broadcast weights, check STABLE file in the broadcast directory itself
-        if (broadcast_weight_dir / "STABLE").exists() and broadcast_weight_dir.exists():
+        if is_fresh_stable(broadcast_weight_dir / "STABLE") and broadcast_weight_dir.exists():
             return broadcast_weight_dir
 
         return None
