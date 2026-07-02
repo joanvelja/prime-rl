@@ -1,0 +1,82 @@
+# Parity probe — gemma-4-31B-it — FULL-FT. Dense gemma: isolates MoE-vs-architecture
+# vs the labeled MoE gemma-26b FORWARD-DIVERGENCE. optim_cpu_offload to clear the 93 GB/GPU
+# edge (offload optimizer states to Grace host RAM). sdpa + language_model_only (VL model).
+output_dir = "outputs/parity/gemma4-31b-ft"
+clean_output_dir = true
+max_steps = 12
+seq_len = 2048
+
+[slurm]
+job_name = "parity-gemma4-31b-ft"
+partition = "workq"
+account = "brics.a6r"
+
+[deployment]
+type = "multi_node"
+gpus_per_node = 4
+num_train_nodes = 1
+num_infer_nodes = 1
+
+[model]
+name = "google/gemma-4-31B-it"
+
+[trainer.model]
+impl = "custom"
+attn = "sdpa"
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+optim_cpu_offload = true
+
+[trainer.model.ac]
+freq = 1
+
+[trainer.optim]
+lr = 1e-6
+weight_decay = 0.01
+max_norm = 1.0
+type = "adamw"
+
+[trainer.loss]
+type = "default"
+dppo_mask_low = 0.2
+dppo_mask_high = 0.2
+adv_tau = 1.0
+teacher_tau = 0.0
+kl_tau = 0.001
+
+[trainer.scheduler]
+type = "constant"
+
+[orchestrator]
+batch_size = 24
+group_size = 2
+oversampling_factor = 1.0
+pool_size = 12
+
+[orchestrator.renderer]
+name = "gemma4"
+
+[orchestrator.train.sampling]
+temperature = 1.0
+max_completion_tokens = 256
+
+[[orchestrator.train.env]]
+id = "primeintellect/alphabet-sort"
+name = "alphabet-sort"
+args = { min_turns = 3, max_turns = 5, power_per_turn = false }
+
+[inference]
+gpu_memory_utilization = 0.75
+language_model_only = true
+
+[inference.model]
+max_model_len = 2048
+
+[inference.parallel]
+tp = 4
+dp = 1
+
+[trainer.experimental.token_export]
+
+[weight_broadcast]
+type = "nccl"
